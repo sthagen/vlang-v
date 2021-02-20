@@ -960,8 +960,19 @@ pub fn (mut c Checker) infix_expr(mut infix_expr ast.InfixExpr) table.Type {
 		c.error('string types only have the following operators defined: `==`, `!=`, `<`, `>`, `<=`, `>=`, and `+`',
 			infix_expr.pos)
 	} else if left.kind == .enum_ && right.kind == .enum_ && infix_expr.op !in [.ne, .eq] {
-		c.error('only `==` and `!=` are defined on `enum`, use an explicit cast to `int` if needed',
-			infix_expr.pos)
+		left_enum := left.info as table.Enum
+		right_enum := right.info as table.Enum
+		if left_enum.is_flag && right_enum.is_flag {
+			// `[flag]` tagged enums are a special case that allow also `|` and `&` binary operators
+			if infix_expr.op !in [.pipe, .amp] {
+				c.error('only `==`, `!=`, `|` and `&` are defined on `[flag]` tagged `enum`, use an explicit cast to `int` if needed',
+					infix_expr.pos)
+			}
+		} else {
+			// Regular enums
+			c.error('only `==` and `!=` are defined on `enum`, use an explicit cast to `int` if needed',
+				infix_expr.pos)
+		}
 	}
 	// sum types can't have any infix operation except of "is", is is checked before and doesn't reach this
 	if c.table.type_kind(left_type) == .sum_type {
@@ -5149,13 +5160,13 @@ pub fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) table.Type {
 	return right_type
 }
 
-fn (mut c Checker) check_index(typ_sym &table.TypeSymbol, index ast.Expr, index_type table.Type, pos token.Position) {
+fn (mut c Checker) check_index(typ_sym &table.TypeSymbol, index ast.Expr, index_type table.Type, pos token.Position, range_index bool) {
 	index_type_sym := c.table.get_type_symbol(index_type)
 	// println('index expr left=$typ_sym.name $node.pos.line_nr')
 	// if typ_sym.kind == .array && (!(table.type_idx(index_type) in table.number_type_idxs) &&
 	// index_type_sym.kind != .enum_) {
 	if typ_sym.kind in [.array, .array_fixed, .string, .ustring] {
-		if !(index_type.is_number() || index_type_sym.kind == .enum_) {
+		if !(index_type.is_int() || index_type_sym.kind == .enum_) {
 			type_str := if typ_sym.kind in [.string, .ustring] {
 				'non-integer string index `$index_type_sym.name`'
 			} else {
@@ -5164,8 +5175,14 @@ fn (mut c Checker) check_index(typ_sym &table.TypeSymbol, index ast.Expr, index_
 			c.error('$type_str', pos)
 		}
 		if index is ast.IntegerLiteral {
-			if index.val.starts_with('-') {
-				c.error('invalid index `$index.val` (index must be non-negative)', index.pos)
+			if index.val[0] == `-` {
+				c.error('negative index `$index.val`', index.pos)
+			} else if typ_sym.kind == .array_fixed {
+				i := index.val.int()
+				info := typ_sym.info as table.ArrayFixed
+				if (!range_index && i >= info.size) || (range_index && i > info.size) {
+					c.error('index out of range (index: $i, len: $info.size)', index.pos)
+				}
 			}
 		}
 		if index_type.has_flag(.optional) {
@@ -5220,11 +5237,11 @@ pub fn (mut c Checker) index_expr(mut node ast.IndexExpr) table.Type {
 	if mut node.index is ast.RangeExpr { // [1..2]
 		if node.index.has_low {
 			index_type := c.expr(node.index.low)
-			c.check_index(typ_sym, node.index.low, index_type, node.pos)
+			c.check_index(typ_sym, node.index.low, index_type, node.pos, true)
 		}
 		if node.index.has_high {
 			index_type := c.expr(node.index.high)
-			c.check_index(typ_sym, node.index.high, index_type, node.pos)
+			c.check_index(typ_sym, node.index.high, index_type, node.pos, true)
 		}
 		// array[1..2] => array
 		// fixed_array[1..2] => array
@@ -5244,7 +5261,7 @@ pub fn (mut c Checker) index_expr(mut node ast.IndexExpr) table.Type {
 				c.error('invalid key: $err', node.pos)
 			}
 		} else {
-			c.check_index(typ_sym, node.index, index_type, node.pos)
+			c.check_index(typ_sym, node.index, index_type, node.pos, false)
 		}
 		value_type := c.table.value_type(typ)
 		if value_type != table.void_type {
