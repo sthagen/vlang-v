@@ -2447,7 +2447,7 @@ fn (mut g Gen) map_fn_ptrs(key_typ table.TypeSymbol) (string, string, string, st
 			key_eq_fn = '&map_eq_int_2'
 			clone_fn = '&map_clone_int_2'
 		}
-		.int, .u32, .rune, .f32 {
+		.int, .u32, .rune, .f32, .enum_ {
 			hash_fn = '&map_hash_int_4'
 			key_eq_fn = '&map_eq_int_4'
 			clone_fn = '&map_clone_int_4'
@@ -3501,7 +3501,8 @@ fn (mut g Gen) match_expr(node ast.MatchExpr) {
 		g.inside_ternary++
 		// g.write('/* EM ret type=${g.typ(node.return_type)}		expected_type=${g.typ(node.expected_type)}  */')
 	}
-	if node.cond is ast.Ident || node.cond is ast.SelectExpr || node.cond is ast.IndexExpr {
+	if node.cond is ast.Ident || node.cond is ast.SelectorExpr || node.cond is ast.IntegerLiteral
+		|| node.cond is ast.StringLiteral || node.cond is ast.FloatLiteral {
 		pos := g.out.len
 		g.expr(node.cond)
 		cond_var = g.out.after(pos)

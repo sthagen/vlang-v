@@ -1562,6 +1562,15 @@ pub fn (mut c Checker) call_method(mut call_expr ast.CallExpr) table.Type {
 			c.warn('method `${left_type_sym.name}.$method_name` must be called from an `unsafe` block',
 				call_expr.pos)
 		}
+		if !c.cur_fn.is_deprecated && method.is_deprecated {
+			mut deprecation_message := 'method `${left_type_sym.name}.$method.name` has been deprecated'
+			for attr in method.attrs {
+				if attr.name == 'deprecated' && attr.arg != '' {
+					deprecation_message += '; $attr.arg'
+				}
+			}
+			c.warn(deprecation_message, call_expr.pos)
+		}
 		// TODO: typ optimize.. this node can get processed more than once
 		if call_expr.expected_arg_types.len == 0 {
 			for i in 1 .. method.params.len {
@@ -1783,8 +1792,14 @@ pub fn (mut c Checker) call_fn(mut call_expr ast.CallExpr) table.Type {
 		c.error('function `$f.name` is private, so you can not import it in module `$c.mod`',
 			call_expr.pos)
 	}
-	if f.is_deprecated {
-		c.warn('function `$f.name` has been deprecated', call_expr.pos)
+	if !c.cur_fn.is_deprecated && f.is_deprecated {
+		mut deprecation_message := 'function `$f.name` has been deprecated'
+		for d in f.attrs {
+			if d.name == 'deprecated' && d.arg != '' {
+				deprecation_message += '; $d.arg'
+			}
+		}
+		c.warn(deprecation_message, call_expr.pos)
 	}
 	if f.is_unsafe && !c.inside_unsafe
 		&& (f.language != .c || (f.name[2] in [`m`, `s`] && f.mod == 'builtin')) {
@@ -2993,8 +3008,7 @@ pub fn (mut c Checker) array_init(mut array_init ast.ArrayInit) table.Type {
 						fixed_size = cint
 					}
 				} else {
-					c.error('non existent integer const $init_expr.name while initializing the size of a static array',
-						array_init.pos)
+					c.error('non-constant array bound `$init_expr.name`', init_expr.pos)
 				}
 			}
 			else {
