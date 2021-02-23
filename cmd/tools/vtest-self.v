@@ -28,6 +28,7 @@ const (
 		'vlib/v/tests/ptr_arithmetic_test.v',
 		'vlib/v/tests/unsafe_test.v',
 		'vlib/x/websocket/websocket_test.v',
+		'vlib/v/tests/match_in_map_init_test.v',
 	]
 	skip_with_fsanitize_undefined = [
 		'vlib/encoding/csv/reader_test.v',
@@ -95,6 +96,7 @@ const (
 		'vlib/v/tests/generic_chan_test.v',
 		'vlib/v/tests/generics_method_test.v',
 		'vlib/v/tests/generics_test.v',
+		'vlib/v/tests/go_array_wait_test.v',
 		'vlib/v/tests/go_call_generic_fn_test.v',
 		'vlib/v/tests/go_wait_2_test.v',
 		'vlib/v/tests/interface_edge_cases/assign_to_interface_field_test.v',
@@ -315,6 +317,7 @@ const (
 		'vlib/v/checker/tests/lock_nonshared.vv',
 		'vlib/v/checker/tests/shared_type_mismatch.vv',
 		'vlib/v/tests/match_with_complex_exprs_in_branches_test.v',
+		'vlib/v/tests/match_in_map_init_test.v',
 	]
 	skip_test_files               = []string{}
 	skip_on_musl                  = [
