@@ -1091,74 +1091,21 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 			prev_branch_parent_pos := g.branch_parent_pos
 			g.branch_parent_pos = node.pos.pos
 			g.write_v_source_line_info(node.pos)
-			g.is_vlines_enabled = false
-			if node.label.len > 0 {
-				g.writeln('$node.label:')
-			}
-			g.write('for (')
-			if !node.has_init {
-				g.write('; ')
-			} else {
-				g.stmt(node.init)
-				// Remove excess return and add space
-				if g.out.last_n(1) == '\n' {
-					g.out.go_back(1)
-					g.empty_line = false
-					g.write(' ')
-				}
-			}
-			if node.has_cond {
-				g.expr(node.cond)
-			}
-			g.write('; ')
-			if node.has_inc {
-				g.stmt(node.inc)
-			}
-			g.writeln(') {')
-			g.is_vlines_enabled = true
-			g.stmts(node.stmts)
-			if node.label.len > 0 {
-				g.writeln('${node.label}__continue: {}')
-			}
-			g.writeln('}')
-			if node.label.len > 0 {
-				g.writeln('${node.label}__break: {}')
-			}
+			g.for_c_stmt(node)
 			g.branch_parent_pos = prev_branch_parent_pos
 		}
 		ast.ForInStmt {
 			prev_branch_parent_pos := g.branch_parent_pos
 			g.branch_parent_pos = node.pos.pos
 			g.write_v_source_line_info(node.pos)
-			g.for_in(node)
+			g.for_in_stmt(node)
 			g.branch_parent_pos = prev_branch_parent_pos
 		}
 		ast.ForStmt {
 			prev_branch_parent_pos := g.branch_parent_pos
 			g.branch_parent_pos = node.pos.pos
 			g.write_v_source_line_info(node.pos)
-			g.is_vlines_enabled = false
-			if node.label.len > 0 {
-				g.writeln('$node.label:')
-			}
-			g.writeln('for (;;) {')
-			if !node.is_inf {
-				g.indent++
-				g.stmt_path_pos << g.out.len
-				g.write('if (!(')
-				g.expr(node.cond)
-				g.writeln(')) break;')
-				g.indent--
-			}
-			g.is_vlines_enabled = true
-			g.stmts(node.stmts)
-			if node.label.len > 0 {
-				g.writeln('\t${node.label}__continue: {}')
-			}
-			g.writeln('}')
-			if node.label.len > 0 {
-				g.writeln('${node.label}__break: {}')
-			}
+			g.for_stmt(node)
 			g.branch_parent_pos = prev_branch_parent_pos
 		}
 		ast.GlobalDecl {
@@ -1286,7 +1233,108 @@ fn (mut g Gen) write_defer_stmts() {
 	}
 }
 
-fn (mut g Gen) for_in(it ast.ForInStmt) {
+fn (mut g Gen) for_c_stmt(node ast.ForCStmt) {
+	if node.is_multi {
+		g.is_vlines_enabled = false
+		if node.label.len > 0 {
+			g.writeln('$node.label:')
+		}
+		g.writeln('{')
+		g.indent++
+		if node.has_init {
+			g.stmt(node.init)
+		}
+		g.writeln('bool _is_first = true;')
+		g.writeln('while (true) {')
+		g.writeln('\tif (_is_first) {')
+		g.writeln('\t\t_is_first = false;')
+		g.writeln('\t} else {')
+		if node.has_inc {
+			g.indent++
+			g.stmt(node.inc)
+			g.writeln(';')
+			g.indent--
+		}
+		g.writeln('}')
+		if node.has_cond {
+			g.write('if (!(')
+			g.expr(node.cond)
+			g.writeln(')) break;')
+		}
+		g.is_vlines_enabled = true
+		g.stmts(node.stmts)
+		if node.label.len > 0 {
+			g.writeln('${node.label}__continue: {}')
+		}
+		g.writeln('}')
+		g.indent--
+		g.writeln('}')
+		if node.label.len > 0 {
+			g.writeln('${node.label}__break: {}')
+		}
+	} else {
+		g.is_vlines_enabled = false
+		if node.label.len > 0 {
+			g.writeln('$node.label:')
+		}
+		g.write('for (')
+		if !node.has_init {
+			g.write('; ')
+		} else {
+			g.stmt(node.init)
+			// Remove excess return and add space
+			if g.out.last_n(1) == '\n' {
+				g.out.go_back(1)
+				g.empty_line = false
+				g.write(' ')
+			}
+		}
+		if node.has_cond {
+			g.expr(node.cond)
+		}
+		g.write('; ')
+		if node.has_inc {
+			g.stmt(node.inc)
+		}
+		g.writeln(') {')
+		g.is_vlines_enabled = true
+		g.stmts(node.stmts)
+		if node.label.len > 0 {
+			g.writeln('${node.label}__continue: {}')
+		}
+		g.writeln('}')
+		if node.label.len > 0 {
+			g.writeln('${node.label}__break: {}')
+		}
+	}
+}
+
+fn (mut g Gen) for_stmt(node ast.ForStmt) {
+	g.is_vlines_enabled = false
+	if node.label.len > 0 {
+		g.writeln('$node.label:')
+	}
+	g.writeln('for (;;) {')
+	if !node.is_inf {
+		g.indent++
+		g.stmt_path_pos << g.out.len
+		g.write('if (!(')
+		g.expr(node.cond)
+		g.writeln(')) break;')
+		g.indent--
+	}
+	g.is_vlines_enabled = true
+	g.stmts(node.stmts)
+	if node.label.len > 0 {
+		g.writeln('\t${node.label}__continue: {}')
+	}
+	g.writeln('}')
+	if node.label.len > 0 {
+		g.writeln('${node.label}__break: {}')
+	}
+}
+
+fn (mut g Gen) for_in_stmt(it ast.ForInStmt) {
 	if it.label.len > 0 {
 		g.writeln('\t$it.label: {}')
 	}
@@ -2191,7 +2239,7 @@ fn (mut g Gen) gen_assign_stmt(assign_stmt ast.AssignStmt) {
 		}
 		g.right_is_opt = false
 		g.is_assign_rhs = false
-		if g.inside_ternary == 0 && !assign_stmt.is_simple {
+		if g.inside_ternary == 0 && (assign_stmt.left.len > 1 || !assign_stmt.is_simple) {
 			g.writeln(';')
 		}
 	}
@@ -4069,6 +4117,30 @@ fn (mut g Gen) concat_expr(node ast.ConcatExpr) {
 	}
 }
 
+fn (mut g Gen) need_tmp_var_in_if(node ast.IfExpr) bool {
+	if node.is_expr && g.inside_ternary == 0 {
+		if g.is_autofree {
+			return true
+		}
+		for branch in node.branches {
+			if branch.stmts.len == 1 {
+				if branch.stmts[0] is ast.ExprStmt {
+					stmt := branch.stmts[0] as ast.ExprStmt
+					if stmt.expr is ast.CallExpr {
+						if stmt.expr.is_method {
+							left_sym := g.table.get_type_symbol(stmt.expr.receiver_type)
+							if left_sym.kind in [.array, .array_fixed, .map] {
+								return true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
 fn (mut g Gen) if_expr(node ast.IfExpr) {
 	if node.is_comptime {
 		g.comp_if(node)
@@ -4080,15 +4152,7 @@ fn (mut g Gen) if_expr(node ast.IfExpr) {
 	// easier to use a temp var, than do C tricks with commas, introduce special vars etc
 	// (as it used to be done).
 	// Always use this in -autofree, since ?: can have tmp expressions that have to be freed.
-	first_branch := node.branches[0]
-	needs_tmp_var := node.is_expr && (g.is_autofree || (g.pref.experimental
-		&& (first_branch.stmts.len > 1 || (first_branch.stmts[0] is ast.ExprStmt
-		&& (first_branch.stmts[0] as ast.ExprStmt).expr is ast.IfExpr))))
-	/*
-	needs_tmp_var := node.is_expr &&
-		(g.autofree || g.pref.experimental) &&
-		(node.branches[0].stmts.len > 1 || node.branches[0].stmts[0] is ast.IfExpr)
-	*/
+	needs_tmp_var := g.need_tmp_var_in_if(node)
 	tmp := if needs_tmp_var { g.new_tmp_var() } else { '' }
 	mut cur_line := ''
 	if needs_tmp_var {
