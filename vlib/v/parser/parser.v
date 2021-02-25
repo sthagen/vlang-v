@@ -779,7 +779,7 @@ pub fn (mut p Parser) stmt(is_top_level bool) ast.Stmt {
 			}
 			return ast.GoStmt{
 				call_expr: call_expr
-				pos: spos.extend(p.tok.position())
+				pos: spos.extend(p.prev_tok.position())
 			}
 		}
 		.key_goto {
@@ -2204,7 +2204,8 @@ fn (mut p Parser) enum_decl() ast.EnumDecl {
 		pubfn := if p.mod == 'main' { 'fn' } else { 'pub fn' }
 		p.scanner.codegen('
 //
-[inline] $pubfn (    e &$enum_name) has(flag $enum_name) bool { return      (int(*e) &  (int(flag))) != 0 }
+[inline] $pubfn (    e &$enum_name) is_empty() bool           { return  int(*e) == 0 }
+[inline] $pubfn (    e &$enum_name) has(flag $enum_name) bool { return  (int(*e) &  (int(flag))) != 0 }
 [inline] $pubfn (mut e  $enum_name) set(flag $enum_name)      { unsafe{ *e = ${enum_name}(int(*e) |  (int(flag))) } }
 [inline] $pubfn (mut e  $enum_name) clear(flag $enum_name)    { unsafe{ *e = ${enum_name}(int(*e) & ~(int(flag))) } }
 [inline] $pubfn (mut e  $enum_name) toggle(flag $enum_name)   { unsafe{ *e = ${enum_name}(int(*e) ^  (int(flag))) } }
