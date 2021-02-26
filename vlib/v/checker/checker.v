@@ -3109,7 +3109,11 @@ fn (mut c Checker) stmt(node ast.Stmt) {
 			c.branch_stmt(node)
 		}
 		ast.CompFor {
-			// node.typ = c.expr(node.expr)
+			typ := c.unwrap_generic(node.typ)
+			sym := c.table.get_type_symbol(typ)
+			if sym.kind == .placeholder || typ.has_flag(.generic) {
+				c.error('unknown type `$sym.name`', node.typ_pos)
+			}
 			c.stmts(node.stmts)
 		}
 		ast.ConstDecl {
@@ -3802,6 +3806,9 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) table.Type {
 	node.expr_type = c.expr(node.expr) // type to be casted
 	from_type_sym := c.table.get_type_symbol(node.expr_type)
 	to_type_sym := c.table.get_type_symbol(node.typ) // type to be used as cast
+	if to_type_sym.kind == .placeholder && to_type_sym.language != .c {
+		c.error('unknown type `$to_type_sym.name`', node.pos)
+	}
 	expr_is_ptr := node.expr_type.is_ptr() || node.expr_type.idx() in table.pointer_type_idxs
 	if expr_is_ptr && to_type_sym.kind == .string && !node.in_prexpr {
 		if node.has_arg {
@@ -4798,7 +4805,11 @@ pub fn (mut c Checker) if_expr(mut node ast.IfExpr) table.Type {
 			if branch.cond is ast.InfixExpr {
 				if branch.cond.op == .key_is {
 					left := branch.cond.left
-					got_type := (branch.cond.right as ast.Type).typ
+					got_type := c.unwrap_generic((branch.cond.right as ast.Type).typ)
+					sym := c.table.get_type_symbol(got_type)
+					if sym.kind == .placeholder || got_type.has_flag(.generic) {
+						c.error('unknown type `$sym.name`', branch.cond.right.position())
+					}
 					if left is ast.SelectorExpr {
 						comptime_field_name = left.expr.str()
 						c.comptime_fields_type[comptime_field_name] = got_type
