@@ -78,6 +78,10 @@ mut:
 	fn_scope                         &ast.Scope = voidptr(0)
 	used_fns                         map[string]bool // used_fns['println'] == true
 	main_fn_decl_node                ast.FnDecl
+	// TODO: these are here temporarily and used for deprecations; remove soon
+	using_new_err_struct bool
+	inside_selector_expr bool
+	inside_println_arg   bool
 }
 
 pub fn new_checker(table &table.Table, pref &pref.Preferences) Checker {
@@ -1333,9 +1337,13 @@ pub fn (mut c Checker) call_method(mut call_expr ast.CallExpr) table.Type {
 				elem_sym := c.table.get_type_symbol(elem_typ)
 				if elem_sym.kind == .thread {
 					if call_expr.args.len != 0 {
-						c.error('wait() does not have any arguments', call_expr.args[0].pos)
+						c.error('`.wait()` does not have any arguments', call_expr.args[0].pos)
 					}
 					thread_ret_type := elem_sym.thread_info().return_type
+					if thread_ret_type.has_flag(.optional) {
+						c.error('`.wait()` cannot be called for an array when thread functions return optionals. Iterate over the arrays elements instead and handle each returned optional with `or`.',
+							call_expr.pos)
+					}
 					call_expr.return_type = c.table.find_or_register_array(thread_ret_type)
 				} else {
 					c.error('`$left_type_sym.name` has no method `wait()` (only thread handles and arrays of them have)',
@@ -1428,6 +1436,7 @@ pub fn (mut c Checker) call_method(mut call_expr ast.CallExpr) table.Type {
 		if call_expr.args.len > 0 {
 			c.error('wait() does not have any arguments', call_expr.args[0].pos)
 		}
+		call_expr.return_type = info.return_type
 		return info.return_type
 	}
 	mut method := table.Fn{}
@@ -1887,13 +1896,18 @@ pub fn (mut c Checker) call_fn(mut call_expr ast.CallExpr) table.Type {
 			unexpected_arguments_pos)
 		return f.return_type
 	}
-	// println / eprintln can print anything
-	if fn_name in ['println', 'print', 'eprintln', 'eprint'] && call_expr.args.len > 0 {
+	// println / eprintln / panic can print anything
+	if fn_name in ['println', 'print', 'eprintln', 'eprint', 'panic'] && call_expr.args.len > 0 {
+		c.inside_println_arg = true
 		c.expected_type = table.string_type
 		call_expr.args[0].typ = c.expr(call_expr.args[0].expr)
+		if call_expr.args[0].typ.is_void() {
+			c.error('`$fn_name` can not print void expressions', call_expr.pos)
+		}
 		if call_expr.args[0].typ.has_flag(.shared_f) {
 			c.fail_if_not_rlocked(call_expr.args[0].expr, 'argument to print')
 		}
+		c.inside_println_arg = false
 		/*
 		// TODO: optimize `struct T{} fn (t &T) str() string {return 'abc'} mut a := []&T{} a << &T{} println(a[0])`
 		// It currently generates:
@@ -1909,6 +1923,15 @@ pub fn (mut c Checker) call_fn(mut call_expr ast.CallExpr) table.Type {
 		*/
 		return f.return_type
 	}
+	// `return error(err)` -> `return err`
+	if fn_name == 'error' {
+		arg := call_expr.args[0]
+		call_expr.args[0].typ = c.expr(arg.expr)
+		if call_expr.args[0].typ == table.error_type {
+			c.warn('`error($arg)` can be shortened to just `$arg`', call_expr.pos)
+		}
+	}
+
 	// TODO: typ optimize.. this node can get processed more than once
 	if call_expr.expected_arg_types.len == 0 {
 		for param in f.params {
@@ -2040,7 +2063,7 @@ fn (mut c Checker) type_implements(typ table.Type, inter_typ table.Type, pos tok
 	}
 	if mut inter_sym.info is table.Interface {
 		for ifield in inter_sym.info.fields {
-			if field := typ_sym.find_field(ifield.name) {
+			if field := c.table.find_field_with_embeds(typ_sym, ifield.name) {
 				if ifield.typ != field.typ {
 					exp := c.table.type_to_str(ifield.typ)
 					got := c.table.type_to_str(field.typ)
@@ -2184,6 +2207,13 @@ fn is_expr_panic_or_exit(expr ast.Expr) bool {
 pub fn (mut c Checker) selector_expr(mut selector_expr ast.SelectorExpr) table.Type {
 	prevent_sum_type_unwrapping_once := c.prevent_sum_type_unwrapping_once
 	c.prevent_sum_type_unwrapping_once = false
+
+	using_new_err_struct_save := c.using_new_err_struct
+	// TODO remove; this avoids a breaking change in syntax
+	if '$selector_expr.expr' == 'err' {
+		c.using_new_err_struct = true
+	}
+
 	// T.name, typeof(expr).name
 	mut name_type := 0
 	match mut selector_expr.expr {
@@ -2210,7 +2240,13 @@ pub fn (mut c Checker) selector_expr(mut selector_expr ast.SelectorExpr) table.T
 		selector_expr.name_type = name_type
 		return table.string_type
 	}
+	//
+	old_selector_expr := c.inside_selector_expr
+	c.inside_selector_expr = true
 	typ := c.expr(selector_expr.expr)
+	c.inside_selector_expr = old_selector_expr
+	//
+	c.using_new_err_struct = using_new_err_struct_save
 	if typ == table.void_type_idx {
 		c.error('unknown selector expression', selector_expr.pos)
 		return table.void_type
@@ -2356,7 +2392,7 @@ pub fn (mut c Checker) return_stmt(mut return_stmt ast.Return) {
 	return_stmt.types = got_types
 	// allow `none` & `error (Option)` return types for function that returns optional
 	if exp_is_optional
-		&& got_types[0].idx() in [table.none_type_idx, c.table.type_idxs['Option'], c.table.type_idxs['Option2']] {
+		&& got_types[0].idx() in [table.none_type_idx, table.error_type_idx, c.table.type_idxs['Option'], c.table.type_idxs['Option2']] {
 		return
 	}
 	if expected_types.len > 0 && expected_types.len != got_types.len {
@@ -2939,7 +2975,7 @@ pub fn (mut c Checker) array_init(mut array_init ast.ArrayInit) table.Type {
 		if array_init.has_default {
 			default_typ := c.expr(array_init.default_expr)
 			c.check_expected(default_typ, array_init.elem_type) or {
-				c.error(err, array_init.default_expr.position())
+				c.error(err.msg, array_init.default_expr.position())
 			}
 		}
 		if sym.kind == .sum_type {
@@ -3155,6 +3191,10 @@ fn (mut c Checker) stmt(node ast.Stmt) {
 		}
 		ast.GoStmt {
 			c.go_stmt(mut node)
+			if node.call_expr.or_block.kind != .absent {
+				c.error('optional handling cannot be done in `go` call. Do it when calling `.wait()`',
+					node.call_expr.or_block.pos)
+			}
 		}
 		ast.GotoLabel {}
 		ast.GotoStmt {
@@ -3422,7 +3462,7 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 		mut flag := node.main
 		if flag.contains('@VROOT') {
 			vroot := util.resolve_vroot(flag, c.file.path) or {
-				c.error(err, node.pos)
+				c.error(err.msg, node.pos)
 				return
 			}
 			node.val = 'include $vroot'
@@ -3431,7 +3471,7 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 		}
 		if flag.contains('\$env(') {
 			env := util.resolve_env_value(flag, true) or {
-				c.error(err, node.pos)
+				c.error(err.msg, node.pos)
 				return
 			}
 			node.main = env
@@ -3449,15 +3489,15 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 			'--cflags --libs $node.main'.split(' ')
 		}
 		mut m := pkgconfig.main(args) or {
-			c.error(err, node.pos)
+			c.error(err.msg, node.pos)
 			return
 		}
 		cflags := m.run() or {
-			c.error(err, node.pos)
+			c.error(err.msg, node.pos)
 			return
 		}
 		c.table.parse_cflag(cflags, c.mod, c.pref.compile_defines_all) or {
-			c.error(err, node.pos)
+			c.error(err.msg, node.pos)
 			return
 		}
 	} else if node.kind == 'flag' {
@@ -3466,13 +3506,13 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 		// expand `@VROOT` to its absolute path
 		if flag.contains('@VROOT') {
 			flag = util.resolve_vroot(flag, c.file.path) or {
-				c.error(err, node.pos)
+				c.error(err.msg, node.pos)
 				return
 			}
 		}
 		if flag.contains('\$env(') {
 			flag = util.resolve_env_value(flag, true) or {
-				c.error(err, node.pos)
+				c.error(err.msg, node.pos)
 				return
 			}
 		}
@@ -3482,7 +3522,9 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 			}
 		}
 		// println('adding flag "$flag"')
-		c.table.parse_cflag(flag, c.mod, c.pref.compile_defines_all) or { c.error(err, node.pos) }
+		c.table.parse_cflag(flag, c.mod, c.pref.compile_defines_all) or {
+			c.error(err.msg, node.pos)
+		}
 	} else {
 		if node.kind != 'define' {
 			c.error('expected `#define`, `#flag`, `#include` or `#pkgconfig` not $node.val',
@@ -3631,10 +3673,18 @@ pub fn (mut c Checker) expr(node ast.Expr) table.Type {
 			return c.cast_expr(mut node)
 		}
 		ast.CallExpr {
-			return c.call_expr(mut node)
+			mut ret_type := c.call_expr(mut node)
+			if ret_type.has_flag(.optional) && node.or_block.kind != .absent {
+				ret_type = ret_type.clear_flag(.optional)
+			}
+			return ret_type
 		}
 		ast.GoExpr {
-			ret_type := c.call_expr(mut node.go_stmt.call_expr)
+			mut ret_type := c.call_expr(mut node.go_stmt.call_expr)
+			if node.go_stmt.call_expr.or_block.kind != .absent {
+				c.error('optional handling cannot be done in `go` call. Do it when calling `.wait()`',
+					node.go_stmt.call_expr.or_block.pos)
+			}
 			return c.table.find_or_register_thread(ret_type)
 		}
 		ast.ChanInit {
@@ -3910,7 +3960,7 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) table.Type {
 	node.sym = c.table.get_type_symbol(c.unwrap_generic(c.expr(node.left)))
 	if node.is_env {
 		env_value := util.resolve_env_value("\$env('$node.args_var')", false) or {
-			c.error(err, node.env_pos)
+			c.error(err.msg, node.env_pos)
 			return table.string_type
 		}
 		node.env_value = env_value
@@ -4136,6 +4186,13 @@ pub fn (mut c Checker) ident(mut ident ast.Ident) table.Type {
 						typ: typ
 						is_optional: is_optional
 					}
+					if typ == table.error_type && c.expected_type == table.string_type
+						&& !c.using_new_err_struct && !c.inside_selector_expr
+						&& !c.inside_println_arg && 'v.' !in c.file.mod.name && !c.is_builtin_mod {
+						//                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ <- TODO: remove; this prevents a failure in the `performance-regressions` CI job
+						c.warn('string errors are deprecated; use `err.msg` instead',
+							ident.pos)
+					}
 					// if typ == table.t_type {
 					// sym := c.table.get_type_symbol(c.cur_generic_type)
 					// println('IDENT T unresolved $ident.name typ=$sym.name')
@@ -4230,6 +4287,8 @@ pub fn (mut c Checker) ident(mut ident ast.Ident) table.Type {
 	}
 	if ident.tok_kind == .assign {
 		c.error('undefined ident: `$ident.name` (use `:=` to declare a variable)', ident.pos)
+	} else if ident.name == 'errcode' {
+		c.error('undefined ident: `errcode`; did you mean `err.code`?', ident.pos)
 	} else {
 		c.error('undefined ident: `$ident.name`', ident.pos)
 	}
@@ -4351,15 +4410,15 @@ fn (mut c Checker) match_exprs(mut node ast.MatchExpr, cond_type_sym table.TypeS
 		for expr in branch.exprs {
 			mut key := ''
 			if expr is ast.RangeExpr {
-				mut low := 0
-				mut high := 0
+				mut low := i64(0)
+				mut high := i64(0)
 				c.expected_type = node.expected_type
 				low_expr := expr.low
 				high_expr := expr.high
 				if low_expr is ast.IntegerLiteral {
 					if high_expr is ast.IntegerLiteral {
-						low = low_expr.val.int()
-						high = high_expr.val.int()
+						low = low_expr.val.i64()
+						high = high_expr.val.i64()
 					} else {
 						c.error('mismatched range types', low_expr.pos)
 					}
@@ -4373,6 +4432,11 @@ fn (mut c Checker) match_exprs(mut node ast.MatchExpr, cond_type_sym table.TypeS
 				} else {
 					typ := c.table.type_to_str(c.expr(expr.low))
 					c.error('cannot use type `$typ` in match range', branch.pos)
+				}
+				high_low_cutoff := 1000
+				if high - low > high_low_cutoff {
+					c.warn('more than $high_low_cutoff possibilities ($low ... $high) in match range',
+						branch.pos)
 				}
 				for i in low .. high + 1 {
 					key = i.str()
@@ -4852,9 +4916,14 @@ pub fn (mut c Checker) if_expr(mut node ast.IfExpr) table.Type {
 			if branch.stmts.len > 0 && branch.stmts[branch.stmts.len - 1] is ast.ExprStmt {
 				mut last_expr := branch.stmts[branch.stmts.len - 1] as ast.ExprStmt
 				c.expected_type = former_expected_type
+				if c.expected_type.has_flag(.optional) {
+					if node.typ == table.void_type {
+						node.is_expr = true
+						node.typ = c.expected_type
+					}
+					continue
+				}
 				last_expr.typ = c.expr(last_expr.expr)
-				// if last_expr.typ != node.typ {
-				// if !c.check_types(node.typ, last_expr.typ) {
 				if !c.check_types(last_expr.typ, node.typ) {
 					if node.typ == table.void_type {
 						// first branch of if expression
@@ -4989,7 +5058,7 @@ fn (mut c Checker) comp_if_branch(cond ast.Expr, pos token.Position) bool {
 						left_type := c.expr(cond.left)
 						right_type := c.expr(cond.right)
 						expr := c.find_definition(cond.left) or {
-							c.error(err, cond.left.pos)
+							c.error(err.msg, cond.left.pos)
 							return false
 						}
 						if !c.check_types(right_type, left_type) {
@@ -5039,7 +5108,7 @@ fn (mut c Checker) comp_if_branch(cond ast.Expr, pos token.Position) bool {
 					return false
 				}
 				expr := c.find_obj_definition(cond.obj) or {
-					c.error(err, cond.pos)
+					c.error(err.msg, cond.pos)
 					return false
 				}
 				if !c.check_types(typ, table.bool_type) {
@@ -5782,6 +5851,15 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 		// Make sure all types are valid
 		for arg in node.params {
 			c.ensure_type_exists(arg.typ, node.pos) or { return }
+		}
+	}
+	if node.language == .v && node.name.after_char(`.`) == 'init' && !node.is_method
+		&& node.params.len == 0 {
+		if node.is_pub {
+			c.error('fn `init` must not be public', node.pos)
+		}
+		if node.return_type != table.void_type {
+			c.error('fn `init` cannot have a return type', node.pos)
 		}
 	}
 	if node.return_type != table.Type(0) {
