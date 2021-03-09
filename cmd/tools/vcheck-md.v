@@ -204,14 +204,17 @@ fn (mut f MDFile) parse_line(lnumber int, line string) {
 	}
 }
 
-fn (mut f MDFile) dump() {
+fn (mut f MDFile) debug() {
 	for e in f.examples {
 		eprintln('f.path: $f.path | example: $e')
 	}
 }
 
 fn cmdexecute(cmd string) int {
-	res := os.exec(cmd) or { return 1 }
+	res := os.execute(cmd)
+	if res.exit_code < 0 {
+		return 1
+	}
 	if res.exit_code != 0 {
 		eprint(res.output)
 	}
@@ -219,7 +222,7 @@ fn cmdexecute(cmd string) int {
 }
 
 fn silent_cmdexecute(cmd string) int {
-	res := os.exec(cmd) or { return 1 }
+	res := os.execute(cmd)
 	return res.exit_code
 }
 
