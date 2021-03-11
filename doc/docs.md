@@ -1147,12 +1147,12 @@ The `for value in arr` form is used for going through elements of an array.
 If an index is required, an alternative form `for index, value in arr` can be used.
 
 Note, that the value is read-only.
-If you need to modify the array while looping, you have to use indexing:
+If you need to modify the array while looping, you need to declare the element as mutable:
 
 ```v
 mut numbers := [0, 1, 2]
-for i, _ in numbers {
-	numbers[i]++
+for mut num in numbers {
+	num++
 }
 println(numbers) // [1, 2, 3]
 ```
@@ -3516,6 +3516,10 @@ $if test {
 $if debug {
 	println('debugging')
 }
+// v -prod ...
+$if prod {
+	println('production build')
+}
 // v -d option ...
 $if option ? {
 	println('custom option')
@@ -3527,11 +3531,11 @@ Right now it can be used to detect an OS, compiler, platform or compilation opti
 `$if debug` is a special option like `$if windows` or `$if x32`.
 If you're using a custom ifdef, then you do need `$if option ? {}` and compile with`v -d option`.
 Full list of builtin options:
-| OS                            | Compilers         | Platforms             | Other                 |
-| ---                           | ---               | ---                   | ---                   |
-| `windows`, `linux`, `macos`   | `gcc`, `tinyc`    | `amd64`, `aarch64`    | `debug`, `test`, `js` |
-| `mac`, `darwin`, `ios`,       | `clang`, `mingw`  | `x64`, `x32`          | `glibc`, `prealloc`   |
-| `android`,`mach`, `dragonfly` | `msvc`            | `little_endian`       | `no_bounds_checking`  |
+| OS                            | Compilers         | Platforms             | Other                     |
+| ---                           | ---               | ---                   | ---                       |
+| `windows`, `linux`, `macos`   | `gcc`, `tinyc`    | `amd64`, `aarch64`    | `debug`, `prod`, `test`   |
+| `mac`, `darwin`, `ios`,       | `clang`, `mingw`  | `x64`, `x32`          | `js`, `glibc`, `prealloc` |
+| `android`,`mach`, `dragonfly` | `msvc`            | `little_endian`       | `no_bounds_checking`      |
 | `gnu`, `hpux`, `haiku`, `qnx` | `cplusplus`       | `big_endian`          | |
 | `solaris`, `linux_or_macos`   | | | |
 

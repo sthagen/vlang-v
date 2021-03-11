@@ -423,6 +423,9 @@ pub fn (mut g Gen) init() {
 	if g.pref.is_debug || 'debug' in g.pref.compile_defines {
 		g.comptime_defines.writeln('#define _VDEBUG (1)')
 	}
+	if g.pref.is_prod || 'prod' in g.pref.compile_defines {
+		g.comptime_defines.writeln('#define _VPROD (1)')
+	}
 	if g.pref.is_test || 'test' in g.pref.compile_defines {
 		g.comptime_defines.writeln('#define _VTEST (1)')
 	}
@@ -953,11 +956,11 @@ fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) {
 		// stmt := stmts[stmts.len-1]
 		if stmt !is ast.FnDecl && g.inside_ternary == 0 {
 			// g.writeln('// autofree scope')
-			// g.writeln('// autofree_scope_vars($stmt.position().pos) | ${typeof(stmt)}')
+			// g.writeln('// autofree_scope_vars($stmt.pos.pos) | ${typeof(stmt)}')
 			// go back 1 position is important so we dont get the
 			// internal scope of for loops and possibly other nodes
-			// g.autofree_scope_vars(stmt.position().pos - 1)
-			mut stmt_pos := stmt.position()
+			// g.autofree_scope_vars(stmt.pos.pos - 1)
+			mut stmt_pos := stmt.pos
 			if stmt_pos.pos == 0 {
 				// Do not autofree if the position is 0, since the correct scope won't be found.
 				// Report a bug, since position shouldn't be 0 for most nodes.
@@ -1506,13 +1509,18 @@ fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
 			}
 		}
 	} else if node.kind == .string {
+		cond := if node.cond is ast.StringLiteral || node.cond is ast.StringInterLiteral {
+			ast.Expr(g.new_ctemp_var_then_gen(node.cond, table.string_type))
+		} else {
+			node.cond
+		}
 		i := if node.key_var in ['', '_'] { g.new_tmp_var() } else { node.key_var }
 		g.write('for (int $i = 0; $i < ')
-		g.expr(node.cond)
+		g.expr(cond)
 		g.writeln('.len; ++$i) {')
 		if node.val_var != '_' {
 			g.write('\tbyte ${c_name(node.val_var)} = ')
-			g.expr(node.cond)
+			g.expr(cond)
 			g.writeln('.str[$i];')
 		}
 	} else if node.kind == .struct_ {
@@ -1574,7 +1582,7 @@ fn (mut g Gen) write_sumtype_casting_fn(got_ table.Type, exp_ table.Type) {
 			// the field is already a wrapped pointer; we shouldn't wrap it once again
 			sb.write_string(', .$field.name = ptr->$field.name')
 		} else {
-			sb.write_string(', .$field.name = ($field_styp*)((char*)ptr + __offsetof($got_cname, $field.name))')
+			sb.write_string(', .$field.name = ($field_styp*)((char*)ptr + __offsetof_ptr(ptr, $got_cname, $field.name))')
 		}
 	}
 	sb.writeln('};\n}')
@@ -1599,16 +1607,18 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw table.Type, expected_t
 		&& !expected_type.has_flag(.optional) {
 		got_styp := g.cc_type(got_type, true)
 		exp_styp := g.cc_type(expected_type, true)
-		g.write('I_${got_styp}_to_Interface_$exp_styp')
-		if expected_type.is_ptr() {
-			g.write('_ptr')
+		if expected_is_ptr {
+			g.write('HEAP($exp_styp, ')
 		}
-		g.write('(')
-		if !got_type.is_ptr() {
+		g.write('I_${got_styp}_to_Interface_${exp_styp}(')
+		if !got_is_ptr {
 			g.write('&')
 		}
 		g.expr(expr)
 		g.write(')')
+		if expected_is_ptr {
+			g.write(')')
+		}
 		return
 	}
 	// cast to sum type
@@ -1638,19 +1648,19 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw table.Type, expected_t
 			} else {
 				g.write_sumtype_casting_fn(got_type, expected_type)
 				if expected_is_ptr {
-					g.write('memdup(&($exp_sym.cname[]){')
+					g.write('HEAP($exp_sym.cname, ')
 				}
 				g.write('${got_sym.cname}_to_sumtype_${exp_sym.cname}(')
 				if !got_is_ptr {
-					g.write('(&(($got_styp[]){')
+					g.write('ADDR($got_styp, (')
 					g.expr(expr)
-					g.write('}[0])))')
+					g.write(')))')
 				} else {
 					g.expr(expr)
 					g.write(')')
 				}
 				if expected_is_ptr {
-					g.write('}, sizeof($exp_sym.cname))')
+					g.write(')')
 				}
 			}
 			return
@@ -3808,7 +3818,7 @@ fn (mut g Gen) match_expr_classic(node ast.MatchExpr, is_expr bool, cond_var str
 			}
 		}
 		g.stmts_with_tmp_var(branch.stmts, tmp_var)
-		if g.inside_ternary == 0 && node.branches.len > 1 {
+		if g.inside_ternary == 0 && node.branches.len >= 1 {
 			g.write('}')
 		}
 	}
@@ -5846,7 +5856,6 @@ fn (mut g Gen) interface_table() string {
 			current_iinidx++
 			// eprintln('>>> current_iinidx: ${current_iinidx-iinidx_minimum_base} | interface_index_name: $interface_index_name')
 			sb.writeln('$staticprefix $interface_name I_${cctype}_to_Interface_${interface_name}($cctype* x);')
-			sb.writeln('$staticprefix $interface_name* I_${cctype}_to_Interface_${interface_name}_ptr($cctype* x);')
 			mut cast_struct := strings.new_builder(100)
 			cast_struct.writeln('($interface_name) {')
 			cast_struct.writeln('\t\t._object = (void*) (x),')
@@ -5855,14 +5864,14 @@ fn (mut g Gen) interface_table() string {
 				cname := c_name(field.name)
 				field_styp := g.typ(field.typ)
 				if _ := st_sym.find_field(field.name) {
-					cast_struct.writeln('\t\t.$cname = ($field_styp*)((char*)x + __offsetof($cctype, $cname)),')
+					cast_struct.writeln('\t\t.$cname = ($field_styp*)((char*)x + __offsetof_ptr(x, $cctype, $cname)),')
 				} else {
 					// the field is embedded in another struct
 					cast_struct.write_string('\t\t.$cname = ($field_styp*)((char*)x')
 					for embed_type in st_sym.struct_info().embeds {
 						embed_sym := g.table.get_type_symbol(embed_type)
 						if _ := embed_sym.find_field(field.name) {
-							cast_struct.write_string(' + __offsetof($cctype, $embed_sym.embed_name()) + __offsetof($embed_sym.cname, $cname)')
+							cast_struct.write_string(' + __offsetof_ptr(x, $cctype, $embed_sym.embed_name()) + __offsetof_ptr(x, $embed_sym.cname, $cname)')
 							break
 						}
 					}
@@ -5876,11 +5885,6 @@ fn (mut g Gen) interface_table() string {
 // Casting functions for converting "$cctype" to interface "$interface_name"
 $staticprefix inline $interface_name I_${cctype}_to_Interface_${interface_name}($cctype* x) {
 	return $cast_struct_str;
-}
-
-$staticprefix $interface_name* I_${cctype}_to_Interface_${interface_name}_ptr($cctype* x) {
-	// TODO Remove memdup
-	return ($interface_name*) memdup(&$cast_struct_str, sizeof($interface_name));
 }')
 
 			if g.pref.build_mode != .build_module {
