@@ -13,12 +13,9 @@ import v.util
 import v.errors
 import v.pkgconfig
 
-const (
-	max_nr_errors                 = 300
-	match_exhaustive_cutoff_limit = 10
-	int_min                       = int(0x80000000)
-	int_max                       = 0x7FFFFFFF
-)
+const int_min = int(0x80000000)
+
+const int_max = int(0x7FFFFFFF)
 
 const (
 	valid_comp_if_os        = ['windows', 'ios', 'macos', 'mach', 'darwin', 'hpux', 'gnu', 'qnx',
@@ -78,6 +75,7 @@ mut:
 	fn_scope                         &ast.Scope = voidptr(0)
 	used_fns                         map[string]bool // used_fns['println'] == true
 	main_fn_decl_node                ast.FnDecl
+	match_exhaustive_cutoff_limit    int = 10
 	// TODO: these are here temporarily and used for deprecations; remove soon
 	using_new_err_struct bool
 	inside_selector_expr bool
@@ -94,6 +92,7 @@ pub fn new_checker(table &table.Table, pref &pref.Preferences) Checker {
 		pref: pref
 		cur_fn: 0
 		timers: util.new_timers(timers_should_print)
+		match_exhaustive_cutoff_limit: pref.checker_match_exhaustive_cutoff_limit
 	}
 }
 
@@ -1085,6 +1084,25 @@ fn (mut c Checker) fail_if_immutable(expr ast.Expr) (string, token.Position) {
 			}
 		}
 		ast.IndexExpr {
+			left_sym := c.table.get_type_symbol(expr.left_type)
+			mut elem_type := table.Type(0)
+			mut kind := ''
+			match left_sym.info {
+				table.Array {
+					elem_type, kind = left_sym.info.elem_type, 'array'
+				}
+				table.ArrayFixed {
+					elem_type, kind = left_sym.info.elem_type, 'fixed array'
+				}
+				table.Map {
+					elem_type, kind = left_sym.info.value_type, 'map'
+				}
+				else {}
+			}
+			if elem_type.has_flag(.shared_f) {
+				c.error('you have to create a handle and `lock` it to modify `shared` $kind element',
+					expr.left.position().extend(expr.pos))
+			}
 			to_lock, pos = c.fail_if_immutable(expr.left)
 		}
 		ast.ParExpr {
@@ -1127,6 +1145,11 @@ fn (mut c Checker) fail_if_immutable(expr ast.Expr) (string, token.Position) {
 					if !field_info.is_mut && !c.pref.translated {
 						type_str := c.table.type_to_str(expr.expr_type)
 						c.error('field `$expr.field_name` of struct `$type_str` is immutable',
+							expr.pos)
+					}
+					if field_info.typ.has_flag(.shared_f) {
+						type_str := c.table.type_to_str(expr.expr_type)
+						c.error('you have to create a handle and `lock` it to modify `shared` field `$expr.field_name` of struct `$type_str`',
 							expr.pos)
 					}
 					to_lock, pos = c.fail_if_immutable(expr.expr)
@@ -4102,7 +4125,7 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) table.Type {
 		c2.check(node.vweb_tmpl)
 		mut i := 0 // tmp counter var for skipping first three tmpl vars
 		for k, _ in c2.file.scope.children[0].objects {
-			if i < 4 {
+			if i < 2 {
 				// Skip first three because they are tmpl vars see vlib/vweb/tmpl/tmpl.v
 				i++
 				continue
@@ -4707,11 +4730,11 @@ fn (mut c Checker) match_exprs(mut node ast.MatchExpr, cond_type_sym table.TypeS
 	mut err_details := 'match must be exhaustive'
 	if unhandled.len > 0 {
 		err_details += ' (add match branches for: '
-		if unhandled.len < checker.match_exhaustive_cutoff_limit {
+		if unhandled.len < c.match_exhaustive_cutoff_limit {
 			err_details += unhandled.join(', ')
 		} else {
-			remaining := unhandled.len - checker.match_exhaustive_cutoff_limit
-			err_details += unhandled[0..checker.match_exhaustive_cutoff_limit].join(', ')
+			remaining := unhandled.len - c.match_exhaustive_cutoff_limit
+			err_details += unhandled[0..c.match_exhaustive_cutoff_limit].join(', ')
 			err_details += ', and $remaining others ...'
 		}
 		err_details += ' or `else {}` at the end)'

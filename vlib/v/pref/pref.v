@@ -115,8 +115,6 @@ pub mut:
 	vroot          string
 	out_name_c     string // full os.real_path to the generated .tmp.c file; set by builder.
 	out_name       string
-	display_name   string
-	bundle_id      string
 	path           string // Path to file/folder to compile
 	// -d vfmt and -d another=0 for `$if vfmt { will execute }` and `$if another ? { will NOT get here }`
 	compile_defines     []string    // just ['vfmt']
@@ -144,6 +142,8 @@ pub mut:
 	build_options       []string // list of options, that should be passed down to `build-module`, if needed for -usecache
 	cache_manager       vcache.CacheManager
 	is_help             bool // -h, -help or --help was passed
+	// checker settings:
+	checker_match_exhaustive_cutoff_limit int = 10
 }
 
 pub fn parse_args(known_external_commands []string, args []string) (&Preferences, string) {
@@ -370,6 +370,11 @@ pub fn parse_args(known_external_commands []string, args []string) (&Preferences
 				res.build_options << '$arg "$res.ccompiler"'
 				i++
 			}
+			'-checker-match-exhaustive-cutoff-limit' {
+				res.checker_match_exhaustive_cutoff_limit = cmdline.option(current_args,
+					arg, '10').int()
+				i++
+			}
 			'-o' {
 				res.out_name = cmdline.option(current_args, '-o', '')
 				if res.out_name.ends_with('.js') {
@@ -401,14 +406,6 @@ pub fn parse_args(known_external_commands []string, args []string) (&Preferences
 					exit(1)
 				}
 				res.custom_prelude = prelude
-				i++
-			}
-			'-name' {
-				res.display_name = cmdline.option(current_args, '-name', '')
-				i++
-			}
-			'-bundle' {
-				res.bundle_id = cmdline.option(current_args, '-bundle', '')
 				i++
 			}
 			else {
