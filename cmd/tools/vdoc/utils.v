@@ -141,35 +141,56 @@ fn color_highlight(code string, tb &table.Table) string {
 	builtin := ['bool', 'string', 'i8', 'i16', 'int', 'i64', 'i128', 'byte', 'u16', 'u32', 'u64',
 		'u128', 'rune', 'f32', 'f64', 'int_literal', 'float_literal', 'byteptr', 'voidptr', 'any']
 	highlight_code := fn (tok token.Token, typ HighlightTokenTyp) string {
-		lit := match typ {
+		mut lit := ''
+		match typ {
 			.unone, .operator, .punctuation {
-				tok.kind.str()
+				lit = tok.kind.str()
 			}
 			.string {
-				term.yellow("'$tok.lit'")
+				use_double_quote := tok.lit.contains("'") && !tok.lit.contains('"')
+				unescaped_val := tok.lit.replace('\\\\', '\x01').replace_each(["\\'", "'", '\\"',
+					'"',
+				])
+				if use_double_quote {
+					s := unescaped_val.replace_each(['\x01', '\\\\', '"', '\\"'])
+					lit = term.yellow('"$s"')
+				} else {
+					s := unescaped_val.replace_each(['\x01', '\\\\', "'", "\\'"])
+					lit = term.yellow("'$s'")
+				}
 			}
 			.char {
-				term.yellow('`$tok.lit`')
+				lit = term.yellow('`$tok.lit`')
 			}
 			.keyword {
-				term.blue(tok.lit)
+				lit = term.bright_blue(tok.lit)
 			}
 			.builtin, .symbol {
-				term.green(tok.lit)
+				lit = term.green(tok.lit)
 			}
 			.function {
-				term.cyan(tok.lit)
+				lit = term.cyan(tok.lit)
 			}
-			.number {
-				term.bright_blue(tok.lit)
+			.number, .module_ {
+				lit = term.bright_blue(tok.lit)
+			}
+			.boolean {
+				lit = term.bright_magenta(tok.lit)
+			}
+			.none_ {
+				lit = term.red(tok.lit)
+			}
+			.prefix {
+				lit = term.magenta(tok.lit)
 			}
 			else {
-				tok.lit
+				lit = tok.lit
 			}
 		}
 		return lit
 	}
 	mut s := scanner.new_scanner(code, .parse_comments, &pref.Preferences{})
+	mut prev_prev := token.Token{}
 	mut prev := token.Token{}
 	mut tok := s.scan()
 	mut next_tok := s.scan()
@@ -181,13 +202,23 @@ fn color_highlight(code string, tb &table.Table) string {
 			match tok.kind {
 				.name {
 					if (tok.lit in builtin || tb.known_type(tok.lit))
-						&& (next_tok.kind != .lpar || prev.kind != .key_fn) {
+						&& (next_tok.kind != .lpar || prev.kind !in [.key_fn, .rpar]) {
 						tok_typ = .builtin
-					} else if next_tok.kind in [.lcbr, .rpar, .eof]
-						&& (next_tok.kind != .rpar || prev.kind in [.name, .amp]) {
+					} else if 
+						next_tok.kind in [.lcbr, .rpar, .eof, .comma, .pipe, .name, .rcbr, .assign, .key_pub, .key_mut, .pipe, .comma]
+						&& prev.kind in [.name, .amp, .rsbr, .key_type, .assign, .dot, .question, .rpar, .key_struct, .key_enum, .pipe, .key_interface]
+						&& (tok.lit[0].ascii_str().is_upper() || prev_prev.lit in ['C', 'JS']) {
 						tok_typ = .symbol
 					} else if next_tok.kind in [.lpar, .lt] {
 						tok_typ = .function
+					} else if next_tok.kind == .dot {
+						if tok.lit in ['C', 'JS'] {
+							tok_typ = .prefix
+						} else {
+							tok_typ = .module_
+						}
+					} else if tok.lit in ['r', 'c'] && next_tok.kind == .string {
+						tok_typ = .prefix
 					} else {
 						tok_typ = .name
 					}
@@ -210,6 +241,9 @@ fn color_highlight(code string, tb &table.Table) string {
 				.lpar, .lcbr, .rpar, .rcbr, .lsbr, .rsbr, .semicolon, .colon, .comma, .dot {
 					tok_typ = .punctuation
 				}
+				.key_none {
+					tok_typ = .none_
+				}
 				else {
 					if token.is_key(tok.lit) || token.is_decl(tok.kind) {
 						tok_typ = .keyword
@@ -220,18 +254,14 @@ fn color_highlight(code string, tb &table.Table) string {
 				}
 			}
 			buf.write_string(highlight_code(tok, tok_typ))
-			if prev.kind != .eof {
-				prev = tok
-			} else {
+			if prev_prev.kind == .eof || prev.kind == .eof || next_tok.kind == .eof {
 				break
 			}
-			if next_tok.kind != .eof {
-				i = tok.pos + tok.len
-				tok = next_tok
-				next_tok = s.scan()
-			} else {
-				break
-			}
+			prev_prev = prev
+			prev = tok
+			i = tok.pos + tok.len
+			tok = next_tok
+			next_tok = s.scan()
 		} else {
 			buf.write_b(code[i])
 			i++
