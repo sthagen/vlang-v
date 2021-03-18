@@ -26,7 +26,7 @@ const (
 	valid_comp_if_platforms = ['amd64', 'aarch64', 'x64', 'x32', 'little_endian', 'big_endian']
 	valid_comp_if_other     = ['js', 'debug', 'prod', 'test', 'glibc', 'prealloc', 'no_bounds_checking']
 	array_builtin_methods   = ['filter', 'clone', 'repeat', 'reverse', 'map', 'slice', 'sort',
-		'contains', 'index', 'wait']
+		'contains', 'index', 'wait', 'any', 'all']
 )
 
 pub struct Checker {
@@ -1318,6 +1318,28 @@ fn (mut c Checker) check_map_and_filter(is_map bool, elem_typ table.Type, call_e
 					c.error('type mismatch, should use `fn(a $elem_sym.name) bool {...}`',
 						arg_expr.pos)
 				}
+			} else if arg_expr.kind == .variable {
+				if arg_expr.obj is ast.Var {
+					expr := arg_expr.obj.expr
+					if expr is ast.AnonFn {
+						// copied from above
+						if expr.decl.params.len > 1 {
+							c.error('function needs exactly 1 argument', expr.decl.pos)
+						} else if is_map && (expr.decl.return_type == table.void_type
+							|| expr.decl.params[0].typ != elem_typ) {
+							c.error('type mismatch, should use `fn(a $elem_sym.name) T {...}`',
+								expr.decl.pos)
+						} else if !is_map && (expr.decl.return_type != table.bool_type
+							|| expr.decl.params[0].typ != elem_typ) {
+							c.error('type mismatch, should use `fn(a $elem_sym.name) bool {...}`',
+								expr.decl.pos)
+						}
+						return
+					}
+				}
+				if !is_map && arg_expr.info.typ != table.bool_type {
+					c.error('type mismatch, should be bool', arg_expr.pos)
+				}
 			}
 		}
 		else {}
@@ -1665,7 +1687,7 @@ fn (mut c Checker) call_array_builtin_method(mut call_expr ast.CallExpr, left_ty
 	}
 	array_info := left_type_sym.info as table.Array
 	elem_typ = array_info.elem_type
-	if method_name in ['filter', 'map'] {
+	if method_name in ['filter', 'map', 'any', 'all'] {
 		// position of `it` doesn't matter
 		scope_register_it(mut call_expr.scope, call_expr.pos, elem_typ)
 	} else if method_name == 'sort' {
@@ -1728,6 +1750,9 @@ fn (mut c Checker) call_array_builtin_method(mut call_expr ast.CallExpr, left_ty
 	} else if method_name == 'filter' {
 		// check fn
 		c.check_map_and_filter(false, elem_typ, call_expr)
+	} else if method_name in ['any', 'all'] {
+		c.check_map_and_filter(false, elem_typ, call_expr)
+		call_expr.return_type = table.bool_type
 	} else if method_name == 'clone' {
 		// need to return `array_xxx` instead of `array`
 		// in ['clone', 'str'] {
@@ -2626,22 +2651,25 @@ pub fn (mut c Checker) assign_stmt(mut assign_stmt ast.AssignStmt) {
 	right_first := assign_stmt.right[0]
 	mut right_len := assign_stmt.right.len
 	mut right_type0 := table.void_type
-	for right in assign_stmt.right {
+	for i, right in assign_stmt.right {
 		if right is ast.CallExpr || right is ast.IfExpr || right is ast.LockExpr
 			|| right is ast.MatchExpr {
-			right_type0 = c.expr(right)
-			assign_stmt.right_types = [
-				c.check_expr_opt_call(right, right_type0),
-			]
-			right_type_sym0 := c.table.get_type_symbol(right_type0)
-			if right_type_sym0.kind == .multi_return {
+			right_type := c.expr(right)
+			if i == 0 {
+				right_type0 = right_type
+				assign_stmt.right_types = [
+					c.check_expr_opt_call(right, right_type0),
+				]
+			}
+			right_type_sym := c.table.get_type_symbol(right_type)
+			if right_type_sym.kind == .multi_return {
 				if assign_stmt.right.len > 1 {
-					c.error('cannot use multi-value $right_type_sym0.name in signle-value context',
+					c.error('cannot use multi-value $right_type_sym.name in single-value context',
 						right.position())
 				}
-				assign_stmt.right_types = right_type_sym0.mr_info().types
+				assign_stmt.right_types = right_type_sym.mr_info().types
 				right_len = assign_stmt.right_types.len
-			} else if right_type0 == table.void_type {
+			} else if right_type == table.void_type {
 				right_len = 0
 			}
 		}
@@ -2868,15 +2896,6 @@ pub fn (mut c Checker) assign_stmt(mut assign_stmt ast.AssignStmt) {
 					&& left_sym.kind !in [.byteptr, .charptr, .struct_, .alias] {
 					c.error('invalid right operand: $left_sym.name $assign_stmt.op $right_sym.name',
 						right.position())
-				} else if right is ast.IntegerLiteral {
-					if right.val == '1' {
-						op := if assign_stmt.op == .plus_assign {
-							token.Kind.inc
-						} else {
-							token.Kind.dec
-						}
-						c.error('use `$op` instead of `$assign_stmt.op 1`', assign_stmt.pos)
-					}
 				}
 			}
 			.mult_assign, .div_assign {
@@ -3103,7 +3122,7 @@ pub fn (mut c Checker) array_init(mut array_init ast.ArrayInit) table.Type {
 		// println('ex $c.expected_type')
 		// }
 		for i, expr in array_init.exprs {
-			typ := c.expr(expr)
+			typ := c.check_expr_opt_call(expr, c.expr(expr))
 			array_init.expr_types << typ
 			// The first element's type
 			if expecting_interface_array {
