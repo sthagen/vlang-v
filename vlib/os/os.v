@@ -333,14 +333,14 @@ pub fn home_dir() string {
 // write_file writes `text` data to a file in `path`.
 pub fn write_file(path string, text string) ? {
 	mut f := create(path) ?
-	f.write(text.bytes()) ?
+	f.write_string(text) ?
 	f.close()
 }
 
 // write_file_array writes the data in `buffer` to a file in `path`.
 pub fn write_file_array(path string, buffer array) ? {
 	mut f := create(path) ?
-	unsafe { f.write_bytes_at(buffer.data, (buffer.len * buffer.element_size), 0) }
+	unsafe { f.write_ptr_at(buffer.data, (buffer.len * buffer.element_size), 0) }
 	f.close()
 }
 
