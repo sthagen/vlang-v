@@ -47,6 +47,10 @@ fn panic_debug(line_no int, file string, mod string, fn_name string, s string) {
 	}
 }
 
+pub fn panic_optional_not_set(s string) {
+	panic('optional not set ($s)')
+}
+
 // panic prints a nice error message, then exits the process with exit code of 1.
 // It also shows a backtrace on most platforms.
 pub fn panic(s string) {
@@ -311,7 +315,14 @@ pub fn free(ptr voidptr) {
 		return
 	}
 	$if gcboehm ? {
-		C.GC_FREE(ptr)
+		// It is generally better to leave it to Boehm's gc to free things.
+		// Calling C.GC_FREE(ptr) was tried initially, but does not work
+		// well with programs that do manual management themselves.
+		//
+		// The exception is doing leak detection for manual memory management:
+		$if gcboehm_leak ? {
+			C.GC_FREE(ptr)
+		}
 		return
 	}
 	C.free(ptr)
