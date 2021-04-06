@@ -1465,7 +1465,7 @@ pub fn (mut c Checker) method_call(mut call_expr ast.CallExpr) ast.Type {
 	// FIXME: Argument count != 1 will break these
 	if left_type_sym.kind == .array && method_name in checker.array_builtin_methods {
 		return c.array_builtin_method_call(mut call_expr, left_type, left_type_sym)
-	} else if left_type_sym.kind == .map && method_name in ['clone', 'keys', 'move', 'delete_1'] {
+	} else if left_type_sym.kind == .map && method_name in ['clone', 'keys', 'move', 'delete'] {
 		return c.map_builtin_method_call(mut call_expr, left_type, left_type_sym)
 	} else if left_type_sym.kind == .array && method_name in ['insert', 'prepend'] {
 		info := left_type_sym.info as ast.Array
@@ -1745,6 +1745,17 @@ fn (mut c Checker) map_builtin_method_call(mut call_expr ast.CallExpr, left_type
 			info := left_type_sym.info as ast.Map
 			typ := c.table.find_or_register_array(info.key_type)
 			ret_type = ast.Type(typ)
+		}
+		'delete' {
+			c.fail_if_immutable(call_expr.left)
+			if call_expr.args.len != 1 {
+				c.error('expected 1 argument, but got $call_expr.args.len', call_expr.pos)
+			}
+			info := left_type_sym.info as ast.Map
+			arg_type := c.expr(call_expr.args[0].expr)
+			c.check_expected_call_arg(arg_type, info.key_type, call_expr.language) or {
+				c.error('$err.msg in argument 1 to `Map.delete`', call_expr.args[0].pos)
+			}
 		}
 		else {}
 	}
@@ -3126,7 +3137,16 @@ pub fn (mut c Checker) assign_stmt(mut assign_stmt ast.AssignStmt) {
 			&& left_sym.kind != .interface_ {
 			// Dual sides check (compatibility check)
 			c.check_expected(right_type_unwrapped, left_type_unwrapped) or {
-				c.error('cannot assign to `$left`: $err.msg', right.position())
+				// allow for ptr += 2
+				if left_type_unwrapped.is_ptr() && right_type_unwrapped.is_int()
+					&& assign_stmt.op in [.plus_assign, .minus_assign] {
+					if !c.inside_unsafe {
+						c.warn('pointer arithmetic is only allowed in `unsafe` blocks',
+							assign_stmt.pos)
+					}
+				} else {
+					c.error('cannot assign to `$left`: $err.msg', right.position())
+				}
 			}
 		}
 		if left_sym.kind == .interface_ {
