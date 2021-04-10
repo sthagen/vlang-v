@@ -715,12 +715,14 @@ pub struct Struct {
 pub:
 	attrs []Attr
 pub mut:
-	embeds        []Type
-	fields        []StructField
-	is_typedef    bool // C. [typedef]
-	is_union      bool
-	is_heap       bool
-	generic_types []Type
+	embeds         []Type
+	fields         []StructField
+	is_typedef     bool // C. [typedef]
+	is_union       bool
+	is_heap        bool
+	generic_types  []Type
+	concrete_types []Type
+	parent_type    Type
 }
 
 // instantiation of a generic struct
@@ -929,6 +931,21 @@ pub fn (t &Table) type_to_str_using_aliases(typ Type, import_aliases map[string]
 				res += t.type_to_str_using_aliases(typ2, import_aliases)
 			}
 			res += ')'
+		}
+		.struct_ {
+			if typ.has_flag(.generic) {
+				info := sym.info as Struct
+				res += '<'
+				for i, gtyp in info.generic_types {
+					res += t.get_type_symbol(gtyp).name
+					if i != info.generic_types.len - 1 {
+						res += ', '
+					}
+				}
+				res += '>'
+			} else {
+				res = t.shorten_user_defined_typenames(res, import_aliases)
+			}
 		}
 		.void {
 			if typ.has_flag(.optional) {
