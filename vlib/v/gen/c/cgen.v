@@ -116,6 +116,11 @@ mut:
 	cur_generic_types      []ast.Type // `int`, `string`, etc in `foo<T>()`
 	sql_i                  int
 	sql_stmt_name          string
+	sql_bind_name          string
+	sql_idents             []string
+	sql_idents_types       []ast.Type
+	sql_left_type          ast.Type
+	sql_table_name         string
 	sql_side               SqlExprSide // left or right, to distinguish idents in `name == name`
 	inside_vweb_tmpl       bool
 	inside_return          bool
@@ -3827,6 +3832,9 @@ fn (mut g Gen) lock_expr(node ast.LockExpr) {
 	}
 	g.writeln('/*lock*/ {')
 	g.stmts_with_tmp_var(node.stmts, tmp_result)
+	if node.is_expr {
+		g.writeln(';')
+	}
 	g.writeln('}')
 	if node.lockeds.len == 0 {
 		// this should not happen
@@ -5002,7 +5010,7 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 		g.go_back_out(3)
 		return
 	}
-	sym := g.table.get_final_type_symbol(struct_init.typ)
+	sym := g.table.get_final_type_symbol(g.unwrap_generic(struct_init.typ))
 	is_amp := g.is_amp
 	is_multiline := struct_init.fields.len > 5
 	g.is_amp = false // reset the flag immediately so that other struct inits in this expr are handled correctly

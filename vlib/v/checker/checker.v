@@ -1446,6 +1446,8 @@ fn (mut c Checker) check_return_generics_struct(return_type ast.Type, mut call_e
 					}
 					mut info := rts.info
 					info.generic_types = []
+					info.concrete_types = generic_types.clone()
+					info.parent_type = return_type
 					info.fields = fields
 					stru_idx := c.table.register_type_symbol(ast.TypeSymbol{
 						kind: .struct_
@@ -3502,7 +3504,23 @@ fn (mut c Checker) stmt(node ast.Stmt) {
 		ast.ExprStmt {
 			node.typ = c.expr(node.expr)
 			c.expected_type = ast.void_type
-			c.check_expr_opt_call(node.expr, ast.void_type)
+			mut or_typ := ast.void_type
+			match node.expr {
+				ast.IndexExpr {
+					if node.expr.or_expr.kind != .absent {
+						node.is_expr = true
+						or_typ = node.typ
+					}
+				}
+				ast.PrefixExpr {
+					if node.expr.or_block.kind != .absent {
+						node.is_expr = true
+						or_typ = node.typ
+					}
+				}
+				else {}
+			}
+			c.check_expr_opt_call(node.expr, or_typ)
 			// TODO This should work, even if it's prolly useless .-.
 			// node.typ = c.check_expr_opt_call(node.expr, ast.void_type)
 		}
