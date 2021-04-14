@@ -6,6 +6,7 @@ import v.pref
 
 const (
 	skip_with_fsanitize_memory    = [
+		'vlib/context/deadline_test.v',
 		'vlib/net/tcp_simple_client_server_test.v',
 		'vlib/net/http/cookie_test.v',
 		'vlib/net/http/http_test.v',
@@ -32,24 +33,7 @@ const (
 	skip_with_werror              = [
 		'vlib/clipboard/clipboard_test.v',
 		'vlib/eventbus/eventbus_test.v',
-		'vlib/gx/color_test.v',
-		'vlib/json/json_test.v',
-		'vlib/math/big/big_test.v',
-		'vlib/net/ftp/ftp_test.v',
-		'vlib/net/http/cookie_test.v',
-		'vlib/net/http/http_httpbin_test.v',
-		'vlib/net/http/header_test.v',
-		'vlib/net/tcp_test.v',
-		'vlib/net/tcp_simple_client_server_test.v',
-		'vlib/net/smtp/smtp_test.v',
-		'vlib/net/udp_test.v',
-		'vlib/net/unix/unix_test.v',
-		'vlib/net/http/http_test.v',
-		'vlib/net/http/status_test.v',
 		'vlib/orm/orm_test.v',
-		'vlib/os/os_test.v',
-		'vlib/rand/mt19937/mt19937_test.v',
-		'vlib/readline/readline_test.v',
 		'vlib/regex/regex_test.v',
 		'vlib/sqlite/sqlite_test.v',
 		'vlib/strconv/atof_test.v',
@@ -185,6 +169,7 @@ const (
 		'vlib/net/websocket/ws_test.v',
 	]
 	skip_on_windows               = [
+		'vlib/context/deadline_test.v' /* blocks `windows-tcc` */,
 		'vlib/orm/orm_test.v',
 		'vlib/v/tests/orm_sub_struct_test.v',
 		'vlib/net/websocket/ws_test.v',
