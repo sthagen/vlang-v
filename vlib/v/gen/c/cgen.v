@@ -1969,7 +1969,22 @@ fn (mut g Gen) asm_arg(arg ast.AsmArg, stmt ast.AsmStmt) {
 			}
 		}
 		ast.AsmDisp {
-			g.write(arg.val)
+			if arg.val.len >= 2 && arg.val[0] in [`b`, `f`] {
+				mut is_digit := true
+				for c in arg.val[1..] {
+					if !c.is_digit() {
+						is_digit = false
+						break
+					}
+				}
+				if is_digit {
+					g.write(arg.val[1..] + rune(arg.val[0]).str())
+				} else {
+					g.write(arg.val)
+				}
+			} else {
+				g.write(arg.val)
+			}
 		}
 		string {
 			g.write('$arg')
@@ -3618,7 +3633,7 @@ fn (mut g Gen) infix_expr(node ast.InfixExpr) {
 		// arr << val
 		tmp := g.new_tmp_var()
 		info := left_final_sym.info as ast.Array
-		if right_final_sym.kind == .array && info.elem_type != node.right_type {
+		if right_final_sym.kind == .array && info.elem_type != g.unwrap_generic(node.right_type) {
 			// push an array => PUSH_MANY, but not if pushing an array to 2d array (`[][]int << []int`)
 			g.write('_PUSH_MANY(')
 			mut expected_push_many_atype := left_type
@@ -3810,7 +3825,7 @@ fn (mut g Gen) lock_expr(node ast.LockExpr) {
 			if !node.is_rlock[i] {
 				name := id.name
 				deref := if id.is_mut { '->' } else { '.' }
-				g.writeln('_arr_$mtxs[$j] = &$name${deref}mtx;')
+				g.writeln('_arr_$mtxs[$j] = (uintptr_t)&$name${deref}mtx;')
 				g.writeln('_isrlck_$mtxs[$j] = false;')
 				j++
 			}
@@ -3819,7 +3834,7 @@ fn (mut g Gen) lock_expr(node ast.LockExpr) {
 			if node.is_rlock[i] {
 				name := id.name
 				deref := if id.is_mut { '->' } else { '.' }
-				g.writeln('_arr_$mtxs[$j] = &$name${deref}mtx;')
+				g.writeln('_arr_$mtxs[$j] = (uintptr_t)&$name${deref}mtx;')
 				g.writeln('_isrlck_$mtxs[$j] = true;')
 				j++
 			}
