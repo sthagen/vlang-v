@@ -1067,6 +1067,7 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 			g.gen_assign_stmt(node)
 		}
 		ast.Block {
+			g.write_v_source_line_info(node.pos)
 			if node.is_unsafe {
 				g.writeln('{ // Unsafe block')
 			} else {
@@ -1188,6 +1189,7 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 			g.writeln('$node.name: {}')
 		}
 		ast.GotoStmt {
+			g.write_v_source_line_info(node.pos)
 			g.writeln('goto $node.name;')
 		}
 		ast.HashStmt {
@@ -5120,9 +5122,12 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 	}
 	// The rest of the fields are zeroed.
 	// `inited_fields` is a list of fields that have been init'ed, they are skipped
-	// mut nr_fields := 0
+	mut nr_fields := 1
 	if sym.kind == .struct_ {
 		info := sym.info as ast.Struct
+		$if !msvc {
+			nr_fields = info.fields.len
+		}
 		if info.is_union && struct_init.fields.len > 1 {
 			verror('union must not have more than 1 initializer')
 		}
@@ -5217,7 +5222,7 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 		g.indent--
 	}
 
-	if !initialized {
+	if !initialized && nr_fields > 0 {
 		g.write('0')
 	}
 
