@@ -431,6 +431,15 @@ pub fn (t &Table) find_type(name string) ?TypeSymbol {
 	return none
 }
 
+pub const invalid_type_symbol = &TypeSymbol{
+	parent_idx: -1
+	language: .v
+	mod: 'builtin'
+	kind: .placeholder
+	name: 'InvalidType'
+	cname: 'InvalidType'
+}
+
 [inline]
 pub fn (t &Table) get_type_symbol(typ Type) &TypeSymbol {
 	// println('get_type_symbol $typ')
@@ -439,8 +448,9 @@ pub fn (t &Table) get_type_symbol(typ Type) &TypeSymbol {
 		return unsafe { &t.type_symbols[idx] }
 	}
 	// this should never happen
-	t.panic('get_type_symbol: invalid type (typ=$typ idx=$idx). Compiler bug. This should never happen. Please create a GitHub issue.
+	t.panic('get_type_symbol: invalid type (typ=$typ idx=$idx). Compiler bug. This should never happen. Please report the bug using `v bug file.v`.
 ')
+	return ast.invalid_type_symbol
 }
 
 // get_final_type_symbol follows aliases until it gets to a "real" Type
@@ -456,7 +466,8 @@ pub fn (t &Table) get_final_type_symbol(typ Type) &TypeSymbol {
 		return unsafe { &t.type_symbols[idx] }
 	}
 	// this should never happen
-	t.panic('get_final_type_symbol: invalid type (typ=$typ idx=$idx). Compiler bug. This should never happen. Please create a GitHub issue.')
+	t.panic('get_final_type_symbol: invalid type (typ=$typ idx=$idx). Compiler bug. This should never happen. Please report the bug using `v bug file.v`.')
+	return ast.invalid_type_symbol
 }
 
 [inline]

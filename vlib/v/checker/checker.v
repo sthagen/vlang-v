@@ -353,18 +353,14 @@ pub fn (mut c Checker) interface_decl(decl ast.InterfaceDecl) {
 	c.check_valid_pascal_case(decl.name, 'interface name', decl.pos)
 	for method in decl.methods {
 		c.check_valid_snake_case(method.name, 'method name', method.pos)
-		if method.return_type != ast.Type(0) {
-			c.ensure_type_exists(method.return_type, method.return_type_pos) or { return }
-		}
+		c.ensure_type_exists(method.return_type, method.return_type_pos) or { return }
 		for param in method.params {
 			c.ensure_type_exists(param.typ, param.pos) or { return }
 		}
 	}
 	for i, field in decl.fields {
 		c.check_valid_snake_case(field.name, 'field name', field.pos)
-		if field.typ != ast.Type(0) {
-			c.ensure_type_exists(field.typ, field.pos) or { return }
-		}
+		c.ensure_type_exists(field.typ, field.pos) or { return }
 		for j in 0 .. i {
 			if field.name == decl.fields[j].name {
 				c.error('field name `$field.name` duplicate', field.pos)
@@ -2511,7 +2507,7 @@ pub fn (mut c Checker) check_or_expr(or_expr ast.OrExpr, ret_type ast.Type, expr
 
 fn is_expr_panic_or_exit(expr ast.Expr) bool {
 	match expr {
-		ast.CallExpr { return expr.name in ['panic', 'exit'] }
+		ast.CallExpr { return !expr.is_method && expr.name in ['panic', 'exit'] }
 		else { return false }
 	}
 }
@@ -3312,16 +3308,12 @@ pub fn (mut c Checker) array_init(mut array_init ast.ArrayInit) ast.Type {
 		if array_init.has_len {
 			c.ensure_sumtype_array_has_default_value(array_init)
 		}
-		if array_init.elem_type != 0 {
-			c.ensure_type_exists(array_init.elem_type, array_init.elem_type_pos) or {}
-		}
+		c.ensure_type_exists(array_init.elem_type, array_init.elem_type_pos) or {}
 		return array_init.typ
 	}
 	if array_init.is_fixed {
 		c.ensure_sumtype_array_has_default_value(array_init)
-		if array_init.elem_type != 0 {
-			c.ensure_type_exists(array_init.elem_type, array_init.elem_type_pos) or {}
-		}
+		c.ensure_type_exists(array_init.elem_type, array_init.elem_type_pos) or {}
 	}
 	// a = []
 	if array_init.exprs.len == 0 {
@@ -6584,7 +6576,7 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 	c.stmts(node.stmts)
 	node.has_return = c.returns || has_top_return(node.stmts)
 	if node.language == .v && !node.no_body && node.return_type != ast.void_type && !node.has_return
-		&& node.name !in ['panic', 'exit'] {
+		&& (node.is_method || node.name !in ['panic', 'exit']) {
 		if c.inside_anon_fn {
 			c.error('missing return at the end of an anonymous function', node.pos)
 		} else {
@@ -6605,7 +6597,7 @@ fn has_top_return(stmts []ast.Stmt) bool {
 			}
 		} else if stmt is ast.ExprStmt {
 			if stmt.expr is ast.CallExpr {
-				if stmt.expr.name in ['panic', 'exit'] {
+				if !stmt.expr.is_method && stmt.expr.name in ['panic', 'exit'] {
 					return true
 				}
 			}
@@ -6667,6 +6659,7 @@ fn (mut c Checker) trace(fbase string, message string) {
 fn (mut c Checker) ensure_type_exists(typ ast.Type, pos token.Position) ? {
 	if typ == 0 {
 		c.error('unknown type', pos)
+		return none
 	}
 	sym := c.table.get_type_symbol(typ)
 	match sym.kind {
