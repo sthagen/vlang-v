@@ -6031,6 +6031,9 @@ pub fn (mut c Checker) enum_val(mut node ast.EnumVal) ast.Type {
 		c.error('not an enum', node.pos)
 		return ast.void_type
 	}
+	if !(typ_sym.is_public || typ_sym.mod == c.mod) {
+		c.error('enum `$typ_sym.name` is private', node.pos)
+	}
 	// info := typ_sym.info as ast.Enum
 	info := typ_sym.enum_info()
 	// rintln('checker: x = $info.x enum val $c.expected_type $typ_sym.name')
@@ -6426,11 +6429,11 @@ fn (mut c Checker) post_process_generic_fns() {
 			}
 			mut node := c.file.generic_fns[i]
 			c.mod = node.mod
-			for gen_types in c.table.fn_generic_types[node.name] {
-				node.cur_generic_types = gen_types
+			for generic_types in c.table.fn_generic_types[node.name] {
+				node.cur_generic_types = generic_types
 				c.fn_decl(mut node)
 				if node.name in ['vweb.run_app', 'vweb.run'] {
-					c.vweb_gen_types << gen_types
+					c.vweb_gen_types << generic_types
 				}
 			}
 			node.cur_generic_types = []
