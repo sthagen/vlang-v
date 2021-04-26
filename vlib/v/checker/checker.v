@@ -61,6 +61,7 @@ pub mut:
 	inside_const   bool
 	inside_anon_fn bool
 	inside_ref_lit bool
+	inside_fn_arg  bool // `a`, `b` in `a.f(b)`
 	skip_flags     bool // should `#flag` and `#include` be skipped
 mut:
 	files                            []ast.File
@@ -352,14 +353,18 @@ pub fn (mut c Checker) sum_type_decl(node ast.SumTypeDecl) {
 pub fn (mut c Checker) interface_decl(decl ast.InterfaceDecl) {
 	c.check_valid_pascal_case(decl.name, 'interface name', decl.pos)
 	for method in decl.methods {
-		c.check_valid_snake_case(method.name, 'method name', method.pos)
+		if decl.language == .v {
+			c.check_valid_snake_case(method.name, 'method name', method.pos)
+		}
 		c.ensure_type_exists(method.return_type, method.return_type_pos) or { return }
 		for param in method.params {
 			c.ensure_type_exists(param.typ, param.pos) or { return }
 		}
 	}
 	for i, field in decl.fields {
-		c.check_valid_snake_case(field.name, 'field name', field.pos)
+		if decl.language == .v {
+			c.check_valid_snake_case(field.name, 'field name', field.pos)
+		}
 		c.ensure_type_exists(field.typ, field.pos) or { return }
 		for j in 0 .. i {
 			if field.name == decl.fields[j].name {
@@ -1318,7 +1323,10 @@ pub fn (mut c Checker) call_expr(mut call_expr ast.CallExpr) ast.Type {
 	}
 	*/
 	// Now call `method_call` or `fn_call` for specific checks.
+	old_inside_fn_arg := c.inside_fn_arg
+	c.inside_fn_arg = true
 	typ := if call_expr.is_method { c.method_call(mut call_expr) } else { c.fn_call(mut call_expr) }
+	c.inside_fn_arg = old_inside_fn_arg
 	// autofree: mark args that have to be freed (after saving them in tmp exprs)
 	free_tmp_arg_vars := c.pref.autofree && !c.is_builtin_mod && call_expr.args.len > 0
 		&& !call_expr.args[0].typ.has_flag(.optional)
@@ -1449,14 +1457,14 @@ fn (mut c Checker) check_return_generics_struct(return_type ast.Type, mut call_e
 			idx := c.table.type_idxs[nrt]
 			if idx != 0 {
 				c.ensure_type_exists(idx, call_expr.pos) or {}
-				call_expr.return_type = ast.new_type(idx).derive(return_type)
+				call_expr.return_type = ast.new_type(idx).derive(return_type).clear_flag(.generic)
 			} else {
 				mut fields := rts.info.fields.clone()
 				if rts.info.generic_types.len == concrete_types.len {
 					generic_names := rts.info.generic_types.map(c.table.get_type_symbol(it).name)
 					for i, _ in fields {
 						if t_typ := c.table.resolve_generic_to_concrete(fields[i].typ,
-							generic_names, concrete_types)
+							generic_names, concrete_types, false)
 						{
 							fields[i].typ = t_typ
 						}
@@ -1473,7 +1481,7 @@ fn (mut c Checker) check_return_generics_struct(return_type ast.Type, mut call_e
 						mod: c.mod
 						info: info
 					})
-					call_expr.return_type = ast.new_type(stru_idx)
+					call_expr.return_type = ast.new_type(stru_idx).derive(return_type).clear_flag(.generic)
 				}
 			}
 		}
@@ -1624,11 +1632,6 @@ pub fn (mut c Checker) method_call(mut call_expr ast.CallExpr) ast.Type {
 			c.error('expected $nr_args arguments, but got $call_expr.args.len', unexpected_arguments_pos)
 			return method.return_type
 		}
-		if method.generic_names.len > 0 && method.return_type.has_flag(.generic) {
-			c.check_return_generics_struct(method.return_type, mut call_expr, concrete_types)
-		} else {
-			call_expr.return_type = method.return_type
-		}
 		mut exp_arg_typ := ast.Type(0) // type of 1st arg for special builtin methods
 		mut param_is_mut := false
 		mut no_type_promotion := false
@@ -1753,9 +1756,15 @@ pub fn (mut c Checker) method_call(mut call_expr ast.CallExpr) ast.Type {
 			// no type arguments given in call, attempt implicit instantiation
 			c.infer_fn_generic_types(method, mut call_expr)
 		}
+		// resolve return generics struct to concrete type
+		if method.generic_names.len > 0 && method.return_type.has_flag(.generic) {
+			c.check_return_generics_struct(method.return_type, mut call_expr, call_expr.concrete_types)
+		} else {
+			call_expr.return_type = method.return_type
+		}
 		if call_expr.concrete_types.len > 0 && method.return_type != 0 {
 			if typ := c.table.resolve_generic_to_concrete(method.return_type, method.generic_names,
-				call_expr.concrete_types)
+				call_expr.concrete_types, false)
 			{
 				call_expr.return_type = typ
 				return typ
@@ -2119,11 +2128,6 @@ pub fn (mut c Checker) fn_call(mut call_expr ast.CallExpr) ast.Type {
 			call_expr.pos)
 		return func.return_type
 	}
-	if func.generic_names.len > 0 && func.return_type.has_flag(.generic) {
-		c.check_return_generics_struct(func.return_type, mut call_expr, concrete_types)
-	} else {
-		call_expr.return_type = func.return_type
-	}
 	if func.return_type == ast.void_type && func.ctdefine.len > 0
 		&& func.ctdefine !in c.pref.compile_defines {
 		call_expr.should_be_skipped = true
@@ -2276,7 +2280,7 @@ pub fn (mut c Checker) fn_call(mut call_expr ast.CallExpr) ast.Type {
 			if param.typ.has_flag(.generic)
 				&& func.generic_names.len == call_expr.concrete_types.len {
 				if unwrap_typ := c.table.resolve_generic_to_concrete(param.typ, func.generic_names,
-					call_expr.concrete_types)
+					call_expr.concrete_types, false)
 				{
 					c.check_expected_call_arg(typ, unwrap_typ, call_expr.language) or {
 						c.error('$err.msg in argument ${i + 1} to `$fn_name`', call_arg.pos)
@@ -2285,9 +2289,15 @@ pub fn (mut c Checker) fn_call(mut call_expr ast.CallExpr) ast.Type {
 			}
 		}
 	}
+	// resolve return generics struct to concrete type
+	if func.generic_names.len > 0 && func.return_type.has_flag(.generic) {
+		c.check_return_generics_struct(func.return_type, mut call_expr, call_expr.concrete_types)
+	} else {
+		call_expr.return_type = func.return_type
+	}
 	if call_expr.concrete_types.len > 0 && func.return_type != 0 {
 		if typ := c.table.resolve_generic_to_concrete(func.return_type, func.generic_names,
-			call_expr.concrete_types)
+			call_expr.concrete_types, false)
 		{
 			call_expr.return_type = typ
 			return typ
@@ -3564,7 +3574,7 @@ fn (mut c Checker) stmt(node ast.Stmt) {
 		ast.DeferStmt {
 			if node.idx_in_fn < 0 {
 				node.idx_in_fn = c.cur_fn.defer_stmts.len
-				c.cur_fn.defer_stmts << &node
+				c.cur_fn.defer_stmts << unsafe { &node }
 			}
 			c.stmts(node.stmts)
 		}
@@ -4148,7 +4158,9 @@ fn (mut c Checker) stmts(stmts []ast.Stmt) {
 
 pub fn (mut c Checker) unwrap_generic(typ ast.Type) ast.Type {
 	if typ.has_flag(.generic) {
-		if t_typ := c.table.resolve_generic_to_concrete(typ, c.cur_fn.generic_names, c.cur_fn.cur_generic_types) {
+		if t_typ := c.table.resolve_generic_to_concrete(typ, c.cur_fn.generic_names, c.cur_fn.cur_generic_types,
+			false)
+		{
 			return t_typ
 		}
 	}
@@ -4176,7 +4188,7 @@ pub fn (mut c Checker) expr(node ast.Expr) ast.Type {
 		ast.AnonFn {
 			c.inside_anon_fn = true
 			keep_fn := c.cur_fn
-			c.cur_fn = &node.decl
+			c.cur_fn = unsafe { &node.decl }
 			c.stmts(node.decl.stmts)
 			c.fn_decl(mut node.decl)
 			c.cur_fn = keep_fn
@@ -5014,6 +5026,24 @@ pub fn (mut c Checker) match_expr(mut node ast.MatchExpr) ast.Type {
 	// node.expected_type = c.expected_type
 	// }
 	node.return_type = ret_type
+	cond_var := c.get_base_name(&node.cond)
+	if cond_var != '' {
+		mut cond_is_auto_heap := false
+		for branch in node.branches {
+			if v := branch.scope.find_var(cond_var) {
+				if v.is_auto_heap {
+					cond_is_auto_heap = true
+					break
+				}
+			}
+		}
+		if cond_is_auto_heap {
+			for branch in node.branches {
+				mut v := branch.scope.find_var(cond_var) or { continue }
+				v.is_auto_heap = true
+			}
+		}
+	}
 	return ret_type
 }
 
@@ -5815,7 +5845,7 @@ fn (c &Checker) has_return(stmts []ast.Stmt) ?bool {
 }
 
 pub fn (mut c Checker) postfix_expr(mut node ast.PostfixExpr) ast.Type {
-	typ := c.expr(node.expr)
+	typ := c.unwrap_generic(c.expr(node.expr))
 	typ_sym := c.table.get_type_symbol(typ)
 	is_non_void_pointer := (typ.is_ptr() || typ.is_pointer()) && typ_sym.kind != .voidptr
 	if !c.inside_unsafe && is_non_void_pointer && !node.expr.is_auto_deref_var() {
@@ -5828,6 +5858,53 @@ pub fn (mut c Checker) postfix_expr(mut node ast.PostfixExpr) ast.Type {
 		node.auto_locked, _ = c.fail_if_immutable(node.expr)
 	}
 	return typ
+}
+
+pub fn (mut c Checker) mark_as_referenced(mut node ast.Expr) {
+	match mut node {
+		ast.Ident {
+			if mut node.obj is ast.Var {
+				mut obj := unsafe { &node.obj }
+				if c.fn_scope != voidptr(0) {
+					obj = c.fn_scope.find_var(node.obj.name) or { unsafe { &node.obj } }
+				}
+				type_sym := c.table.get_type_symbol(obj.typ)
+				if obj.is_stack_obj {
+					c.error('`$node.name` cannot be referenced outside `unsafe` blocks as it might be stored on stack. Consider declaring `$type_sym.name` as `[heap]`.',
+						node.pos)
+				} else if type_sym.kind == .array_fixed {
+					c.error('cannot reference fixed array `$node.name` outside `unsafe` blocks as it is supposed to be stored on stack',
+						node.pos)
+				} else {
+					node.obj.is_auto_heap = true
+				}
+			}
+		}
+		ast.SelectorExpr {
+			c.mark_as_referenced(mut &node.expr)
+		}
+		ast.IndexExpr {
+			c.mark_as_referenced(mut &node.left)
+		}
+		else {}
+	}
+}
+
+pub fn (mut c Checker) get_base_name(node &ast.Expr) string {
+	match node {
+		ast.Ident {
+			return node.name
+		}
+		ast.SelectorExpr {
+			return c.get_base_name(&node.expr)
+		}
+		ast.IndexExpr {
+			return c.get_base_name(&node.left)
+		}
+		else {
+			return ''
+		}
+	}
 }
 
 pub fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) ast.Type {
@@ -5871,9 +5948,19 @@ pub fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) ast.Type {
 				}
 			}
 		}
+		if !c.inside_fn_arg && !c.inside_unsafe {
+			c.mark_as_referenced(mut &node.right)
+		}
 		return right_type.to_ptr()
 	} else if node.op == .amp && node.right !is ast.CastExpr {
-		return right_type.to_ptr()
+		if !c.inside_fn_arg && !c.inside_unsafe {
+			c.mark_as_referenced(mut &node.right)
+		}
+		if node.right.is_auto_deref_var() {
+			return right_type
+		} else {
+			return right_type.to_ptr()
+		}
 	}
 	if node.op == .mul {
 		if right_type.is_ptr() {
