@@ -606,6 +606,28 @@ fn test_int_keys() {
 	m3.delete(1)
 }
 
+enum Color {
+	red
+	green
+	blue
+}
+
+type ColorAlias = Color
+
+fn test_alias_enum() {
+	mut m := map[ColorAlias]string{}
+	m[Color.red] = 'hi'
+	assert m[Color.red] == 'hi'
+}
+
+fn test_enum_in_map() {
+	mut m := map[Color]string{}
+	m[Color.red] = 'hi'
+	assert Color.red in m
+	assert Color.green !in m
+	assert Color.blue !in m
+}
+
 fn test_voidptr_keys() {
 	mut m := map[voidptr]string{}
 	v := 5

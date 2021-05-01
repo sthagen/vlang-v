@@ -813,6 +813,8 @@ fnums[2] = 100
 println(fnums) // => [1, 10, 100]
 println(typeof(fnums).name) // => [3]int
 
+fnums2 := [1, 10, 100]! // short init syntax that does the same (the syntax will probably change)
+
 anums := fnums[0..fnums.len]
 println(anums) // => [1, 10, 100]
 println(typeof(anums).name) // => []int
@@ -1383,6 +1385,48 @@ fn read_log() {
 }
 ```
 
+If the function returns a value the `defer` block is executed *after* the return
+expression is evaluated:
+
+```v
+import os
+
+enum State {
+	normal
+	write_log
+	return_error
+}
+
+// write log file and return number of bytes written
+fn write_log(s State) ?int {
+	mut f := os.create('log.txt') ?
+	defer {
+		f.close()
+	}
+	if s == .write_log {
+		// `f.close()` will be called after `f.write()` has been
+		// executed, but before `write_log()` finally returns the
+		// number of bytes written to `main()`
+		return f.writeln('This is a log file')
+	} else if s == .return_error {
+		// the file will be closed after the `error()` function
+		// has returned - so the error message will still report
+		// it as open
+		return error('nothing written; file open: $f.is_opened')
+	}
+	// the file will be closed here, too
+	return 0
+}
+
+fn main() {
+	n := write_log(.return_error) or {
+		println('Error: $err')
+		0
+	}
+	println('$n bytes written')
+}
+```
+
 ## Structs
 
 ```v
@@ -1671,7 +1715,7 @@ immutable by default, even when [references](#references) are passed.
 
 V is not a purely functional language however.
 
-There is a compiler flag to enable global variables (`--enable-globals`), but this is
+There is a compiler flag to enable global variables (`-enable-globals`), but this is
 intended for low-level applications like kernels and drivers.
 
 ### Mutable arguments
@@ -1904,7 +1948,7 @@ const (
 		b: 0
 	}
 	// evaluate function call at compile-time*
-	blue    = rgb(0, 0, 255)
+	blue = rgb(0, 0, 255)
 )
 
 println(numbers)
@@ -3080,7 +3124,7 @@ each object.
 
 ### Control
 
-You can take advantage of V's autofree engine and define a `free()` method on custom 
+You can take advantage of V's autofree engine and define a `free()` method on custom
 data types:
 
 ```v
@@ -3092,7 +3136,7 @@ fn (data &MyType) free() {
 }
 ```
 
-Just as the compiler frees C data types with C's `free()`, it will statically insert 
+Just as the compiler frees C data types with C's `free()`, it will statically insert
 `free()` calls for your data type at the end of each variable's lifetime.
 
 For developers willing to have more low level control, autofree can be disabled with
@@ -3316,7 +3360,7 @@ You will get:
 [factorial.v:5] n * factorial(n - 1): 120
 120
 ```
-Note that `dump(expr)` will trace both the source location, 
+Note that `dump(expr)` will trace both the source location,
 the expression itself, and the expression value.
 
 ## Memory-unsafe code
@@ -3606,9 +3650,9 @@ To cast a `voidptr` to a V reference, use `user := &User(user_void_ptr)`.
 
 ### C Declarations
 
-C identifiers are accessed with the `C` prefix similarly to how module-specific 
-identifiers are accessed. Functions must be redeclared in V before they can be used. 
-Any C types may be used behind the `C` prefix, but types must be redeclared in V in 
+C identifiers are accessed with the `C` prefix similarly to how module-specific
+identifiers are accessed. Functions must be redeclared in V before they can be used.
+Any C types may be used behind the `C` prefix, but types must be redeclared in V in
 order to access type members.
 
 To redeclare complex types, such as in the following C code:
@@ -3646,10 +3690,10 @@ struct C.SomeCStruct {
 }
 ```
 
-The existence of the data members is made known to V, and they may be used without 
+The existence of the data members is made known to V, and they may be used without
 re-creating the original structure exactly.
 
-Alternatively, you may [embed](#embedded-structs) the sub-data-structures to maintain 
+Alternatively, you may [embed](#embedded-structs) the sub-data-structures to maintain
 a parallel code structure.
 
 ## Debugging generated C code
@@ -3739,7 +3783,7 @@ If you're using a custom ifdef, then you do need `$if option ? {}` and compile w
 Full list of builtin options:
 | OS                            | Compilers         | Platforms             | Other                     |
 | ---                           | ---               | ---                   | ---                       |
-| `windows`, `linux`, `macos`   | `gcc`, `tinyc`    | `amd64`, `aarch64`    | `debug`, `prod`, `test`   |
+| `windows`, `linux`, `macos`   | `gcc`, `tinyc`    | `amd64`, `arm64`      | `debug`, `prod`, `test`   |
 | `mac`, `darwin`, `ios`,       | `clang`, `mingw`  | `x64`, `x32`          | `js`, `glibc`, `prealloc` |
 | `android`,`mach`, `dragonfly` | `msvc`            | `little_endian`       | `no_bounds_checking`, `freestanding`    |
 | `gnu`, `hpux`, `haiku`, `qnx` | `cplusplus`       | `big_endian`          |
@@ -3839,7 +3883,7 @@ If a file has an environment-specific suffix, it will only be compiled for that 
 
 - `.js.v` => will be used only by the JS backend. These files can contain JS. code.
 - `.c.v` => will be used only by the C backend. These files can contain C. code.
-- `.x64.v` => will be used only by V's x64 backend.
+- `.native.v` => will be used only by V's native backend.
 - `_nix.c.v` => will be used only on Unix systems (non Windows).
 - `_${os}.c.v` => will be used only on the specific `os` system.
 For example, `_windows.c.v` will be used only when compiling on Windows, or with `-os windows`.
@@ -3888,7 +3932,7 @@ If you do need a custom flag file, that has platform dependent code, use the
 postfix `_d_customflag.v`, and then use plaftorm dependent compile time
 conditional blocks inside it, i.e. `$if linux {}` etc.
 
-- `_notd_customflag.v` => similar to _d_customflag.v, but will be used 
+- `_notd_customflag.v` => similar to _d_customflag.v, but will be used
 *only* if you do NOT pass `-d customflag` to V.
 
 ## Compile time pseudo variables
@@ -4043,7 +4087,7 @@ To improve safety and maintainability, operator overloading is limited:
 are auto generated when the operators are defined though they must return the same type.
 
 ## Inline assembly
-<!-- ignore because it doesn't pass fmt test (why?) --> 
+<!-- ignore because it doesn't pass fmt test (why?) -->
 ```v ignore
 a := 100
 b := 20
@@ -4052,12 +4096,12 @@ asm amd64 {
     mov eax, a
     add eax, b
     mov c, eax
-    ; =r (c) as c // output 
-    ; r (a) as a // input 
+    ; =r (c) as c // output
+    ; r (a) as a // input
       r (b) as b
 }
-println('a: $a') // 100 
-println('b: $b') // 20 
+println('a: $a') // 100
+println('b: $b') // 20
 println('c: $c') // 120
 ```
 
