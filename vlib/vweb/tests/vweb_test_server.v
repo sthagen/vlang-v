@@ -10,8 +10,13 @@ const (
 
 struct App {
 	vweb.Context
-	port    int
-	timeout int
+	port          int
+	timeout       int
+	global_config shared Config
+}
+
+struct Config {
+	max_ping int
 }
 
 fn exit_after_timeout(timeout_in_ms int) {
@@ -30,18 +35,24 @@ fn main() {
 	assert timeout > 0
 	go exit_after_timeout(timeout)
 	//
-	mut app := App{
+	shared config := &Config{
+		max_ping: 50
+	}
+	app := &App{
 		port: http_port
 		timeout: timeout
+		global_config: config
 	}
-	vweb.run_app<App>(mut app, http_port)
+	eprintln('>> webserver: started on http://127.0.0.1:$app.port/ , with maximum runtime of $app.timeout milliseconds.')
+	// vweb.run<App>(mut app, http_port)
+	vweb.run(app, http_port)
 }
 
-pub fn (mut app App) init_server() {
-	eprintln('>> webserver: started on http://127.0.0.1:$app.port/ , with maximum runtime of $app.timeout milliseconds.')
-}
+// pub fn (mut app App) init_server() {
+//}
 
 pub fn (mut app App) index() vweb.Result {
+	assert app.global_config.max_ping == 50
 	return app.text('Welcome to VWeb')
 }
 

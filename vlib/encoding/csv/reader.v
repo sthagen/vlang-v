@@ -134,7 +134,7 @@ fn (mut r Reader) read_record() ?[]string {
 			need_read = false
 			keep_raw = false
 		}
-		if line[0] != `"` { // not quoted
+		if line.len == 0 || line[0] != `"` { // not quoted
 			j := line.index(r.delimiter.ascii_str()) or {
 				// last
 				fields << line[..line.len]
@@ -145,7 +145,24 @@ fn (mut r Reader) read_record() ?[]string {
 			line = line[i + 1..]
 			continue
 		} else { // quoted
-			j := line[1..].index('"') or {
+			mut need_more := true
+			mut has_double_quotes := false
+			mut j := 0
+			mut n := 1
+			for n < line.len {
+				if line[n] == `"` {
+					if n == line.len - 1 || line[n + 1] != `"` {
+						need_more = false
+						j = n - 1
+						break
+					} else {
+						has_double_quotes = true
+						n++
+					}
+				}
+				n++
+			}
+			if need_more {
 				need_read = true
 				keep_raw = true
 				continue
@@ -153,16 +170,17 @@ fn (mut r Reader) read_record() ?[]string {
 			line = line[1..]
 			if j + 1 == line.len {
 				// last record
-				fields << line[..j]
+				fields << if has_double_quotes { line[..j].replace('""', '"') } else { line[..j] }
 				break
 			}
 			next := line[j + 1]
 			if next == r.delimiter {
-				fields << line[..j]
+				fields << if has_double_quotes { line[..j].replace('""', '"') } else { line[..j] }
 				if j + 2 == line.len {
-					break
+					line = ''
+				} else {
+					line = line[j + 2..]
 				}
-				line = line[j + 2..]
 				continue
 			}
 		}

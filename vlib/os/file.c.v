@@ -13,9 +13,11 @@ struct FileInfo {
 	size int
 }
 
-fn C.fseeko(voidptr, u64, int) int
+fn C.fseeko(&C.FILE, u64, int) int
 
-fn C._fseeki64(voidptr, u64, int) int
+fn C._fseeki64(&C.FILE, u64, int) int
+
+fn C.getc(&C.FILE) int
 
 // open_file can be used to open or create a file with custom flags and permissions and returns a `File` object.
 pub fn open_file(path string, mode string, options ...int) ?File {
@@ -162,6 +164,15 @@ pub fn stderr() File {
 		cfile: C.stderr
 		is_opened: true
 	}
+}
+
+// read implements the Reader interface.
+pub fn (f &File) read(mut buf []byte) ?int {
+	if buf.len == 0 {
+		return 0
+	}
+	nbytes := fread(buf.data, 1, buf.len, f.cfile) ?
+	return nbytes
 }
 
 // **************************** Write ops  ***************************
@@ -321,6 +332,31 @@ pub fn (mut f File) write_ptr_at(data voidptr, size int, pos u64) int {
 }
 
 // **************************** Read ops  ***************************
+
+// fread wraps C.fread and handles error and end-of-file detection.
+fn fread(ptr voidptr, item_size int, items int, stream &C.FILE) ?int {
+	nbytes := int(C.fread(ptr, item_size, items, stream))
+	// If no bytes were read, check for errors and end-of-file.
+	if nbytes <= 0 {
+		// If fread encountered end-of-file return the none error. Note that fread
+		// may read data and encounter the end-of-file, but we shouldn't return none
+		// in that case which is why we only check for end-of-file if no data was
+		// read. The caller will get none on their next call because there will be
+		// no data available and the end-of-file will be encountered again.
+		if C.feof(stream) != 0 {
+			return none
+		}
+		// If fread encountered an error, return it. Note that fread and ferror do
+		// not tell us what the error was, so we can't return anything more specific
+		// than there was an error. This is because fread and ferror do not set
+		// errno.
+		if C.ferror(stream) != 0 {
+			return error('file read error')
+		}
+	}
+	return nbytes
+}
+
 // read_bytes reads bytes from the beginning of the file.
 // Utility method, same as .read_bytes_at(size, 0).
 pub fn (f &File) read_bytes(size int) []byte {
@@ -337,6 +373,45 @@ pub fn (f &File) read_bytes_at(size int, pos u64) []byte {
 	return arr[0..nreadbytes]
 }
 
+// read_bytes_into_newline reads from the beginning of the file into the provided buffer.
+// Each consecutive call on the same file continues reading where it previously ended.
+// A read call is either stopped, if the buffer is full, a newline was read or EOF.
+pub fn (f &File) read_bytes_into_newline(mut buf []byte) ?int {
+	if buf.len == 0 {
+		panic(@FN + ': `buf.len` == 0')
+	}
+	newline := 10
+	mut c := 0
+	mut buf_ptr := 0
+	mut nbytes := 0
+
+	stream := &C.FILE(f.cfile)
+	for (buf_ptr < buf.len) {
+		c = C.getc(stream)
+		match c {
+			C.EOF {
+				if C.feof(stream) != 0 {
+					return nbytes
+				}
+				if C.ferror(stream) != 0 {
+					return error('file read error')
+				}
+			}
+			newline {
+				buf[buf_ptr] = byte(c)
+				nbytes++
+				return nbytes
+			}
+			else {
+				buf[buf_ptr] = byte(c)
+				buf_ptr++
+				nbytes++
+			}
+		}
+	}
+	return nbytes
+}
+
 // read_bytes_into fills `buf` with bytes at the given position in the file.
 // `buf` *must* have length greater than zero.
 // Returns the number of read bytes, or an error.
@@ -348,23 +423,14 @@ pub fn (f &File) read_bytes_into(pos u64, mut buf []byte) ?int {
 		$if windows {
 			// Note: fseek errors if pos == os.file_size, which we accept
 			C._fseeki64(f.cfile, pos, C.SEEK_SET)
-			// errno is only set if fread fails, so clear it first to tell
-			C.errno = 0
-			nbytes := int(C.fread(buf.data, 1, buf.len, f.cfile))
-			if C.errno != 0 {
-				return error(posix_get_error_msg(C.errno))
-			}
+			nbytes := fread(buf.data, 1, buf.len, f.cfile) ?
 			$if debug {
 				C._fseeki64(f.cfile, 0, C.SEEK_SET)
 			}
 			return nbytes
 		} $else {
 			C.fseeko(f.cfile, pos, C.SEEK_SET)
-			C.errno = 0
-			nbytes := int(C.fread(buf.data, 1, buf.len, f.cfile))
-			if C.errno != 0 {
-				return error(posix_get_error_msg(C.errno))
-			}
+			nbytes := fread(buf.data, 1, buf.len, f.cfile) ?
 			$if debug {
 				C.fseeko(f.cfile, 0, C.SEEK_SET)
 			}
@@ -373,30 +439,13 @@ pub fn (f &File) read_bytes_into(pos u64, mut buf []byte) ?int {
 	}
 	$if x32 {
 		C.fseek(f.cfile, pos, C.SEEK_SET)
-		C.errno = 0
-		nbytes := int(C.fread(buf.data, 1, buf.len, f.cfile))
-		if C.errno != 0 {
-			return error(posix_get_error_msg(C.errno))
-		}
+		nbytes := fread(buf.data, 1, buf.len, f.cfile) ?
 		$if debug {
 			C.fseek(f.cfile, 0, C.SEEK_SET)
 		}
 		return nbytes
 	}
 	return error('Could not read file')
-}
-
-// read implements the Reader interface.
-pub fn (f &File) read(mut buf []byte) ?int {
-	if buf.len == 0 {
-		return 0
-	}
-	C.errno = 0
-	nbytes := int(C.fread(buf.data, 1, buf.len, f.cfile))
-	if C.errno != 0 {
-		return error(posix_get_error_msg(C.errno))
-	}
-	return nbytes
 }
 
 // read_at reads `buf.len` bytes starting at file byte offset `pos`, in `buf`.
@@ -417,20 +466,12 @@ pub fn (f &File) read_from(pos u64, mut buf []byte) ?int {
 			C.fseeko(f.cfile, pos, C.SEEK_SET)
 		}
 
-		C.errno = 0
-		nbytes := int(C.fread(buf.data, 1, buf.len, f.cfile))
-		if C.errno != 0 {
-			return error(posix_get_error_msg(C.errno))
-		}
+		nbytes := fread(buf.data, 1, buf.len, f.cfile) ?
 		return nbytes
 	}
 	$if x32 {
 		C.fseek(f.cfile, pos, C.SEEK_SET)
-		C.errno = 0
-		nbytes := int(C.fread(buf.data, 1, buf.len, f.cfile))
-		if C.errno != 0 {
-			return error(posix_get_error_msg(C.errno))
-		}
+		nbytes := fread(buf.data, 1, buf.len, f.cfile) ?
 		return nbytes
 	}
 	return error('Could not read file')
@@ -452,20 +493,34 @@ pub fn (mut f File) write_str(s string) ? {
 	f.write_string(s) or { return err }
 }
 
+pub struct ErrFileNotOpened {
+	msg  string = 'os: file not opened'
+	code int
+}
+
+pub struct ErrSizeOfTypeIs0 {
+	msg  string = 'os: size of type is 0'
+	code int
+}
+
+fn error_file_not_opened() IError {
+	return IError(&ErrFileNotOpened{})
+}
+
+fn error_size_of_type_0() IError {
+	return IError(&ErrSizeOfTypeIs0{})
+}
+
 // read_struct reads a single struct of type `T`
 pub fn (mut f File) read_struct<T>(mut t T) ? {
 	if !f.is_opened {
-		return none
+		return error_file_not_opened()
 	}
 	tsize := int(sizeof(*t))
 	if tsize == 0 {
-		return none
+		return error_size_of_type_0()
 	}
-	C.errno = 0
-	nbytes := int(C.fread(t, 1, tsize, f.cfile))
-	if C.errno != 0 {
-		return error(posix_get_error_msg(C.errno))
-	}
+	nbytes := fread(t, 1, tsize, f.cfile) ?
 	if nbytes != tsize {
 		return error_with_code('incomplete struct read', nbytes)
 	}
@@ -474,32 +529,28 @@ pub fn (mut f File) read_struct<T>(mut t T) ? {
 // read_struct_at reads a single struct of type `T` at position specified in file
 pub fn (mut f File) read_struct_at<T>(mut t T, pos u64) ? {
 	if !f.is_opened {
-		return none
+		return error_file_not_opened()
 	}
 	tsize := int(sizeof(*t))
 	if tsize == 0 {
-		return none
+		return error_size_of_type_0()
 	}
-	C.errno = 0
 	mut nbytes := 0
 	$if x64 {
 		$if windows {
 			C._fseeki64(f.cfile, pos, C.SEEK_SET)
-			nbytes = int(C.fread(t, 1, tsize, f.cfile))
+			nbytes = fread(t, 1, tsize, f.cfile) ?
 			C._fseeki64(f.cfile, 0, C.SEEK_END)
 		} $else {
 			C.fseeko(f.cfile, pos, C.SEEK_SET)
-			nbytes = int(C.fread(t, 1, tsize, f.cfile))
+			nbytes = fread(t, 1, tsize, f.cfile) ?
 			C.fseeko(f.cfile, 0, C.SEEK_END)
 		}
 	}
 	$if x32 {
 		C.fseek(f.cfile, pos, C.SEEK_SET)
-		nbytes = int(C.fread(t, 1, tsize, f.cfile))
+		nbytes = fread(t, 1, tsize, f.cfile) ?
 		C.fseek(f.cfile, 0, C.SEEK_END)
-	}
-	if C.errno != 0 {
-		return error(posix_get_error_msg(C.errno))
 	}
 	if nbytes != tsize {
 		return error_with_code('incomplete struct read', nbytes)
@@ -509,18 +560,14 @@ pub fn (mut f File) read_struct_at<T>(mut t T, pos u64) ? {
 // read_raw reads and returns a single instance of type `T`
 pub fn (mut f File) read_raw<T>() ?T {
 	if !f.is_opened {
-		return none
+		return error_file_not_opened()
 	}
 	tsize := int(sizeof(T))
 	if tsize == 0 {
-		return none
+		return error_size_of_type_0()
 	}
-	C.errno = 0
 	mut t := T{}
-	nbytes := int(C.fread(&t, 1, tsize, f.cfile))
-	if C.errno != 0 {
-		return error(posix_get_error_msg(C.errno))
-	}
+	nbytes := fread(&t, 1, tsize, f.cfile) ?
 	if nbytes != tsize {
 		return error_with_code('incomplete struct read', nbytes)
 	}
@@ -530,13 +577,12 @@ pub fn (mut f File) read_raw<T>() ?T {
 // read_raw_at reads and returns a single instance of type `T` starting at file byte offset `pos`
 pub fn (mut f File) read_raw_at<T>(pos u64) ?T {
 	if !f.is_opened {
-		return none
+		return error_file_not_opened()
 	}
 	tsize := int(sizeof(T))
 	if tsize == 0 {
-		return none
+		return error_size_of_type_0()
 	}
-	C.errno = 0
 	mut nbytes := 0
 	mut t := T{}
 	$if x64 {
@@ -544,10 +590,7 @@ pub fn (mut f File) read_raw_at<T>(pos u64) ?T {
 			if C._fseeki64(f.cfile, pos, C.SEEK_SET) != 0 {
 				return error(posix_get_error_msg(C.errno))
 			}
-			nbytes = int(C.fread(&t, 1, tsize, f.cfile))
-			if C.errno != 0 {
-				return error(posix_get_error_msg(C.errno))
-			}
+			nbytes = fread(&t, 1, tsize, f.cfile) ?
 			if C._fseeki64(f.cfile, 0, C.SEEK_END) != 0 {
 				return error(posix_get_error_msg(C.errno))
 			}
@@ -555,10 +598,7 @@ pub fn (mut f File) read_raw_at<T>(pos u64) ?T {
 			if C.fseeko(f.cfile, pos, C.SEEK_SET) != 0 {
 				return error(posix_get_error_msg(C.errno))
 			}
-			nbytes = int(C.fread(&t, 1, tsize, f.cfile))
-			if C.errno != 0 {
-				return error(posix_get_error_msg(C.errno))
-			}
+			nbytes = fread(&t, 1, tsize, f.cfile) ?
 			if C.fseeko(f.cfile, 0, C.SEEK_END) != 0 {
 				return error(posix_get_error_msg(C.errno))
 			}
@@ -568,10 +608,7 @@ pub fn (mut f File) read_raw_at<T>(pos u64) ?T {
 		if C.fseek(f.cfile, pos, C.SEEK_SET) != 0 {
 			return error(posix_get_error_msg(C.errno))
 		}
-		nbytes = int(C.fread(&t, 1, tsize, f.cfile))
-		if C.errno != 0 {
-			return error(posix_get_error_msg(C.errno))
-		}
+		nbytes = fread(&t, 1, tsize, f.cfile) ?
 		if C.fseek(f.cfile, 0, C.SEEK_END) != 0 {
 			return error(posix_get_error_msg(C.errno))
 		}
@@ -586,11 +623,11 @@ pub fn (mut f File) read_raw_at<T>(pos u64) ?T {
 // write_struct writes a single struct of type `T`
 pub fn (mut f File) write_struct<T>(t &T) ? {
 	if !f.is_opened {
-		return error('file is not opened')
+		return error_file_not_opened()
 	}
 	tsize := int(sizeof(T))
 	if tsize == 0 {
-		return error('struct size is 0')
+		return error_size_of_type_0()
 	}
 	C.errno = 0
 	nbytes := int(C.fwrite(t, 1, tsize, f.cfile))
@@ -605,11 +642,11 @@ pub fn (mut f File) write_struct<T>(t &T) ? {
 // write_struct_at writes a single struct of type `T` at position specified in file
 pub fn (mut f File) write_struct_at<T>(t &T, pos u64) ? {
 	if !f.is_opened {
-		return error('file is not opened')
+		return error_file_not_opened()
 	}
 	tsize := int(sizeof(T))
 	if tsize == 0 {
-		return error('struct size is 0')
+		return error_size_of_type_0()
 	}
 	C.errno = 0
 	mut nbytes := 0
@@ -642,11 +679,11 @@ pub fn (mut f File) write_struct_at<T>(t &T, pos u64) ? {
 // write_raw writes a single instance of type `T`
 pub fn (mut f File) write_raw<T>(t &T) ? {
 	if !f.is_opened {
-		return error('file is not opened')
+		return error_file_not_opened()
 	}
 	tsize := int(sizeof(T))
 	if tsize == 0 {
-		return error('struct size is 0')
+		return error_size_of_type_0()
 	}
 	C.errno = 0
 	nbytes := int(C.fwrite(t, 1, tsize, f.cfile))
@@ -661,11 +698,11 @@ pub fn (mut f File) write_raw<T>(t &T) ? {
 // write_raw_at writes a single instance of type `T` starting at file byte offset `pos`
 pub fn (mut f File) write_raw_at<T>(t &T, pos u64) ? {
 	if !f.is_opened {
-		return error('file is not opened')
+		return error_file_not_opened()
 	}
 	tsize := int(sizeof(T))
 	if tsize == 0 {
-		return error('struct size is 0')
+		return error_size_of_type_0()
 	}
 	mut nbytes := 0
 

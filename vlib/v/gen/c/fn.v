@@ -39,7 +39,7 @@ fn (mut g Gen) process_fn_decl(node ast.FnDecl) {
 	g.gen_attrs(node.attrs)
 	// g.tmp_count = 0 TODO
 	mut skip := false
-	pos := g.out.buf.len
+	pos := g.out.len
 	should_bundle_module := util.should_bundle_module(node.mod)
 	if g.pref.build_mode == .build_module {
 		// if node.name.contains('parse_text') {
@@ -95,13 +95,25 @@ fn (mut g Gen) process_fn_decl(node ast.FnDecl) {
 	}
 }
 
-fn (mut g Gen) gen_fn_decl(node ast.FnDecl, skip bool) {
+fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 	// TODO For some reason, build fails with autofree with this line
 	// as it's only informative, comment it for now
 	// g.gen_attrs(it.attrs)
 	if node.language == .c {
 		// || node.no_body {
 		return
+	}
+
+	tmp_defer_vars := g.defer_vars // must be here because of workflow
+	if !g.anon_fn {
+		g.defer_vars = []string{}
+	} else {
+		if node.defer_stmts.len > 0 {
+			g.defer_vars = []string{}
+			defer {
+				g.defer_vars = tmp_defer_vars
+			}
+		}
 	}
 	// Skip [if xxx] if xxx is not defined
 	/*
@@ -129,7 +141,7 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl, skip bool) {
 	// if g.fileis('vweb.v') {
 	// println('\ngen_fn_decl() $node.name $node.is_generic $g.cur_generic_type')
 	// }
-	if node.generic_names.len > 0 && g.cur_concrete_types.len == 0 { // need the cur_concrete_type check to avoid inf. recursion
+	if node.generic_names.len > 0 && g.table.cur_concrete_types.len == 0 { // need the cur_concrete_type check to avoid inf. recursion
 		// loop thru each generic type and generate a function
 		for concrete_types in g.table.fn_generic_types[node.name] {
 			if g.pref.is_verbose {
@@ -137,17 +149,20 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl, skip bool) {
 				the_type := syms.map(node.name).join(', ')
 				println('gen fn `$node.name` for type `$the_type`')
 			}
-			g.cur_concrete_types = concrete_types
+			g.table.cur_concrete_types = concrete_types
 			g.gen_fn_decl(node, skip)
 		}
-		g.cur_concrete_types = []
+		g.table.cur_concrete_types = []
 		return
 	}
-	cur_fn_save := g.cur_fn
+	cur_fn_save := g.table.cur_fn
 	defer {
-		g.cur_fn = cur_fn_save
+		g.table.cur_fn = cur_fn_save
 	}
-	g.cur_fn = node
+	unsafe {
+		// TODO remove unsafe
+		g.table.cur_fn = node
+	}
 	fn_start_pos := g.out.len
 	g.write_v_source_line_info(node.pos)
 	msvc_attrs := g.write_fn_attrs(node.attrs)
@@ -175,11 +190,11 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl, skip bool) {
 		name = c_name(name)
 	}
 	mut type_name := g.typ(node.return_type)
-	if g.cur_concrete_types.len > 0 {
+	if g.table.cur_concrete_types.len > 0 {
 		// foo<T>() => foo_T_int(), foo_T_string() etc
 		// Using _T_ to differentiate between get<string> and get_string
 		name += '_T'
-		for concrete_type in g.cur_concrete_types {
+		for concrete_type in g.table.cur_concrete_types {
 			gen_name := g.typ(concrete_type)
 			name += '_' + gen_name
 		}
@@ -249,7 +264,7 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl, skip bool) {
 		g.write(fn_header)
 	}
 	arg_start_pos := g.out.len
-	fargs, fargtypes := g.fn_args(node.params, node.is_variadic)
+	fargs, fargtypes, heap_promoted := g.fn_args(node.params, node.is_variadic, node.scope)
 	arg_str := g.out.after(arg_start_pos)
 	if node.no_body || ((g.pref.use_cache && g.pref.build_mode != .build_module) && node.is_builtin
 		&& !g.is_test) || skip {
@@ -260,8 +275,31 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl, skip bool) {
 	}
 	g.definitions.writeln(');')
 	g.writeln(') {')
+	for i, is_promoted in heap_promoted {
+		if is_promoted {
+			g.writeln('${fargtypes[i]}* ${fargs[i]} = HEAP(${fargtypes[i]}, _v_toheap_${fargs[i]});')
+		}
+	}
 	for defer_stmt in node.defer_stmts {
 		g.writeln('bool ${g.defer_flag_var(defer_stmt)} = false;')
+		for var in defer_stmt.defer_vars {
+			if var.name in fargs || var.kind == .constant {
+				continue
+			}
+			if var.kind == .variable {
+				if var.name !in g.defer_vars {
+					g.defer_vars << var.name
+					mut deref := ''
+					if v := var.scope.find_var(var.name) {
+						if v.is_auto_heap {
+							deref = '*'
+						}
+					}
+					info := var.obj as ast.Var
+					g.writeln('${g.typ(info.typ)}$deref $var.name;')
+				}
+			}
+		}
 	}
 	if is_live_wrap {
 		// The live function just calls its implementation dual, while ensuring
@@ -305,7 +343,8 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl, skip bool) {
 	} else {
 		g.defer_stmts = []
 	}
-	if node.return_type != ast.void_type && node.stmts.len > 0 && node.stmts.last() !is ast.Return {
+	if node.return_type != ast.void_type && node.stmts.len > 0 && node.stmts.last() !is ast.Return
+		&& !node.attrs.contains('_naked') {
 		default_expr := g.type_default(node.return_type)
 		// TODO: perf?
 		if default_expr == '{0}' {
@@ -344,6 +383,8 @@ fn (g &Gen) defer_flag_var(stmt &ast.DeferStmt) string {
 }
 
 fn (mut g Gen) write_defer_stmts_when_needed() {
+	// unlock all mutexes, in case we are in a lock statement. defers are not allowed in lock statements
+	g.unlock_locks()
 	if g.defer_stmts.len > 0 {
 		g.write_defer_stmts()
 	}
@@ -356,46 +397,52 @@ fn (mut g Gen) write_defer_stmts_when_needed() {
 }
 
 // fn decl args
-fn (mut g Gen) fn_args(args []ast.Param, is_variadic bool) ([]string, []string) {
+fn (mut g Gen) fn_args(args []ast.Param, is_variadic bool, scope &ast.Scope) ([]string, []string, []bool) {
 	mut fargs := []string{}
 	mut fargtypes := []string{}
+	mut heap_promoted := []bool{}
 	if args.len == 0 {
 		// in C, `()` is untyped, unlike `(void)`
 		g.write('void')
 	}
 	for i, arg in args {
-		caname := if arg.name == '_' { g.new_tmp_var() } else { c_name(arg.name) }
+		mut caname := if arg.name == '_' { g.new_tmp_var() } else { c_name(arg.name) }
 		typ := g.unwrap_generic(arg.typ)
 		arg_type_sym := g.table.get_type_symbol(typ)
 		mut arg_type_name := g.typ(typ) // util.no_dots(arg_type_sym.name)
 		if arg_type_sym.kind == .function {
 			info := arg_type_sym.info as ast.FnType
 			func := info.func
-			if !info.is_anon {
-				g.write(arg_type_name + ' ' + caname)
-				g.definitions.write_string(arg_type_name + ' ' + caname)
-				fargs << caname
-				fargtypes << arg_type_name
-			} else {
-				g.write('${g.typ(func.return_type)} (*$caname)(')
-				g.definitions.write_string('${g.typ(func.return_type)} (*$caname)(')
-				g.fn_args(func.params, func.is_variadic)
-				g.write(')')
-				g.definitions.write_string(')')
-			}
+			g.write('${g.typ(func.return_type)} (*$caname)(')
+			g.definitions.write_string('${g.typ(func.return_type)} (*$caname)(')
+			g.fn_args(func.params, func.is_variadic, voidptr(0))
+			g.write(')')
+			g.definitions.write_string(')')
 		} else {
-			s := '$arg_type_name $caname'
+			mut heap_prom := false
+			if scope != voidptr(0) {
+				if arg.name != '_' {
+					if v := scope.find_var(arg.name) {
+						if !v.is_stack_obj && v.is_auto_heap {
+							heap_prom = true
+						}
+					}
+				}
+			}
+			var_name_prefix := if heap_prom { '_v_toheap_' } else { '' }
+			s := '$arg_type_name $var_name_prefix$caname'
 			g.write(s)
 			g.definitions.write_string(s)
 			fargs << caname
 			fargtypes << arg_type_name
+			heap_promoted << heap_prom
 		}
 		if i < args.len - 1 {
 			g.write(', ')
 			g.definitions.write_string(', ')
 		}
 	}
-	return fargs, fargtypes
+	return fargs, fargtypes, heap_promoted
 }
 
 fn (mut g Gen) call_expr(node ast.CallExpr) {
@@ -418,7 +465,7 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 		g.inside_call = false
 	}
 	gen_keep_alive := node.is_keep_alive && node.return_type != ast.void_type
-		&& g.pref.gc_mode in [.boehm_full, .boehm_incr, .boehm_full_opt, .boehm_incr_opt, .boehm]
+		&& g.pref.gc_mode in [.boehm_full, .boehm_incr, .boehm_full_opt, .boehm_incr_opt]
 	gen_or := node.or_block.kind != .absent // && !g.is_autofree
 	is_gen_or_and_assign_rhs := gen_or && !g.discard_or_result
 	cur_line := if is_gen_or_and_assign_rhs || gen_keep_alive { // && !g.is_autofree {
@@ -464,7 +511,9 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 				g.write('\n $cur_line $tmp_opt /*U*/')
 			} else {
 				if !g.inside_const {
-					g.write('\n $cur_line *($unwrapped_styp*)${tmp_opt}.data')
+					g.write('\n $cur_line (*($unwrapped_styp*)${tmp_opt}.data)')
+				} else {
+					g.write('\n $cur_line $tmp_opt')
 				}
 			}
 		}
@@ -475,17 +524,6 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 			g.write('\n $cur_line $tmp_opt')
 		}
 	}
-}
-
-pub fn (mut g Gen) unwrap_generic(typ ast.Type) ast.Type {
-	if typ.has_flag(.generic) {
-		if t_typ := g.table.resolve_generic_to_concrete(typ, g.cur_fn.generic_names, g.cur_concrete_types,
-			false)
-		{
-			return t_typ
-		}
-	}
-	return typ
 }
 
 fn (mut g Gen) method_call(node ast.CallExpr) {
@@ -625,7 +663,21 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		}
 	}
 	mut name := util.no_dots('${receiver_type_name}_$node.name')
-	if left_sym.kind == .chan {
+	mut array_depth := -1
+	mut noscan := ''
+	if left_sym.kind == .array {
+		needs_depth := node.name in ['clone', 'repeat']
+		if needs_depth {
+			elem_type := (left_sym.info as ast.Array).elem_type
+			array_depth = g.get_array_depth(elem_type)
+		}
+		maybe_noscan := needs_depth
+			|| node.name in ['pop', 'push', 'push_many', 'reverse', 'grow_cap', 'grow_len']
+		if maybe_noscan {
+			info := left_sym.info as ast.Array
+			noscan = g.check_noscan(info.elem_type)
+		}
+	} else if left_sym.kind == .chan {
 		if node.name in ['close', 'try_pop', 'try_push'] {
 			name = 'sync__Channel_$node.name'
 		}
@@ -678,7 +730,14 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	if !node.receiver_type.is_ptr() && node.left_type.is_ptr() && node.name == 'str' {
 		g.write('ptr_str(')
 	} else {
-		g.write('${name}(')
+		if left_sym.kind == .array {
+			if array_depth >= 0 {
+				name = name + '_to_depth'
+			}
+			g.write('$name${noscan}(')
+		} else {
+			g.write('${name}(')
+		}
 	}
 	if node.receiver_type.is_ptr() && (!node.left_type.is_ptr()
 		|| node.from_embed_type != 0 || (node.left_type.has_flag(.shared_f) && node.name != 'str')) {
@@ -714,6 +773,10 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		arg_name := '_arg_expr_${fn_name}_0_$node.pos.pos'
 		g.write('/*af receiver arg*/' + arg_name)
 	} else {
+		if left_sym.kind == .array && node.left.is_auto_deref_var()
+			&& node.name in ['first', 'last', 'repeat'] {
+			g.write('*')
+		}
 		g.expr(node.left)
 		if node.from_embed_type != 0 {
 			embed_name := typ_sym.embed_name()
@@ -749,6 +812,9 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	*/
 	// ///////
 	g.call_args(node)
+	if array_depth >= 0 {
+		g.write(', $array_depth')
+	}
 	g.write(')')
 }
 
@@ -829,7 +895,6 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 	}
 	if node.language == .c {
 		// Skip "C."
-		g.is_c_call = true
 		name = util.no_dots(name[2..])
 	} else {
 		name = c_name(name)
@@ -905,7 +970,7 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 				g.write(json_obj)
 			} else {
 				if node.is_keep_alive
-					&& g.pref.gc_mode in [.boehm_full, .boehm_incr, .boehm_full_opt, .boehm_incr_opt, .boehm] {
+					&& g.pref.gc_mode in [.boehm_full, .boehm_incr, .boehm_full_opt, .boehm_incr_opt] {
 					cur_line := g.go_before_stmt(0)
 					tmp_cnt_save = g.keep_alive_call_pregen(node)
 					g.write(cur_line)
@@ -926,7 +991,6 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 			}
 		}
 	}
-	g.is_c_call = false
 	g.is_json_fn = false
 }
 
@@ -1131,7 +1195,8 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 			g.expr(args[args.len - 1].expr)
 		} else {
 			if variadic_count > 0 {
-				g.write('new_array_from_c_array($variadic_count, $variadic_count, sizeof($elem_type), _MOV(($elem_type[$variadic_count]){')
+				noscan := g.check_noscan(arr_info.elem_type)
+				g.write('new_array_from_c_array${noscan}($variadic_count, $variadic_count, sizeof($elem_type), _MOV(($elem_type[$variadic_count]){')
 				for j in arg_nr .. args.len {
 					g.ref_or_deref_arg(args[j], arr_info.elem_type, node.language)
 					if j < args.len - 1 {
@@ -1140,7 +1205,7 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 				}
 				g.write('}))')
 			} else {
-				g.write('__new_array_with_default(0, 0, sizeof($elem_type), 0)')
+				g.write('__new_array(0, 0, sizeof($elem_type))')
 			}
 		}
 	}
@@ -1304,6 +1369,9 @@ fn (mut g Gen) write_fn_attrs(attrs []ast.Attr) string {
 				// Declaring such functions with the const attribute allows GCC to avoid emitting some calls in
 				// repeated invocations of the function with the same argument values.
 				g.write('__attribute__((const)) ')
+			}
+			'_naked' {
+				g.write('__attribute__((naked)) ')
 			}
 			'windows_stdcall' {
 				// windows attributes (msvc/mingw)

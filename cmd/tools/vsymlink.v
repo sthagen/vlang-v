@@ -4,8 +4,8 @@ import v.util
 
 $if windows {
 	$if tinyc {
-		#flag -lAdvapi32
-		#flag -lUser32
+		#flag -ladvapi32
+		#flag -luser32
 	}
 }
 fn main() {
@@ -24,7 +24,7 @@ fn cleanup_vtmp_folder() {
 
 fn setup_symlink_unix(vexe string) {
 	mut link_path := '/data/data/com.termux/files/usr/bin/v'
-	if os.system("uname -o | grep -q '[A/a]ndroid'") == 1 {
+	if !os.is_dir('/data/data/com.termux/files') {
 		link_dir := '/usr/local/bin'
 		if !os.exists(link_dir) {
 			os.mkdir_all(link_dir) or { panic(err) }

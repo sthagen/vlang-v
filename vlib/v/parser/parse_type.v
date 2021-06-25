@@ -5,6 +5,7 @@ module parser
 
 import v.ast
 import v.util
+import v.token
 
 pub fn (mut p Parser) parse_array_type() ast.Type {
 	p.check(.lsbr)
@@ -12,24 +13,38 @@ pub fn (mut p Parser) parse_array_type() ast.Type {
 	if p.tok.kind in [.number, .name] {
 		mut fixed_size := 0
 		size_expr := p.expr(0)
-		match size_expr {
-			ast.IntegerLiteral {
-				fixed_size = size_expr.val.int()
-			}
-			ast.Ident {
-				if const_field := p.global_scope.find_const('${p.mod}.$size_expr.name') {
-					if const_field.expr is ast.IntegerLiteral {
-						fixed_size = const_field.expr.val.int()
+		if p.pref.is_fmt {
+			fixed_size = 987654321
+		} else {
+			match size_expr {
+				ast.IntegerLiteral {
+					fixed_size = size_expr.val.int()
+				}
+				ast.Ident {
+					mut show_non_const_error := false
+					if const_field := p.global_scope.find_const('${p.mod}.$size_expr.name') {
+						if const_field.expr is ast.IntegerLiteral {
+							fixed_size = const_field.expr.val.int()
+						} else {
+							show_non_const_error = true
+						}
 					} else {
+						if p.pref.is_fmt {
+							// for vfmt purposes, pretend the constant does exist
+							// it may have been defined in another .v file:
+							fixed_size = 1
+						} else {
+							show_non_const_error = true
+						}
+					}
+					if show_non_const_error {
 						p.error_with_pos('non-constant array bound `$size_expr.name`',
 							size_expr.pos)
 					}
-				} else {
-					p.error_with_pos('non-constant array bound `$size_expr.name`', size_expr.pos)
 				}
-			}
-			else {
-				p.error('expecting `int` for fixed size')
+				else {
+					p.error('expecting `int` for fixed size')
+				}
 			}
 		}
 		p.check(.rsbr)
@@ -84,8 +99,8 @@ pub fn (mut p Parser) parse_map_type() ast.Type {
 		return 0
 	}
 	key_type_supported := key_type in [ast.string_type_idx, ast.voidptr_type_idx]
-		|| key_sym.kind == .enum_ || ((key_type.is_int() || key_type.is_float()
-		|| is_alias) && !key_type.is_ptr())
+		|| key_sym.kind == .enum_ || key_sym.kind == .placeholder
+		|| ((key_type.is_int() || key_type.is_float() || is_alias) && !key_type.is_ptr())
 	if !key_type_supported {
 		if is_alias {
 			p.error('cannot use the alias type as the parent type is unsupported')
@@ -203,17 +218,21 @@ pub fn (mut p Parser) parse_fn_type(name string) ast.Type {
 		}
 	}
 	mut return_type := ast.void_type
-	if p.tok.line_nr == line_nr && p.tok.kind.is_start_of_type() {
+	mut return_type_pos := token.Position{}
+	if p.tok.line_nr == line_nr && p.tok.kind.is_start_of_type() && !p.is_attributes() {
+		return_type_pos = p.tok.position()
 		return_type = p.parse_type()
 		if return_type.has_flag(.generic) {
 			has_generic = true
 		}
+		return_type_pos = return_type_pos.extend(p.prev_tok.position())
 	}
 	func := ast.Fn{
 		name: name
 		params: args
 		is_variadic: is_variadic
 		return_type: return_type
+		return_type_pos: return_type_pos
 	}
 	// MapFooFn typedefs are manually added in cheaders.v
 	// because typedefs get generated after the map struct is generated
@@ -531,7 +550,8 @@ pub fn (mut p Parser) parse_generic_struct_inst_type(name string) ast.Type {
 	p.check(.gt)
 	p.in_generic_params = false
 	bs_name += '>'
-	if is_instance && concrete_types.len > 0 {
+	// fmt operates on a per-file basis, so is_instance might be not set correctly. Thus it's ignored.
+	if (is_instance || p.pref.is_fmt) && concrete_types.len > 0 {
 		mut gt_idx := p.table.find_type_idx(bs_name)
 		if gt_idx > 0 {
 			return ast.new_type(gt_idx)

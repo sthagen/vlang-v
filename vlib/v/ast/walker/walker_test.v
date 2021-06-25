@@ -3,7 +3,7 @@ import v.ast.walker
 import v.parser
 import v.pref
 
-fn parse_text(text string) ast.File {
+fn parse_text(text string) &ast.File {
 	tbl := ast.new_table()
 	prefs := pref.new_preferences()
 	scope := &ast.Scope{
@@ -22,7 +22,7 @@ fn (mut n NodeByOffset) visit(node ast.Node) ? {
 	node_pos := node.position()
 	if n.pos >= node_pos.pos && n.pos <= node_pos.pos + node_pos.len && node !is ast.File {
 		n.node = node
-		return none
+		return error('')
 	}
 	return
 }
@@ -49,7 +49,7 @@ fn test_inspect() {
 module main
 	'
 	file := parse_text(source)
-	walker.inspect(&file, voidptr(0), fn (node ast.Node, data voidptr) bool {
+	walker.inspect(file, voidptr(0), fn (node ast.Node, data voidptr) bool {
 		// Second visit must be ast.Stmt
 		if node is ast.Stmt {
 			if node !is ast.Module {
@@ -61,7 +61,6 @@ module main
 			assert mod.name == 'main'
 			return false
 		}
-		// First visit must be ast.File
 		assert node is ast.File
 		// True means that the inspector must now
 		// inspect the ast.File's children

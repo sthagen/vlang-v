@@ -150,6 +150,7 @@ pub fn (b &C.sg_bindings) append_index_buffer(data voidptr, element_size int, el
 	return C.sg_append_buffer(b.index_buffer, &range)
 }
 
+[heap]
 pub struct C.sg_shader_desc {
 pub mut:
 	_start_canary u32
@@ -395,10 +396,13 @@ pub fn (i C.sg_image) free() {
 	C.sg_destroy_image(i)
 }
 
+pub const sg_cubeface_num = 6
+
+pub const sg_max_mipmaps = 16
+
 pub struct C.sg_image_data {
 pub mut:
-	// subimage [C.SG_CUBEFACE_NUM][C.SG_MAX_MIPMAPS]C.sg_range
-	subimage [6][16]C.sg_range
+	subimage [sg_cubeface_num][sg_max_mipmaps]C.sg_range
 }
 
 pub struct C.sg_features {

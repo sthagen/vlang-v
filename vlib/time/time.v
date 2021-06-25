@@ -5,8 +5,6 @@ module time
 
 #include <time.h>
 
-type time_t = i64
-
 pub const (
 	days_string        = 'MonTueWedThuFriSatSun'
 	month_days         = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
@@ -396,7 +394,7 @@ pub const (
 	second      = Duration(1000 * millisecond)
 	minute      = Duration(60 * second)
 	hour        = Duration(60 * minute)
-	infinite    = Duration(-1)
+	infinite    = Duration(C.INT64_MAX)
 )
 
 // nanoseconds returns the duration as an integer number of nanoseconds.

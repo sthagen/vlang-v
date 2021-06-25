@@ -3,11 +3,12 @@
 // that can be found in the LICENSE file.
 module ast
 
+[heap]
 pub struct Scope {
 pub mut:
 	// mut:
 	objects              map[string]ScopeObject
-	struct_fields        []ScopeStructField
+	struct_fields        map[string]ScopeStructField
 	parent               &Scope
 	detached_from_parent bool
 	children             []&Scope
@@ -64,9 +65,10 @@ pub fn (s &Scope) find(name string) ?ScopeObject {
 	return none
 }
 
-pub fn (s &Scope) find_struct_field(struct_type Type, field_name string) ?ScopeStructField {
+// selector_expr:  name.field_name
+pub fn (s &Scope) find_struct_field(name string, struct_type Type, field_name string) ?ScopeStructField {
 	for sc := s; true; sc = sc.parent {
-		for field in sc.struct_fields {
+		if field := sc.struct_fields[name] {
 			if field.struct_type == struct_type && field.name == field_name {
 				return field
 			}
@@ -127,13 +129,14 @@ pub fn (mut s Scope) update_var_type(name string, typ Type) {
 	}
 }
 
-pub fn (mut s Scope) register_struct_field(field ScopeStructField) {
-	for f in s.struct_fields {
+// selector_expr:  name.field_name
+pub fn (mut s Scope) register_struct_field(name string, field ScopeStructField) {
+	if f := s.struct_fields[name] {
 		if f.struct_type == field.struct_type && f.name == field.name {
 			return
 		}
 	}
-	s.struct_fields << field
+	s.struct_fields[name] = field
 }
 
 pub fn (mut s Scope) register(obj ScopeObject) {
@@ -192,7 +195,7 @@ pub fn (s &Scope) innermost(pos int) &Scope {
 }
 
 [inline]
-fn (s &Scope) contains(pos int) bool {
+pub fn (s &Scope) contains(pos int) bool {
 	return pos >= s.start_pos && pos <= s.end_pos
 }
 
@@ -210,7 +213,7 @@ pub fn (sc Scope) show(depth int, max_depth int) string {
 			else {}
 		}
 	}
-	for field in sc.struct_fields {
+	for _, field in sc.struct_fields {
 		out += '$indent  * struct_field: $field.struct_type $field.name - $field.typ\n'
 	}
 	if max_depth == 0 || depth < max_depth - 1 {

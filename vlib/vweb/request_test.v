@@ -20,7 +20,11 @@ fn (mut s StringReader) read(mut buf []byte) ?int {
 }
 
 fn reader(s string) &io.BufferedReader {
-	return io.new_buffered_reader(reader: io.make_reader(&StringReader{ text: s }))
+	return io.new_buffered_reader(
+		reader: &StringReader{
+			text: s
+		}
+	)
 }
 
 fn test_parse_request_not_http() {
@@ -126,7 +130,7 @@ ${contents[1]}
 }
 
 fn test_parse_large_body() ? {
-	body := 'A'.repeat(101) // greater than max_bytes
+	body := 'ABCEF\r\n'.repeat(1024 * 1024) // greater than max_bytes
 	req := 'GET / HTTP/1.1\r\nContent-Length: $body.len\r\n\r\n$body'
 	result := parse_request(mut reader(req)) ?
 	assert result.data.len == body.len

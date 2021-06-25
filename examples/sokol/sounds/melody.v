@@ -13,7 +13,7 @@ mut:
 }
 
 fn my_audio_stream_callback(buffer &f32, num_frames int, num_channels int, mut acontext AppState) {
-	mut soundbuffer := buffer
+	mut soundbuffer := unsafe { buffer }
 	for frame := 0; frame < num_frames; frame++ {
 		t := int(f32(acontext.frame_0 + frame) * 0.245)
 		// "Techno" by Gabriel Miceli
@@ -44,7 +44,6 @@ fn main() {
 		bg_color: gx.rgb(50, 50, 50)
 		width: 1024
 		height: 400
-		use_ortho: true
 		create_window: true
 		window_title: 'ByteBeat Music'
 		frame_fn: graphics_frame

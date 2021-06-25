@@ -37,6 +37,9 @@ fn (mut p Preferences) expand_lookup_paths() {
 }
 
 pub fn (mut p Preferences) fill_with_defaults() {
+	if p.arch == ._auto {
+		p.arch = get_host_arch()
+	}
 	p.expand_lookup_paths()
 	rpath := os.real_path(p.path)
 	if p.out_name == '' {
@@ -76,7 +79,7 @@ pub fn (mut p Preferences) fill_with_defaults() {
 			// executable on Windows + the precompiled V is more
 			// optimized.
 			println('Saving the resulting V executable in `./v2`')
-			println('Use `v -o v cmd/v` if you want to replace current ' + 'V execuast.')
+			println('Use `v -o v cmd/v` if you want to replace current ' + 'V executable.')
 			p.out_name = 'v2'
 		}
 	}

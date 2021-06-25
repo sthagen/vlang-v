@@ -33,7 +33,14 @@ pub fn (mut p Parser) check_expr(precedence int) ?ast.Expr {
 	// Prefix
 	match p.tok.kind {
 		.key_mut, .key_shared, .key_atomic, .key_static {
-			node = p.parse_ident(ast.Language.v)
+			ident := p.parse_ident(ast.Language.v)
+			node = ident
+			if p.inside_defer {
+				if p.defer_vars.filter(it.name == ident.name && it.mod == ident.mod).len == 0
+					&& ident.name != 'err' {
+					p.defer_vars << ident
+				}
+			}
 			p.is_stmt_ident = is_stmt_ident
 		}
 		.name, .question {
@@ -42,7 +49,7 @@ pub fn (mut p Parser) check_expr(precedence int) ?ast.Expr {
 				node = p.sql_expr()
 				p.inside_match = false
 			} else if p.tok.lit == 'map' && p.peek_tok.kind == .lcbr && !(p.builtin_mod
-				&& p.file_base == 'map.v') {
+				&& p.file_base in ['map.v', 'map_d_gcboehm_opt.v']) {
 				p.next() // `map`
 				p.next() // `{`
 				node = p.map_init()
@@ -183,7 +190,8 @@ pub fn (mut p Parser) check_expr(precedence int) ?ast.Expr {
 				pos: pos
 			}
 		}
-		.key_sizeof {
+		.key_sizeof, .key_isreftype {
+			is_reftype := p.tok.kind == .key_isreftype
 			p.next() // sizeof
 			p.check(.lpar)
 			pos := p.tok.position()
@@ -191,10 +199,18 @@ pub fn (mut p Parser) check_expr(precedence int) ?ast.Expr {
 			// assume mod. prefix leads to a type
 			if is_known_var || !(p.known_import(p.tok.lit) || p.tok.kind.is_start_of_type()) {
 				expr := p.expr(0)
-				node = ast.SizeOf{
-					is_type: false
-					expr: expr
-					pos: pos
+				if is_reftype {
+					node = ast.IsRefType{
+						is_type: false
+						expr: expr
+						pos: pos
+					}
+				} else {
+					node = ast.SizeOf{
+						is_type: false
+						expr: expr
+						pos: pos
+					}
 				}
 			} else {
 				if p.tok.kind == .name {
@@ -202,12 +218,20 @@ pub fn (mut p Parser) check_expr(precedence int) ?ast.Expr {
 				}
 				save_expr_mod := p.expr_mod
 				p.expr_mod = ''
-				sizeof_type := p.parse_type()
+				arg_type := p.parse_type()
 				p.expr_mod = save_expr_mod
-				node = ast.SizeOf{
-					is_type: true
-					typ: sizeof_type
-					pos: pos
+				if is_reftype {
+					node = ast.IsRefType{
+						is_type: true
+						typ: arg_type
+						pos: pos
+					}
+				} else {
+					node = ast.SizeOf{
+						is_type: true
+						typ: arg_type
+						pos: pos
+					}
 				}
 			}
 			p.check(.rpar)
@@ -345,6 +369,9 @@ pub fn (mut p Parser) check_expr(precedence int) ?ast.Expr {
 
 pub fn (mut p Parser) expr_with_left(left ast.Expr, precedence int, is_stmt_ident bool) ast.Expr {
 	mut node := left
+	if p.inside_asm && p.prev_tok.position().line_nr < p.tok.position().line_nr {
+		return node
+	}
 	// Infix
 	for precedence < p.tok.precedence() {
 		if p.tok.kind == .dot {
@@ -420,8 +447,10 @@ pub fn (mut p Parser) expr_with_left(left ast.Expr, precedence int, is_stmt_iden
 			// Postfix
 			// detect `f(x++)`, `a[x++]`
 			if p.peek_tok.kind in [.rpar, .rsbr] {
-				p.warn_with_pos('`$p.tok.kind` operator can only be used as a statement',
-					p.peek_tok.position())
+				if !p.inside_ct_if_expr {
+					p.warn_with_pos('`$p.tok.kind` operator can only be used as a statement',
+						p.peek_tok.position())
+				}
 			}
 			if p.tok.kind in [.inc, .dec] && p.prev_tok.line_nr != p.tok.line_nr {
 				p.error_with_pos('$p.tok must be on the same line as the previous token',
@@ -519,6 +548,8 @@ fn (mut p Parser) go_expr() ast.GoExpr {
 		}
 	}
 	pos := spos.extend(p.prev_tok.position())
+	p.register_auto_import('sync.threads')
+	p.table.gostmts++
 	return ast.GoExpr{
 		call_expr: call_expr
 		pos: pos

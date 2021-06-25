@@ -111,7 +111,6 @@ fresh_vc:
 	rm -rf $(VC)
 	$(GITFASTCLONE) $(VCREPO) $(VC)
 
-ifndef ANDROID
 ifndef local
 latest_tcc: $(TMPTCC)/.git/config
 	cd $(TMPTCC) && $(GITCLEANPULL)
@@ -119,16 +118,19 @@ else
 latest_tcc:
 	@echo "Using local tcc"
 endif
-endif
 
 fresh_tcc:
 	rm -rf $(TMPTCC)
+ifndef local
 # Check wether a TCC branch exists for the user's system configuration.
 ifneq (,$(findstring thirdparty-$(TCCOS)-$(TCCARCH), $(shell git ls-remote --heads $(TCCREPO) | sed 's/^[a-z0-9]*\trefs.heads.//')))
 	$(GITFASTCLONE) --branch thirdparty-$(TCCOS)-$(TCCARCH) $(TCCREPO) $(TMPTCC)
 else
 	@echo 'Pre-built TCC not available for thirdparty-$(TCCOS)-$(TCCARCH) at $(TCCREPO), will use the system compiler: $(CC)'
 	$(GITFASTCLONE) --branch thirdparty-unknown-unknown $(TCCREPO) $(TMPTCC)
+endif
+else
+	@echo "Using local tccbin"
 endif
 
 $(TMPTCC)/.git/config:

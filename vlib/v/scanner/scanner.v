@@ -215,11 +215,15 @@ fn (mut s Scanner) new_multiline_token(tok_kind token.Kind, lit string, len int,
 	}
 }
 
-[inline]
+[direct_array_access; inline]
 fn (mut s Scanner) ident_name() string {
 	start := s.pos
 	s.pos++
-	for s.pos < s.text.len && (util.is_name_char(s.text[s.pos]) || s.text[s.pos].is_digit()) {
+	for s.pos < s.text.len {
+		c := s.text[s.pos]
+		if !(util.is_name_char(c) || c.is_digit()) {
+			break
+		}
 		s.pos++
 	}
 	name := s.text[start..s.pos]
@@ -233,7 +237,7 @@ fn (s Scanner) num_lit(start int, end int) string {
 	}
 	unsafe {
 		txt := s.text.str
-		mut b := malloc(end - start + 1) // add a byte for the endstring 0
+		mut b := malloc_noscan(end - start + 1) // add a byte for the endstring 0
 		mut i1 := 0
 		for i := start; i < end; i++ {
 			if txt[i] != scanner.num_sep {
@@ -286,6 +290,7 @@ fn (mut s Scanner) ident_bin_number() string {
 	return number
 }
 
+[direct_array_access]
 fn (mut s Scanner) ident_hex_number() string {
 	mut has_wrong_digit := false
 	mut first_wrong_digit_pos := 0
@@ -369,6 +374,7 @@ fn (mut s Scanner) ident_oct_number() string {
 	return number
 }
 
+[direct_array_access]
 fn (mut s Scanner) ident_dec_number() string {
 	mut has_wrong_digit := false
 	mut first_wrong_digit_pos := 0
@@ -498,7 +504,7 @@ fn (mut s Scanner) ident_number() string {
 fn (mut s Scanner) skip_whitespace() {
 	for s.pos < s.text.len {
 		c := s.text[s.pos]
-		if !c.is_space() {
+		if !(c == 32 || (c > 8 && c < 14) || (c == 0x85) || (c == 0xa0)) {
 			return
 		}
 		c_is_nl := c == scanner.b_cr || c == scanner.b_lf
@@ -568,6 +574,7 @@ pub fn (mut s Scanner) scan() token.Token {
 	return s.buffer_scan()
 }
 
+[direct_array_access]
 pub fn (mut s Scanner) buffer_scan() token.Token {
 	for {
 		cidx := s.tidx
@@ -585,7 +592,7 @@ pub fn (mut s Scanner) buffer_scan() token.Token {
 	return s.new_eof_token()
 }
 
-[inline]
+[direct_array_access; inline]
 pub fn (s &Scanner) peek_token(n int) token.Token {
 	idx := s.tidx + n
 	if idx >= s.all_tokens.len {
@@ -595,7 +602,7 @@ pub fn (s &Scanner) peek_token(n int) token.Token {
 	return t
 }
 
-[inline]
+[direct_array_access; inline]
 fn (s &Scanner) look_ahead(n int) byte {
 	if s.pos + n < s.text.len {
 		return s.text[s.pos + n]
@@ -604,6 +611,7 @@ fn (s &Scanner) look_ahead(n int) byte {
 	}
 }
 
+[direct_array_access]
 fn (mut s Scanner) text_scan() token.Token {
 	// The for loop here is so that instead of doing
 	// `return s.scan()` (which will use a new call stack frame),
@@ -865,7 +873,7 @@ fn (mut s Scanner) text_scan() token.Token {
 					return s.new_token(.name, '@' + name, name.len + 1)
 				}
 				// @FN, @STRUCT, @MOD etc. See full list in token.valid_at_tokens
-				if '@' + name in token.valid_at_tokens {
+				if '@' + name in token.valid_at_tokens || name.starts_with('cc') { // `=@cccond` in inline assembly
 					return s.new_token(.at, '@' + name, name.len + 1)
 				}
 				if !token.is_key(name) {
@@ -1082,6 +1090,7 @@ fn (s &Scanner) count_symbol_before(p int, sym byte) int {
 	return count
 }
 
+[direct_array_access]
 fn (mut s Scanner) ident_string() string {
 	q := s.text[s.pos]
 	is_quote := q == scanner.single_quote || q == scanner.double_quote
@@ -1274,7 +1283,7 @@ fn (mut s Scanner) ident_char() string {
 	return c
 }
 
-[inline]
+[direct_array_access; inline]
 fn (s &Scanner) expect(want string, start_pos int) bool {
 	end_pos := start_pos + want.len
 	if start_pos < 0 || end_pos < 0 || start_pos >= s.text.len || end_pos > s.text.len {

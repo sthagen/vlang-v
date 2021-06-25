@@ -7,7 +7,8 @@ module openssl
 // (older) system openssl.
 #flag linux -I/usr/local/include/openssl -L/usr/local/lib
 #flag windows -l libssl -l libcrypto
-#flag -l ssl -l crypto
+#flag -lssl -lcrypto
+#flag linux -ldl -lpthread
 // MacPorts
 #flag darwin -I/opt/local/include
 #flag darwin -L/opt/local/lib
@@ -34,9 +35,12 @@ pub struct SSL {
 pub struct SSL_METHOD {
 }
 
+pub struct OPENSSL_INIT_SETTINGS {
+}
+
 fn C.BIO_new_ssl_connect(ctx &C.SSL_CTX) &C.BIO
 
-fn C.BIO_set_conn_hostname(b &C.BIO, name charptr) int
+fn C.BIO_set_conn_hostname(b &C.BIO, name &char) int
 
 // there are actually 2 macros for BIO_get_ssl
 // fn C.BIO_get_ssl(bp &C.BIO, ssl charptr, c int)
@@ -47,7 +51,7 @@ fn C.BIO_do_connect(b &C.BIO) int
 
 fn C.BIO_do_handshake(b &C.BIO) int
 
-fn C.BIO_puts(b &C.BIO, buf charptr)
+fn C.BIO_puts(b &C.BIO, buf &char)
 
 fn C.BIO_read(b &C.BIO, buf voidptr, len int) int
 
@@ -59,7 +63,7 @@ fn C.SSL_CTX_set_options(ctx &C.SSL_CTX, options int)
 
 fn C.SSL_CTX_set_verify_depth(s &C.SSL_CTX, depth int)
 
-fn C.SSL_CTX_load_verify_locations(ctx &C.SSL_CTX, ca_file charptr, ca_path charptr) int
+fn C.SSL_CTX_load_verify_locations(ctx &C.SSL_CTX, ca_file &char, ca_path &char) int
 
 fn C.SSL_CTX_free(ctx &C.SSL_CTX)
 
@@ -69,7 +73,7 @@ fn C.SSL_set_fd(ssl &C.SSL, fd int) int
 
 fn C.SSL_connect(&C.SSL) int
 
-fn C.SSL_set_cipher_list(ctx &SSL, str charptr) int
+fn C.SSL_set_cipher_list(ctx &SSL, str &char) int
 
 fn C.SSL_get_peer_certificate(ssl &SSL) &C.X509
 
@@ -79,7 +83,7 @@ fn C.SSL_get_error(ssl &C.SSL, ret int) int
 
 fn C.SSL_get_verify_result(ssl &SSL) int
 
-fn C.SSL_set_tlsext_host_name(s &SSL, name charptr) int
+fn C.SSL_set_tlsext_host_name(s &SSL, name &char) int
 
 fn C.SSL_shutdown(&C.SSL) int
 
@@ -99,9 +103,16 @@ fn C.TLS_method() voidptr
 
 fn C.TLSv1_2_method() voidptr
 
+fn C.OPENSSL_init_ssl(opts u64, settings &OPENSSL_INIT_SETTINGS) int
+
 fn init() {
-	C.SSL_load_error_strings()
-	C.SSL_library_init()
+	$if ssl_pre_1_1_version ? {
+		// OPENSSL_VERSION_NUMBER < 0x10100000L
+		C.SSL_load_error_strings()
+		C.SSL_library_init()
+	} $else {
+		C.OPENSSL_init_ssl(C.OPENSSL_INIT_LOAD_SSL_STRINGS, 0)
+	}
 }
 
 pub const (

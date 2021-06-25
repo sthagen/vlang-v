@@ -142,7 +142,12 @@ pub fn (mut f Fmt) struct_decl(node ast.StructDecl) {
 	for embed in node.embeds {
 		f.mark_types_import_as_used(embed.typ)
 		styp := f.table.type_to_str_using_aliases(embed.typ, f.mod2alias)
-		f.writeln('\t$styp')
+		if embed.comments.len == 0 {
+			f.writeln('\t$styp')
+		} else {
+			f.write('\t$styp')
+			f.comments(embed.comments, level: .indent)
+		}
 	}
 	mut field_align_i := 0
 	mut comment_align_i := 0
@@ -256,7 +261,7 @@ pub fn (mut f Fmt) struct_init(node ast.StructInit) {
 	type_sym := f.table.get_type_symbol(node.typ)
 	// f.write('<old name: $type_sym.name>')
 	mut name := type_sym.name
-	if !name.starts_with('C.') {
+	if !name.starts_with('C.') && !name.starts_with('JS.') {
 		name = f.no_cur_mod(f.short_module(type_sym.name)) // TODO f.type_to_str?
 	}
 	if name == 'void' {
@@ -306,7 +311,7 @@ pub fn (mut f Fmt) struct_init(node ast.StructInit) {
 		fields_start := f.out.len
 		fields_loop: for {
 			if !single_line_fields {
-				if use_short_args && f.out.buf[f.out.buf.len - 1] == ` ` {
+				if use_short_args && f.out[f.out.len - 1] == ` ` {
 					//           v Remove space at tail of line
 					// f(a, b, c, \n
 					//     f1: 0\n

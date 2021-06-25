@@ -160,8 +160,13 @@ fn test_write_and_read_bytes() {
 	// check that trying to read data from EOF doesn't error and returns 0
 	mut a := []byte{len: 5}
 	nread := file_read.read_bytes_into(5, mut a) or {
-		eprintln(err)
-		int(-1)
+		n := if err is none {
+			int(0)
+		} else {
+			eprintln(err)
+			int(-1)
+		}
+		n
 	}
 	assert nread == 0
 	file_read.close()
@@ -279,8 +284,76 @@ fn test_cp_all() {
 	assert os.exists(os.join_path('nonexisting', 'ex1.txt'))
 }
 
-fn test_realpath() {
+fn test_realpath_of_empty_string_works() {
 	assert os.real_path('') == ''
+}
+
+fn test_realpath_non_existing() {
+	non_existing_path := 'sdyfuisd_non_existing_file'
+	rpath := os.real_path(non_existing_path)
+	$if windows {
+		// on windows, the workdir is prepended, so the result is absolute:
+		assert rpath.len > non_existing_path.len
+	}
+	$if !windows {
+		// on unix, the workdir is NOT prepended for now, so the result remains the same.
+		// TODO: the windows behaviour seems saner, think about normalising the unix case to do the same.
+		assert os.real_path(non_existing_path) == non_existing_path
+	}
+}
+
+fn test_realpath_existing() {
+	existing_file_name := 'existing_file.txt'
+	existing_file := os.join_path(os.temp_dir(), existing_file_name)
+	os.rm(existing_file) or {}
+	os.write_file(existing_file, 'abc') or {}
+	assert os.exists(existing_file)
+	rpath := os.real_path(existing_file)
+	assert os.is_abs_path(rpath)
+	assert rpath.ends_with(existing_file_name)
+	os.rm(existing_file) or {}
+}
+
+fn test_realpath_removes_dots() {
+	examples_folder := os.join_path(@VEXEROOT, 'vlib', 'v', '..', '..', 'cmd', '.', '..',
+		'examples')
+	real_path_of_examples_folder := os.real_path(examples_folder)
+	assert real_path_of_examples_folder.len < examples_folder.len
+	assert !real_path_of_examples_folder.contains('..')
+}
+
+fn test_realpath_absolutizes_existing_relative_paths() {
+	old_wd := os.getwd()
+	defer {
+		os.chdir(old_wd)
+	}
+	os.chdir(@VEXEROOT)
+	examples_folder := os.join_path('vlib', 'v', '..', '..', 'cmd', '.', '..', 'examples')
+	real_path_of_examples_folder := os.real_path(examples_folder)
+	assert os.is_abs_path(real_path_of_examples_folder)
+}
+
+// TODO: think much more about whether this is desirable:
+fn test_realpath_does_not_absolutize_non_existing_relative_paths() {
+	relative_path := os.join_path('one', 'nonexisting_folder', '..', 'something')
+	$if !windows {
+		assert os.real_path(relative_path).contains('..')
+		assert os.real_path(relative_path) == relative_path
+	}
+}
+
+fn test_realpath_absolutepath_symlink() {
+	file_name := 'tolink_file.txt'
+	symlink_name := 'symlink.txt'
+	mut f := os.create(file_name) or { panic(err) }
+	f.close()
+	assert os.symlink(file_name, symlink_name) or { panic(err) }
+	rpath := os.real_path(symlink_name)
+	println(rpath)
+	assert os.is_abs_path(rpath)
+	assert rpath.ends_with(file_name)
+	os.rm(symlink_name) or {}
+	os.rm(file_name) or {}
 }
 
 fn test_tmpdir() {
@@ -306,24 +379,58 @@ fn test_is_writable_folder() {
 }
 
 fn test_make_symlink_check_is_link_and_remove_symlink() {
-	$if windows {
-		// TODO
-		assert true
-		return
-	}
 	folder := 'tfolder'
 	symlink := 'tsymlink'
-	os.rm(symlink) or {}
-	os.rm(folder) or {}
+	// windows creates a directory symlink, so delete it with rmdir()
+	$if windows {
+		os.rmdir(symlink) or {}
+	} $else {
+		os.rm(symlink) or {}
+	}
+	os.rmdir(folder) or {}
 	os.mkdir(folder) or { panic(err) }
 	folder_contents := os.ls(folder) or { panic(err) }
 	assert folder_contents.len == 0
-	os.system('ln -s $folder $symlink')
+	os.symlink(folder, symlink) or { panic(err) }
 	assert os.is_link(symlink)
-	os.rm(symlink) or { panic(err) }
-	os.rm(folder) or { panic(err) }
+	$if windows {
+		os.rmdir(symlink) or { panic(err) }
+	} $else {
+		os.rm(symlink) or { panic(err) }
+	}
+	os.rmdir(folder) or { panic(err) }
 	folder_exists := os.is_dir(folder)
 	assert folder_exists == false
+	symlink_exists := os.is_link(symlink)
+	assert symlink_exists == false
+}
+
+fn test_make_symlink_check_is_link_and_remove_symlink_with_file() {
+	file := 'tfile'
+	symlink := 'tsymlink'
+	os.rm(symlink) or {}
+	os.rm(file) or {}
+	mut f := os.create(file) or { panic(err) }
+	f.close()
+	os.symlink(file, symlink) or { panic(err) }
+	assert os.is_link(symlink)
+	os.rm(symlink) or { panic(err) }
+	os.rm(file) or { panic(err) }
+	symlink_exists := os.is_link(symlink)
+	assert symlink_exists == false
+}
+
+fn test_make_hardlink_check_is_link_and_remove_hardlink_with_file() {
+	file := 'tfile'
+	symlink := 'tsymlink'
+	os.rm(symlink) or {}
+	os.rm(file) or {}
+	mut f := os.create(file) or { panic(err) }
+	f.close()
+	os.link(file, symlink) or { panic(err) }
+	assert os.exists(symlink)
+	os.rm(symlink) or { panic(err) }
+	os.rm(file) or { panic(err) }
 	symlink_exists := os.is_link(symlink)
 	assert symlink_exists == false
 }
@@ -350,15 +457,16 @@ fn test_make_symlink_check_is_link_and_remove_symlink() {
 // }
 // }
 fn test_symlink() {
-	$if windows {
-		return
-	}
 	os.mkdir('symlink') or { panic(err) }
 	os.symlink('symlink', 'symlink2') or { panic(err) }
 	assert os.exists('symlink2')
 	// cleanup
-	os.rm('symlink') or { panic(err) }
-	os.rm('symlink2') or { panic(err) }
+	os.rmdir('symlink') or { panic(err) }
+	$if windows {
+		os.rmdir('symlink2') or { panic(err) }
+	} $else {
+		os.rm('symlink2') or { panic(err) }
+	}
 }
 
 fn test_is_executable_writable_readable() {
@@ -521,29 +629,30 @@ fn test_posix_set_bit() {
 	} $else {
 		fpath := '/tmp/permtest'
 		os.create(fpath) or { panic("Couldn't create file") }
-		os.chmod(fpath, 0o7777)
+		os.chmod(fpath, 0o0777)
 		c_fpath := &char(fpath.str)
 		mut s := C.stat{}
 		unsafe {
 			C.stat(c_fpath, &s)
 		}
 		// Take the permissions part of the mode
-		mut mode := u32(s.st_mode) & 0o7777
-		assert mode == 0o7777
+		mut mode := u32(s.st_mode) & 0o0777
+		assert mode == 0o0777
 		// `chmod u-r`
 		os.posix_set_permission_bit(fpath, os.s_irusr, false)
 		unsafe {
 			C.stat(c_fpath, &s)
 		}
-		mode = u32(s.st_mode) & 0o7777
-		assert mode == 0o7377
+		mode = u32(s.st_mode) & 0o0777
+		assert mode == 0o0377
 		// `chmod u+r`
 		os.posix_set_permission_bit(fpath, os.s_irusr, true)
 		unsafe {
 			C.stat(c_fpath, &s)
 		}
-		mode = u32(s.st_mode) & 0o7777
-		assert mode == 0o7777
+		mode = u32(s.st_mode) & 0o0777
+		assert mode == 0o0777
+		// NB: setting the sticky bit is platform dependend
 		// `chmod -s -g -t`
 		os.posix_set_permission_bit(fpath, os.s_isuid, false)
 		os.posix_set_permission_bit(fpath, os.s_isgid, false)
@@ -551,7 +660,7 @@ fn test_posix_set_bit() {
 		unsafe {
 			C.stat(c_fpath, &s)
 		}
-		mode = u32(s.st_mode) & 0o7777
+		mode = u32(s.st_mode) & 0o0777
 		assert mode == 0o0777
 		// `chmod g-w o-w`
 		os.posix_set_permission_bit(fpath, os.s_iwgrp, false)

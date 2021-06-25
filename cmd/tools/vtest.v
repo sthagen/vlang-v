@@ -22,7 +22,7 @@ fn main() {
 	backend_pos := args_before.index('-b')
 	backend := if backend_pos == -1 { '.c' } else { args_before[backend_pos + 1] } // this giant mess because closures are not implemented
 
-	mut ts := testing.new_test_session(args_before.join(' '))
+	mut ts := testing.new_test_session(args_before.join(' '), true)
 	for targ in args_after {
 		if os.is_dir(targ) {
 			// Fetch all tests from the directory
@@ -80,6 +80,9 @@ pub fn should_test_dir(path string, backend string) ([]string, []string) { // re
 	for file in files {
 		p := path + local_path_separator + file
 		if os.is_dir(p) && !os.is_link(p) {
+			if file == 'testdata' {
+				continue
+			}
 			ret_files, ret_skip_files := should_test_dir(p, backend)
 			res_files << ret_files
 			skip_files << ret_skip_files

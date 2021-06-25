@@ -18,7 +18,7 @@ struct C.tm {
 	tm_isdst int
 }
 
-fn C.timegm(&C.tm) time_t
+fn C.timegm(&C.tm) C.time_t
 
 // fn C.gmtime_r(&tm, &gbuf)
 fn C.localtime_r(t &time_t, tm &C.tm)
@@ -147,5 +147,17 @@ pub fn sleep(duration Duration) {
 		} else {
 			break
 		}
+	}
+}
+
+// some *nix system functions (e.g. `C.poll()`, C.epoll_wait()) accept an `int`
+// value as *timeout in milliseconds* with the special value `-1` meaning "infinite"
+pub fn (d Duration) sys_milliseconds() int {
+	if d > C.INT32_MAX * millisecond { // treat 2147483647000001 .. C.INT64_MAX as "infinite"
+		return -1
+	} else if d <= 0 {
+		return 0 // treat negative timeouts as 0 - consistent with Unix behaviour
+	} else {
+		return int(d / millisecond)
 	}
 }

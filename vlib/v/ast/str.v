@@ -180,7 +180,7 @@ pub fn (lit &StringInterLiteral) get_fspec_braces(i int) (string, bool) {
 					} else if sub_expr.left is CallExpr {
 						sub_expr = sub_expr.left
 						continue
-					} else if sub_expr.left is CastExpr {
+					} else if sub_expr.left is CastExpr || sub_expr.left is IndexExpr {
 						needs_braces = true
 					}
 					break
@@ -248,7 +248,7 @@ pub fn (x Expr) str() string {
 			}
 		}
 		AsCast {
-			return '$x.expr.str() as Type($x.typ)'
+			return '$x.expr.str() as ${global_table.type_to_str(x.typ)}'
 		}
 		AtExpr {
 			return '$x.val'
@@ -299,6 +299,9 @@ pub fn (x Expr) str() string {
 		FloatLiteral, IntegerLiteral {
 			return x.val
 		}
+		GoExpr {
+			return 'go $x.call_expr'
+		}
 		Ident {
 			return x.name
 		}
@@ -336,6 +339,12 @@ pub fn (x Expr) str() string {
 		ParExpr {
 			return '($x.expr)'
 		}
+		PostfixExpr {
+			if x.op == .question {
+				return '$x.expr ?'
+			}
+			return '$x.expr$x.op'
+		}
 		PrefixExpr {
 			return x.op.str() + x.right.str()
 		}
@@ -354,34 +363,34 @@ pub fn (x Expr) str() string {
 		}
 		SizeOf {
 			if x.is_type {
-				return 'sizeof(Type($x.typ))'
+				return 'sizeof(${global_table.type_to_str(x.typ)})'
 			}
 			return 'sizeof($x.expr)'
 		}
 		OffsetOf {
-			return '__offsetof($x.struct_type, $x.field)'
+			return '__offsetof(${global_table.type_to_str(x.struct_type)}, $x.field)'
 		}
 		StringInterLiteral {
-			mut res := []string{}
-			res << "'"
+			mut res := strings.new_builder(50)
+			res.write_string("'")
 			for i, val in x.vals {
-				res << val
+				res.write_string(val)
 				if i >= x.exprs.len {
 					break
 				}
-				res << '$'
+				res.write_string('$')
 				fspec_str, needs_braces := x.get_fspec_braces(i)
 				if needs_braces {
-					res << '{'
-					res << x.exprs[i].str()
-					res << fspec_str
-					res << '}'
+					res.write_string('{')
+					res.write_string(x.exprs[i].str())
+					res.write_string(fspec_str)
+					res.write_string('}')
 				} else {
-					res << x.exprs[i].str()
+					res.write_string(x.exprs[i].str())
 				}
 			}
-			res << "'"
-			return res.join('')
+			res.write_string("'")
+			return res.str()
 		}
 		StringLiteral {
 			return "'$x.val'"
@@ -493,7 +502,8 @@ pub fn (node Stmt) str() string {
 }
 
 fn field_to_string(f ConstField) string {
-	return '${f.name.trim_prefix(f.mod + '.')} = $f.expr'
+	x := f.name.trim_prefix(f.mod + '.')
+	return '$x = $f.expr'
 }
 
 pub fn (e CompForKind) str() string {

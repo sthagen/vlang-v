@@ -4,9 +4,28 @@ import os
 import testing
 import v.pref
 
+const github_job = os.getenv('GITHUB_JOB')
+
 const (
 	skip_test_files               = [
 		'vlib/context/deadline_test.v' /* sometimes blocks */,
+	]
+	skip_fsanitize_too_slow       = [
+		// These tests are too slow to be run in the CI on each PR/commit
+		// in the sanitized modes:
+		'vlib/v/compiler_errors_test.v',
+		'vlib/v/doc/doc_test.v',
+		'vlib/v/fmt/fmt_test.v',
+		'vlib/v/fmt/fmt_keep_test.v',
+		'vlib/v/fmt/fmt_vlib_test.v',
+		'vlib/v/live/live_test.v',
+		'vlib/v/parser/v_parser_test.v',
+		'vlib/v/scanner/scanner_test.v',
+		'vlib/v/tests/inout/compiler_test.v',
+		'vlib/v/tests/prod_test.v',
+		'vlib/v/tests/profile/profile_test.v',
+		'vlib/v/tests/repl/repl_test.v',
+		'vlib/v/tests/valgrind/valgrind_test.v',
 	]
 	skip_with_fsanitize_memory    = [
 		'vlib/net/tcp_simple_client_server_test.v',
@@ -23,6 +42,7 @@ const (
 		'vlib/v/tests/orm_sub_array_struct_test.v',
 		'vlib/vweb/tests/vweb_test.v',
 		'vlib/vweb/request_test.v',
+		'vlib/net/http/request_test.v',
 		'vlib/vweb/route_test.v',
 		'vlib/x/websocket/websocket_test.v',
 		'vlib/crypto/rand/crypto_rand_read_test.v',
@@ -61,6 +81,7 @@ const (
 		'vlib/clipboard/clipboard_test.v',
 		'vlib/vweb/tests/vweb_test.v',
 		'vlib/vweb/request_test.v',
+		'vlib/net/http/request_test.v',
 		'vlib/vweb/route_test.v',
 		'vlib/x/websocket/websocket_test.v',
 		'vlib/net/http/http_httpbin_test.v',
@@ -80,6 +101,7 @@ const (
 		'vlib/x/websocket/websocket_test.v',
 		'vlib/vweb/tests/vweb_test.v',
 		'vlib/vweb/request_test.v',
+		'vlib/net/http/request_test.v',
 		'vlib/vweb/route_test.v',
 	]
 	skip_on_non_windows           = [
@@ -105,9 +127,16 @@ fn main() {
 	title := 'testing vlib'
 	all_test_files := os.walk_ext(os.join_path(vroot, 'vlib'), '_test.v')
 	testing.eheader(title)
-	mut tsession := testing.new_test_session(cmd_prefix)
-	tsession.files << all_test_files
+	mut tsession := testing.new_test_session(cmd_prefix, true)
+	tsession.files << all_test_files.filter(!it.contains('testdata' + os.path_separator))
 	tsession.skip_files << skip_test_files
+
+	if github_job == 'windows-tcc' {
+		// TODO: fix these ASAP
+		tsession.skip_files << 'vlib/net/tcp_test.v'
+		tsession.skip_files << 'vlib/net/udp_test.v'
+	}
+
 	mut werror := false
 	mut sanitize_memory := false
 	mut sanitize_address := false
@@ -133,6 +162,10 @@ fn main() {
 		if arg.contains('-fsanitize=undefined') {
 			sanitize_undefined = true
 		}
+	}
+	if os.getenv('VTEST_RUN_FSANITIZE_TOO_SLOW').len == 0
+		&& (sanitize_undefined || sanitize_memory || sanitize_address) {
+		tsession.skip_files << skip_fsanitize_too_slow
 	}
 	if werror {
 		tsession.skip_files << skip_with_werror

@@ -35,9 +35,9 @@ jobs:
       - name: Build the repeat tool
         run: ./v cmd/tools/repeat.v
       - name: Repeat -o hw.c examples/hello_world.v
-        run: cmd/tools/repeat --max_time 201 --series 3 --count 10 --nmaxs 5 --warmup 3 --fail_percent 10 -t 'cd {T} ; ./v -show-timings -o hw.c examples/hello_world.v' . ./vmaster
+        run: cmd/tools/repeat --max_time 201 --series 3 --count 20 --nmins 2 --nmaxs 5 --warmup 3 --fail_percent 10 -t 'cd {T} ; ./v -show-timings -o hw.c examples/hello_world.v' . ./vmaster
       - name: Repeat -o v.c cmd/v
-        run: cmd/tools/repeat --max_time 1001 --series 3 --count 15 --nmaxs 5 --warmup 3 --fail_percent 10 -t 'cd {T} ; ./v -show-timings -o v.c cmd/v' . ./vmaster
+        run: cmd/tools/repeat --max_time 1201 --series 3 --count 20 --nmins 2 --nmaxs 5 --warmup 3 --fail_percent 10 -t 'cd {T} ; ./v -show-timings -o v.c cmd/v' . ./vmaster
 
   ubuntu-tcc:
     runs-on: ubuntu-20.04
@@ -48,8 +48,9 @@ jobs:
       - uses: actions/checkout@v2
       - name: Install dependencies
         run: |
+          sudo apt update
           sudo apt-get install --quiet -y libssl-dev sqlite3 libsqlite3-dev valgrind
-          sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libasound2-dev libgl-dev
+          sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libgl-dev
           ## The following is needed for examples/wkhtmltopdf.v
           wget https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6-1/wkhtmltox_0.12.6-1.focal_amd64.deb
           sudo apt-get install xfonts-75dpi xfonts-base
@@ -69,6 +70,8 @@ jobs:
       #        ./v -silent test-all
       - name: v self compilation
         run: ./v -o v2 cmd/v && ./v2 -o v3 cmd/v && ./v3 -o v4 cmd/v
+      - name: v self compilation with -skip-unused
+        run: ./v -skip-unused -o v2 cmd/v && ./v2 -skip-unused -o v3 cmd/v && ./v3 -skip-unused -o v4 cmd/v
       - name: v doctor
         run: |
           ./v doctor
@@ -109,8 +112,9 @@ jobs:
       - uses: actions/checkout@v2
       - name: Install dependencies
         run: |
+          sudo apt update
           sudo apt-get install --quiet -y libssl-dev sqlite3 libsqlite3-dev valgrind
-          sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libasound2-dev libgl-dev
+          sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libgl-dev
           sudo apt-get install --quiet -y libgc-dev
           ## The following is needed for examples/wkhtmltopdf.v
           wget https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6-1/wkhtmltox_0.12.6-1.focal_amd64.deb
@@ -124,27 +128,27 @@ jobs:
         run: |
           thirdparty/tcc/tcc.exe -version
           ./v -cg -o v cmd/v # Make sure vtcc can build itself twice
-      - name: v self compilation with -gc boehm_full_opt
+      - name: v self compilation with -gc boehm
         run: |
-          ./v -gc boehm_full_opt -o v2 cmd/v && ./v2 -gc boehm_full_opt -o v3 cmd/v && ./v3 -gc boehm_full_opt -o v4 cmd/v
+          ./v -gc boehm -o v2 cmd/v && ./v2 -gc boehm -o v3 cmd/v && ./v3 -gc boehm -o v4 cmd/v
           mv v4 v
       - name: v doctor
         run: |
           ./v doctor
-      - name: Verify `v -gc boehm_full_opt test` works
+      - name: Verify `v -gc boehm test` works
         run: |
-          ./v -gc boehm_full_opt cmd/tools/test_if_v_test_system_works.v
+          ./v -gc boehm cmd/tools/test_if_v_test_system_works.v
           ./cmd/tools/test_if_v_test_system_works
-      - name: Self tests with `-gc boehm_full_opt` with V compiler using Boehm-GC itself
-        run: ./v -gc boehm_full_opt -silent test-self
+      - name: Self tests with `-gc boehm` with V compiler using Boehm-GC itself
+        run: ./v -gc boehm -silent test-self
       - name: Test leak detector
         run: |
           ./v -gc boehm_leak -o testcase_leak vlib/v/tests/testcase_leak.v
           ./testcase_leak 2>leaks.txt
           grep "Found 1 leaked object" leaks.txt && grep ", sz=1000," leaks.txt
-      - name: Test leak detector not being active for `-gc boehm_full_opt`
+      - name: Test leak detector not being active for `-gc boehm`
         run: |
-          ./v -gc boehm_full_opt -o testcase_leak vlib/v/tests/testcase_leak.v
+          ./v -gc boehm -o testcase_leak vlib/v/tests/testcase_leak.v
           ./testcase_leak 2>leaks.txt
           [ "$(stat -c %s leaks.txt)" = "0" ]
       - name: Test leak detector not being active for normal compile
@@ -164,8 +168,9 @@ jobs:
           fetch-depth: 10
       - name: Install dependencies
         run: |
+          sudo apt update
           sudo apt-get install --quiet -y libssl-dev sqlite3 libsqlite3-dev valgrind
-          sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libasound2-dev libgl-dev
+          sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libgl-dev
           sudo apt-get install --quiet -y xfonts-75dpi xfonts-base
       - name: Build v
         run: make
@@ -210,7 +215,7 @@ jobs:
       - name: Install C++ dependencies
         run: |
           sudo apt-get install --quiet -y postgresql libpq-dev libssl-dev sqlite3 libsqlite3-dev
-          sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libasound2-dev libgl-dev
+          sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libgl-dev
           sudo apt-get install --quiet -y valgrind g++-9
       - name: Build V
         run: make -j4
@@ -275,8 +280,12 @@ jobs:
           UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ./v2 -o v.c cmd/v
       - name: Build V using V
         run: ./v -o v2 cmd/v && ./v2 -o v3 cmd/v
-      - name: v self with -usecache
-        run: ./v -o v2 -usecache cmd/v
+# QTODO
+#      - name: v self compilation with -usecache
+#        run: |
+#          ./v -o v2 -usecache cmd/v
+#          ./v2 -o v3 -usecache cmd/v
+#          ./v3 -usecache examples/tetris/tetris.v
       - name: Test symlink
         run: ./v symlink
       #    - name: Set up pg database
@@ -317,6 +326,15 @@ jobs:
           ../v -autofree .
           cd ..
 
+#      - name: Test c2v
+#        run: |
+#          git clone --depth 1 https://github.com/vlang/c2v
+#          cd c2v && ../v -o c2v .
+#          ../v .
+#          ../v run tests/run_tests.vsh
+#          ../v -experimental -w c2v_test.v
+#          cd ..
+
       - name: Build V UI examples
         run: |
           git clone --depth 1 https://github.com/vlang/ui
@@ -336,8 +354,9 @@ jobs:
           node-version: 12.x
       - name: Install dependencies
         run: |
+          sudo apt update
           sudo apt-get install --quiet -y postgresql libpq-dev libssl-dev sqlite3 libsqlite3-dev valgrind
-          sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libasound2-dev libgl-dev
+          sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libgl-dev
       - name: Build V
         run: make -j4 && ./v -cc gcc -cg -cstrict -o v cmd/v
       - name: Valgrind v.c
@@ -362,10 +381,12 @@ jobs:
         run: ./v -freestanding run vlib/os/bare/bare_example_linux.v
       - name: v self compilation
         run: ./v -o v2 cmd/v && ./v2 -o v3 cmd/v && ./v3 -o v4 cmd/v
-      - name: -usecache
-        run: |
-          ./v -o v2 -usecache cmd/v
-          ./v -usecache examples/tetris/tetris.v
+# QTODO
+#      - name: v self compilation with -usecache
+#        run: |
+#          ./v -o v2 -usecache cmd/v
+#          ./v2 -o v3 -usecache cmd/v
+#          ./v3 -usecache examples/tetris/tetris.v
       - name: Verify `v test` works
         run: |
           ./v cmd/tools/test_if_v_test_system_works.v
@@ -430,8 +451,9 @@ jobs:
           node-version: 12.x
       - name: Install dependencies
         run: |
+          sudo apt update
           sudo apt-get install --quiet -y postgresql libpq-dev libssl-dev sqlite3 libsqlite3-dev valgrind
-          sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libasound2-dev libgl-dev
+          sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libgl-dev
           sudo apt-get install clang
       - name: Build V
         run: make -j4 && ./v -cc clang -cg -cstrict -o v cmd/v
@@ -449,8 +471,12 @@ jobs:
           ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ./v5 -o v.c cmd/v
       - name: v self compilation
         run: ./v -o v2 cmd/v && ./v2 -o v3 cmd/v && ./v3 -o v4 cmd/v
-      - name: v self with -usecache
-        run: ./v -o v2 -usecache cmd/v
+# QTODO
+#      - name: v self compilation with -usecache
+#        run: |
+#          ./v -o v2 -usecache cmd/v
+#          ./v2 -o v3 -usecache cmd/v
+#          ./v3 -usecache examples/tetris/tetris.v
       - name: Verify `v test` works
         run: |
           ./v cmd/tools/test_if_v_test_system_works.v
@@ -777,15 +803,25 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Build V
-        run: make -j2 && ./v -cc gcc -o v cmd/v
+        run: make && sudo ./v symlink
 
   ## vls
-      - name: Clone VLS
-        run: git clone --depth 1 https://github.com/vlang/vls
-      - name: Build VLS
-        run: cd vls; ../v cmd/vls ; cd ..
-      - name: Build VLS with -prod
-        run: cd vls; ../v -prod cmd/vls ; cd ..
+      - name: Clone tree-sitter-v to ~/.vmodules/tree_sitter_v
+        run: git clone --depth 1 https://github.com/nedpals/tree-sitter-v ~/.vmodules/tree_sitter_v
+      - name: Clone VLS tree-sitter
+        run: git clone --depth 1 --no-single-branch https://github.com/vlang/vls
+      - name: Checkout branch tree-sitter
+        run: pushd vls; git checkout use-tree-sitter; popd
+      - name: Build VLS tree-sitter
+        run: pushd vls; v cmd/vls ; popd
+      - name: Build VLS tree-sitter with -prod
+        run: pushd vls; v -prod cmd/vls; popd
+      - name: Checkout branch master
+        run: pushd vls; git checkout master; popd
+      - name: Build VLS master
+        run: pushd vls; v cmd/vls ; popd
+      - name: Build VLS master with -prod
+        run: pushd vls; v -prod cmd/vls ; popd
 
   ## vab
       - name: Clone vab

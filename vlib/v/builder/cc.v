@@ -45,7 +45,7 @@ const (
 
 fn (mut v Builder) find_win_cc() ? {
 	$if !windows {
-		return none
+		return
 	}
 	ccompiler_version_res := os.execute('$v.pref.ccompiler -v')
 	if ccompiler_version_res.exit_code != 0 {
@@ -63,7 +63,7 @@ fn (mut v Builder) find_win_cc() ? {
 				if v.pref.is_verbose {
 					println('tcc not found')
 				}
-				return none
+				return error('tcc not found')
 			}
 			v.pref.ccompiler = thirdparty_tcc
 			v.pref.ccompiler_type = .tinyc
@@ -199,18 +199,14 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 		'-Wno-unused',
 		'-Wno-type-limits',
 		'-Wno-tautological-compare',
-		'-Wno-tautological-bitwise-compare',
 		// these cause various issues:
-		'-Wno-enum-conversion' /* used in vlib/sokol, where C enums in C structs are typed as V structs instead */,
-		'-Wno-sometimes-uninitialized' /* produced after exhaustive matches */,
 		'-Wno-shadow' /* the V compiler already catches this for user code, and enabling this causes issues with e.g. the `it` variable */,
-		'-Wno-int-to-void-pointer-cast',
 		'-Wno-int-to-pointer-cast' /* gcc version of the above */,
 		'-Wno-trigraphs' /* see stackoverflow.com/a/8435413 */,
 		'-Wno-missing-braces' /* see stackoverflow.com/q/13746033 */,
+		// enable additional warnings:
 		'-Wno-unknown-warning' /* if a C compiler does not understand a certain flag, it should just ignore it */,
 		'-Wno-unknown-warning-option' /* clang equivalent of the above */,
-		// enable additional warnings:
 		'-Wdate-time',
 		'-Wduplicated-branches',
 		'-Wduplicated-cond',
@@ -265,6 +261,12 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 		if have_flto {
 			optimization_options << '-flto'
 		}
+		ccoptions.wargs << [
+			'-Wno-tautological-bitwise-compare',
+			'-Wno-enum-conversion' /* used in vlib/sokol, where C enums in C structs are typed as V structs instead */,
+			'-Wno-sometimes-uninitialized' /* produced after exhaustive matches */,
+			'-Wno-int-to-void-pointer-cast',
+		]
 	}
 	if ccoptions.is_cc_gcc {
 		if ccoptions.debug_mode {
@@ -316,6 +318,7 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 	if ccoptions.debug_mode && os.user_os() != 'windows' && v.pref.build_mode != .build_module {
 		ccoptions.linker_flags << '-rdynamic' // needed for nicer symbolic backtraces
 	}
+
 	if ccompiler != 'msvc' && v.pref.os != .freebsd {
 		ccoptions.wargs << '-Werror=implicit-function-declaration'
 	}
@@ -380,19 +383,10 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 	// || os.user_os() == 'linux'
 	if !v.pref.is_bare && v.pref.build_mode != .build_module
 		&& v.pref.os in [.linux, .freebsd, .openbsd, .netbsd, .dragonfly, .solaris, .haiku] {
-		ccoptions.linker_flags << '-lm'
-		ccoptions.linker_flags << '-lpthread'
-		// -ldl is a Linux only thing. BSDs have it in libc.
-		if v.pref.os == .linux {
-			ccoptions.linker_flags << '-ldl'
-		}
 		if v.pref.os in [.freebsd, .netbsd] {
 			// Free/NetBSD: backtrace needs execinfo library while linking
 			ccoptions.linker_flags << '-lexecinfo'
 		}
-	}
-	if !v.pref.is_bare && v.pref.os == .js && os.user_os() == 'linux' {
-		ccoptions.linker_flags << '-lm'
 	}
 	ccoptions.env_cflags = os.getenv('CFLAGS')
 	ccoptions.env_ldflags = os.getenv('LDFLAGS')
@@ -464,8 +458,7 @@ fn (mut v Builder) setup_output_name() {
 fn (mut v Builder) vjs_cc() bool {
 	vexe := pref.vexe_path()
 	vdir := os.dir(vexe)
-	// Just create a C/JavaScript file and exit
-	// for example: `v -o v.c compiler`
+	// Just create a .c/.js file and exit, for example: `v -o v.c compiler`
 	ends_with_c := v.pref.out_name.ends_with('.c')
 	ends_with_js := v.pref.out_name.ends_with('.js')
 	if ends_with_c || ends_with_js {
@@ -495,8 +488,11 @@ fn (mut v Builder) vjs_cc() bool {
 				}
 			}
 		}
+		msg_mv := 'os.mv_by_cp $v.out_name_c => $v.pref.out_name'
+		util.timing_start(msg_mv)
 		// v.out_name_c may be on a different partition than v.out_name
 		os.mv_by_cp(v.out_name_c, v.pref.out_name) or { panic(err) }
+		util.timing_measure(msg_mv)
 		return true
 	}
 	return false

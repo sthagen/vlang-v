@@ -18,11 +18,19 @@ fn (mut g Gen) index_expr(node ast.IndexExpr) {
 		} else if sym.kind == .map {
 			g.index_of_map(node, sym)
 		} else if sym.kind == .string && !node.left_type.is_ptr() {
-			g.write('string_at(')
-			g.expr(node.left)
-			g.write(', ')
-			g.expr(node.index)
-			g.write(')')
+			is_direct_array_access := g.fn_decl != 0 && g.fn_decl.is_direct_arr
+			if is_direct_array_access {
+				g.expr(node.left)
+				g.write('.str[ ')
+				g.expr(node.index)
+				g.write(']')
+			} else {
+				g.write('string_at(')
+				g.expr(node.left)
+				g.write(', ')
+				g.expr(node.index)
+				g.write(')')
+			}
 		} else {
 			g.expr(node.left)
 			g.write('[')
@@ -46,7 +54,8 @@ fn (mut g Gen) range_expr(node ast.IndexExpr, range ast.RangeExpr) {
 	} else if sym.kind == .array_fixed {
 		// Convert a fixed array to V array when doing `fixed_arr[start..end]`
 		info := sym.info as ast.ArrayFixed
-		g.write('array_slice(new_array_from_c_array(')
+		noscan := g.check_noscan(info.elem_type)
+		g.write('array_slice(new_array_from_c_array${noscan}(')
 		g.write('$info.size')
 		g.write(', $info.size')
 		g.write(', sizeof(')

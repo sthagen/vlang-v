@@ -62,7 +62,7 @@ fn (mut bmp BitMap) format_texture() {
 	b_a := byte(bmp.bg_color & 0xFF)
 
 	// trasform buffer in a texture
-	x := byteptr(bmp.buf)
+	x := bmp.buf
 	unsafe {
 		mut i := 0
 		for i < bmp.buf_size {
@@ -87,7 +87,7 @@ fn (mut bmp BitMap) format_texture() {
 // write out a .ppm file
 pub fn (mut bmp BitMap) save_as_ppm(file_name string) {
 	tmp_buf := bmp.buf
-	mut buf := unsafe { malloc(bmp.buf_size) }
+	mut buf := unsafe { malloc_noscan(bmp.buf_size) }
 	unsafe { C.memcpy(buf, tmp_buf, bmp.buf_size) }
 	bmp.buf = buf
 

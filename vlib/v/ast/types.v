@@ -51,7 +51,7 @@ pub fn pref_arch_to_table_language(pref_arch pref.Arch) Language {
 		.i386 {
 			Language.i386
 		}
-		._auto {
+		._auto, ._max {
 			Language.v
 		}
 	}
@@ -64,6 +64,7 @@ pub fn pref_arch_to_table_language(pref_arch pref.Arch) Language {
 // * Table.type_kind(typ) not TypeSymbol.kind.
 // Each TypeSymbol is entered into `Table.types`.
 // See also: Table.get_type_symbol.
+
 pub struct TypeSymbol {
 pub:
 	parent_idx int
@@ -425,7 +426,7 @@ pub mut:
 }
 
 pub struct FnType {
-pub:
+pub mut:
 	is_anon  bool
 	has_decl bool
 	func     Fn
@@ -557,6 +558,15 @@ pub fn (t &TypeSymbol) sumtype_info() SumType {
 	}
 }
 
+pub fn (t &TypeSymbol) is_heap() bool {
+	if t.kind == .struct_ {
+		info := t.info as Struct
+		return info.is_heap
+	} else {
+		return false
+	}
+}
+
 /*
 pub fn (t TypeSymbol) str() string {
 	return t.name
@@ -622,7 +632,11 @@ pub fn (t &TypeSymbol) is_pointer() bool {
 
 [inline]
 pub fn (t &TypeSymbol) is_int() bool {
-	return t.kind in [.i8, .i16, .int, .i64, .byte, .u16, .u32, .u64, .int_literal, .rune]
+	res := t.kind in [.i8, .i16, .int, .i64, .byte, .u16, .u32, .u64, .int_literal, .rune]
+	if !res && t.kind == .alias {
+		return (t.info as Alias).parent_type.is_number()
+	}
+	return res
 }
 
 [inline]
@@ -731,7 +745,7 @@ pub mut:
 
 pub struct Interface {
 pub mut:
-	types   []Type
+	types   []Type // all types that implement this interface
 	fields  []StructField
 	methods []Fn
 	ifaces  []Type
@@ -792,8 +806,8 @@ pub mut:
 
 pub struct ArrayFixed {
 pub:
-	size int
-	expr Expr // used by fmt for e.g. ´[my_const]byte´
+	size      int
+	size_expr Expr // used by fmt for e.g. ´[my_const]byte´
 pub mut:
 	elem_type Type
 }
@@ -838,12 +852,6 @@ pub fn (mytable &Table) type_to_code(t Type) string {
 
 // import_aliases is a map of imported symbol aliases 'module.Type' => 'Type'
 pub fn (t &Table) type_to_str_using_aliases(typ Type, import_aliases map[string]string) string {
-	/*
-	if t.pref.is_verbose {
-	print_backtrace()
-	exit(0)
-	}
-	*/
 	sym := t.get_type_symbol(typ)
 	mut res := sym.name
 	match sym.kind {
@@ -868,21 +876,22 @@ pub fn (t &Table) type_to_str_using_aliases(typ Type, import_aliases map[string]
 			if typ.has_flag(.variadic) {
 				res = t.type_to_str_using_aliases(t.value_type(typ), import_aliases)
 			} else {
-				info := sym.info as Array
-				elem_str := t.type_to_str_using_aliases(info.elem_type, import_aliases)
-				res = '[]$elem_str'
+				if sym.info is Array {
+					elem_str := t.type_to_str_using_aliases(sym.info.elem_type, import_aliases)
+					res = '[]$elem_str'
+				} else {
+					res = 'array'
+				}
 			}
 		}
 		.array_fixed {
 			info := sym.info as ArrayFixed
 			elem_str := t.type_to_str_using_aliases(info.elem_type, import_aliases)
-			mut size_str := info.size.str()
-			if t.is_fmt {
-				if info.expr is Ident {
-					size_str = info.expr.name
-				}
+			if info.size_expr is EmptyExpr {
+				res = '[$info.size]$elem_str'
+			} else {
+				res = '[$info.size_expr]$elem_str'
 			}
-			res = '[$size_str]$elem_str'
 		}
 		.chan {
 			// TODO currently the `chan` struct in builtin is not considered a struct but a chan
@@ -905,7 +914,10 @@ pub fn (t &Table) type_to_str_using_aliases(typ Type, import_aliases map[string]
 			} else {
 				if res.starts_with('fn (') {
 					// fn foo ()
-					res = t.fn_signature(info.func, type_only: true)
+					has_names := info.func.params.any(it.name.len > 0)
+					res = t.fn_signature_using_aliases(info.func, import_aliases,
+						type_only: !has_names
+					)
 				} else {
 					// FnFoo
 					res = t.shorten_user_defined_typenames(res, import_aliases)
@@ -947,6 +959,19 @@ pub fn (t &Table) type_to_str_using_aliases(typ Type, import_aliases map[string]
 				res = t.shorten_user_defined_typenames(res, import_aliases)
 			}
 		}
+		.generic_struct_inst {
+			info := sym.info as GenericStructInst
+			res = sym.name.all_before('<')
+			res += '<'
+			for i, ctyp in info.concrete_types {
+				res += t.get_type_symbol(ctyp).name
+				if i != info.concrete_types.len - 1 {
+					res += ', '
+				}
+			}
+			res += '>'
+			res = t.shorten_user_defined_typenames(res, import_aliases)
+		}
 		.void {
 			if typ.has_flag(.optional) {
 				return '?'
@@ -984,9 +1009,14 @@ fn (t Table) shorten_user_defined_typenames(originalname string, import_aliases 
 		mut parts := res.split('.')
 		if parts.len > 1 {
 			ind := parts.len - 2
+			if t.is_fmt {
+				// Rejoin the module parts for correct usage of aliases
+				parts[ind] = parts[..ind + 1].join('.')
+			}
 			if parts[ind] in import_aliases {
 				parts[ind] = import_aliases[parts[ind]]
 			}
+
 			res = parts[ind..].join('.')
 		} else {
 			res = parts[0]
@@ -1001,6 +1031,10 @@ pub struct FnSignatureOpts {
 }
 
 pub fn (t &Table) fn_signature(func &Fn, opts FnSignatureOpts) string {
+	return t.fn_signature_using_aliases(func, map[string]string{}, opts)
+}
+
+pub fn (t &Table) fn_signature_using_aliases(func &Fn, import_aliases map[string]string, opts FnSignatureOpts) string {
 	mut sb := strings.new_builder(20)
 	if !opts.skip_receiver {
 		sb.write_string('fn ')
@@ -1024,7 +1058,7 @@ pub fn (t &Table) fn_signature(func &Fn, opts FnSignatureOpts) string {
 		if !opts.type_only {
 			sb.write_string('$param.name ')
 		}
-		styp := t.type_to_str(typ)
+		styp := t.type_to_str_using_aliases(typ, import_aliases)
 		if i == func.params.len - 1 && func.is_variadic {
 			sb.write_string('...$styp')
 		} else {
@@ -1033,7 +1067,7 @@ pub fn (t &Table) fn_signature(func &Fn, opts FnSignatureOpts) string {
 	}
 	sb.write_string(')')
 	if func.return_type != ast.void_type {
-		sb.write_string(' ${t.type_to_str(func.return_type)}')
+		sb.write_string(' ${t.type_to_str_using_aliases(func.return_type, import_aliases)}')
 	}
 	return sb.str()
 }

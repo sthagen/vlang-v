@@ -47,10 +47,10 @@ fn (mut g Gen) array_init(node ast.ArrayInit) {
 		return
 	}
 	elem_type_str := g.typ(node.elem_type)
+	noscan := g.check_noscan(node.elem_type)
 	if node.exprs.len == 0 {
 		elem_sym := g.table.get_type_symbol(node.elem_type)
 		is_default_array := elem_sym.kind == .array && node.has_default
-		noscan := g.check_noscan(node.elem_type)
 		if is_default_array {
 			g.write('__new_array_with_array_default${noscan}(')
 		} else {
@@ -104,7 +104,7 @@ fn (mut g Gen) array_init(node ast.ArrayInit) {
 	if elem_sym.kind == .function {
 		g.write('new_array_from_c_array($len, $len, sizeof(voidptr), _MOV((voidptr[$len]){')
 	} else {
-		g.write('new_array_from_c_array($len, $len, sizeof($elem_type_str), _MOV(($elem_type_str[$len]){')
+		g.write('new_array_from_c_array${noscan}($len, $len, sizeof($elem_type_str), _MOV(($elem_type_str[$len]){')
 	}
 	if len > 8 {
 		g.writeln('')
@@ -113,7 +113,12 @@ fn (mut g Gen) array_init(node ast.ArrayInit) {
 	for i, expr in node.exprs {
 		g.expr_with_cast(expr, node.expr_types[i], node.elem_type)
 		if i != len - 1 {
-			g.write(', ')
+			if i > 0 && i & 7 == 0 { // i > 0 && i % 8 == 0
+				g.writeln(',')
+				g.write('\t\t')
+			} else {
+				g.write(', ')
+			}
 		}
 	}
 	g.write('}))')
@@ -189,7 +194,7 @@ fn (mut g Gen) gen_array_map(node ast.CallExpr) {
 		}
 	}
 	g.writeln(';')
-	g.writeln('\tarray_push((array*)&$tmp, &ti);')
+	g.writeln('\tarray_push${noscan}((array*)&$tmp, &ti);')
 	g.writeln('}')
 	if !is_embed_map_filter {
 		g.stmt_path_pos << g.out.len
@@ -274,22 +279,18 @@ fn (mut g Gen) gen_array_sort(node ast.CallExpr) {
 				g.definitions.writeln('\tif (${styp}__lt(*b, *a)) { return -1; } else { return 1; }}')
 			} else {
 				field_type := g.typ(infix_expr.left_type)
-				mut left_expr_str := g.write_expr_to_string(infix_expr.left)
-				mut right_expr_str := g.write_expr_to_string(infix_expr.right)
-				if typ.is_ptr() {
-					left_expr_str = left_expr_str.replace_once('a', '(*a)')
-					right_expr_str = right_expr_str.replace_once('b', '(*b)')
-				}
-				g.definitions.writeln('$field_type a_ = $left_expr_str;')
-				g.definitions.writeln('$field_type b_ = $right_expr_str;')
+				left_expr_str := g.write_expr_to_string(infix_expr.left)
+				right_expr_str := g.write_expr_to_string(infix_expr.right)
+				g.definitions.writeln('\t$field_type a_ = $left_expr_str;')
+				g.definitions.writeln('\t$field_type b_ = $right_expr_str;')
 				mut op1, mut op2 := '', ''
 				if infix_expr.left_type == ast.string_type {
 					if is_reverse {
-						op1 = 'string_gt(a_, b_)'
-						op2 = 'string_lt(a_, b_)'
+						op1 = 'string__lt(b_, a_)'
+						op2 = 'string__lt(a_, b_)'
 					} else {
-						op1 = 'string_lt(a_, b_)'
-						op2 = 'string_gt(a_, b_)'
+						op1 = 'string__lt(a_, b_)'
+						op2 = 'string__lt(b_, a_)'
 					}
 				} else {
 					deref_str := if infix_expr.left_type.is_ptr() { '*' } else { '' }
@@ -301,8 +302,8 @@ fn (mut g Gen) gen_array_sort(node ast.CallExpr) {
 						op2 = '${deref_str}a_ > ${deref_str}b_'
 					}
 				}
-				g.definitions.writeln('if ($op1) return -1;')
-				g.definitions.writeln('if ($op2) return 1; else return 0; }\n')
+				g.definitions.writeln('\tif ($op1) return -1;')
+				g.definitions.writeln('\tif ($op2) return 1; \n\telse return 0; \n}\n')
 			}
 		}
 	}
@@ -382,7 +383,7 @@ fn (mut g Gen) gen_array_filter(node ast.CallExpr) {
 		}
 	}
 	g.writeln(') {')
-	g.writeln('\t\tarray_push((array*)&$tmp, &it); \n\t\t}')
+	g.writeln('\t\tarray_push${noscan}((array*)&$tmp, &it); \n\t\t}')
 	g.writeln('}')
 	if !is_embed_map_filter {
 		g.stmt_path_pos << g.out.len
@@ -399,10 +400,11 @@ fn (mut g Gen) gen_array_insert(node ast.CallExpr) {
 	elem_type_str := g.typ(left_info.elem_type)
 	arg2_sym := g.table.get_type_symbol(node.args[1].typ)
 	is_arg2_array := arg2_sym.kind == .array && node.args[1].typ == node.left_type
+	noscan := g.check_noscan(left_info.elem_type)
 	if is_arg2_array {
-		g.write('array_insert_many(&')
+		g.write('array_insert_many${noscan}(&')
 	} else {
-		g.write('array_insert(&')
+		g.write('array_insert${noscan}(&')
 	}
 	g.expr(node.left)
 	g.write(', ')
@@ -433,10 +435,11 @@ fn (mut g Gen) gen_array_prepend(node ast.CallExpr) {
 	elem_type_str := g.typ(left_info.elem_type)
 	arg_sym := g.table.get_type_symbol(node.args[0].typ)
 	is_arg_array := arg_sym.kind == .array && node.args[0].typ == node.left_type
+	noscan := g.check_noscan(left_info.elem_type)
 	if is_arg_array {
-		g.write('array_prepend_many(&')
+		g.write('array_prepend_many${noscan}(&')
 	} else {
-		g.write('array_prepend(&')
+		g.write('array_prepend${noscan}(&')
 	}
 	g.expr(node.left)
 	if is_arg_array {
