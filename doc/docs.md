@@ -1331,6 +1331,45 @@ println(numbers) // [1, 2, 3]
 ```
 When an identifier is just a single underscore, it is ignored.
 
+##### Custom iterators
+Types that implement a `next` method returning an `Option` can be iterated
+with a `for` loop. 
+
+```v
+struct SquareIterator {
+	arr []int
+mut:
+	idx int
+}
+
+fn (mut iter SquareIterator) next() ?int {
+	if iter.idx >= iter.arr.len {
+		return error('')
+	}
+	defer {
+		iter.idx++
+	}
+	return iter.arr[iter.idx] * iter.arr[iter.idx]
+}
+
+nums := [1, 2, 3, 4, 5]
+iter := SquareIterator{
+	arr: nums
+}
+for squared in iter {
+	println(squared)
+}
+```
+
+The code above prints:
+```
+1
+4
+9
+16
+25
+```
+
 ##### Map `for`
 
 ```v
@@ -3473,7 +3512,7 @@ You can also define special test functions in a test file:
 
 If a test function has an error return type, any propagated errors will fail the test:
 
-```
+```v
 import strconv
 
 fn test_atoi() ? {
@@ -4599,7 +4638,6 @@ Translating it to V gives you several advantages:
 module main
 
 import time
-import os
 
 [live]
 fn print_message() {
@@ -4723,6 +4761,21 @@ fn legacy_function() {}
 // This function's calls will be inlined.
 [inline]
 fn inlined_function() {
+}
+
+// This function's calls will NOT be inlined.
+[noinline]
+fn function() {
+}
+
+// This function will NOT return to its callers.
+// Such functions can be used at the end of or blocks,
+// just like exit/1 or panic/1. Such functions can not
+// have return types, and should end either in for{}, or
+// by calling other `[noreturn]` functions.
+[noreturn]
+fn forever() {
+	for {}
 }
 
 // The following struct must be allocated on the heap. Therefore, it can only be used as a

@@ -102,15 +102,7 @@ fn init_os_args_wide(argc int, argv &&byte) []string {
 	return args_
 }
 
-pub fn glob(patterns ...string) ?[]string {
-	mut matches := []string{}
-	for pattern in patterns {
-		windows_glob_pattern(pattern, mut matches) ?
-	}
-	return matches
-}
-
-fn windows_glob_pattern(pattern string, mut matches []string) ? {
+fn native_glob_pattern(pattern string, mut matches []string) ? {
 	$if debug {
 		// FindFirstFile() and FindNextFile() both have a globbing function.
 		// Unfortunately this is not as pronounced as under Unix, but should provide some functionality
@@ -485,7 +477,7 @@ pub fn hostname() string {
 	size := u32(255)
 	res := C.GetComputerNameW(&hostname[0], &size)
 	if !res {
-		return error(get_error_msg(int(C.GetLastError())))
+		return get_error_msg(int(C.GetLastError()))
 	}
 	return unsafe { string_from_wide(&hostname[0]) }
 }
@@ -495,7 +487,7 @@ pub fn loginname() string {
 	size := u32(255)
 	res := C.GetUserNameW(&loginname[0], &size)
 	if !res {
-		return error(get_error_msg(int(C.GetLastError())))
+		return get_error_msg(int(C.GetLastError()))
 	}
 	return unsafe { string_from_wide(&loginname[0]) }
 }
