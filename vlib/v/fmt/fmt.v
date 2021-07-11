@@ -1764,6 +1764,8 @@ pub fn (mut f Fmt) comptime_call(node ast.ComptimeCall) {
 			f.write("\$embed_file('$node.embed_file.rpath')")
 		} else if node.is_env {
 			f.write("\$env('$node.args_var')")
+		} else if node.is_pkgconfig {
+			f.write("\$pkgconfig('$node.args_var')")
 		} else {
 			inner_args := if node.args_var != '' {
 				node.args_var
@@ -1802,6 +1804,7 @@ pub fn (mut f Fmt) dump_expr(node ast.DumpExpr) {
 pub fn (mut f Fmt) enum_val(node ast.EnumVal) {
 	name := f.short_module(node.enum_name)
 	f.write(name + '.' + node.val)
+	f.mark_import_as_used(name)
 }
 
 pub fn (mut f Fmt) ident(node ast.Ident) {

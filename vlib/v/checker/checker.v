@@ -21,8 +21,7 @@ const int_max = int(0x7FFFFFFF)
 const (
 	valid_comp_if_os            = ['windows', 'ios', 'macos', 'mach', 'darwin', 'hpux', 'gnu',
 		'qnx', 'linux', 'freebsd', 'openbsd', 'netbsd', 'bsd', 'dragonfly', 'android', 'solaris',
-		'haiku',
-	]
+		'haiku', 'serenity']
 	valid_comp_if_compilers     = ['gcc', 'tinyc', 'clang', 'mingw', 'msvc', 'cplusplus']
 	valid_comp_if_platforms     = ['amd64', 'i386', 'aarch64', 'arm64', 'arm32', 'rv64', 'rv32']
 	valid_comp_if_cpu_features  = ['x64', 'x32', 'little_endian', 'big_endian']
@@ -3652,6 +3651,7 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 		}
 		left_sym := c.table.get_type_symbol(left_type_unwrapped)
 		right_sym := c.table.get_type_symbol(right_type_unwrapped)
+
 		if c.pref.translated {
 			// TODO fix this in C2V instead, for example cast enums to int before using `|` on them.
 			// TODO replace all c.pref.translated checks with `$if !translated` for performance
@@ -4813,7 +4813,8 @@ pub fn (mut c Checker) expr(node ast.Expr) ast.Type {
 	defer {
 		c.expr_level--
 	}
-	if c.expr_level > 200 {
+	// c.expr_level set to 150 so that stack overflow does not occur on windows
+	if c.expr_level > 150 {
 		c.error('checker: too many expr levels: $c.expr_level ', node.position())
 		return ast.void_type
 	}
@@ -5005,7 +5006,7 @@ pub fn (mut c Checker) expr(node ast.Expr) ast.Type {
 			return c.infix_expr(mut node)
 		}
 		ast.IntegerLiteral {
-			return ast.int_literal_type
+			return c.int_lit(mut node)
 		}
 		ast.LockExpr {
 			return c.lock_expr(mut node)
@@ -6186,6 +6187,7 @@ pub fn (mut c Checker) if_expr(mut node ast.IfExpr) ast.Type {
 		if !node.has_else || i < node.branches.len - 1 {
 			if node.is_comptime {
 				should_skip = c.comp_if_branch(branch.cond, branch.pos)
+				node.branches[i].pkg_exist = !should_skip
 			} else {
 				// check condition type is boolean
 				c.expected_type = ast.bool_type
@@ -6513,6 +6515,15 @@ fn (mut c Checker) comp_if_branch(cond ast.Expr, pos token.Position) bool {
 				// :)
 				// until `v.eval` is stable, I can't think of a better way to do this
 				return !(expr as ast.BoolLiteral).val
+			}
+		}
+		ast.ComptimeCall {
+			if cond.is_pkgconfig {
+				mut m := pkgconfig.main([cond.args_var]) or {
+					c.error(err.msg, cond.pos)
+					return true
+				}
+				m.run() or { return true }
 			}
 		}
 		else {
