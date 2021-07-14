@@ -41,6 +41,7 @@ pub enum Platform {
 	android
 	solaris
 	serenity
+	vinix
 	haiku
 	raw
 	cross // TODO: add functionality for v doc -os cross whenever possible
@@ -61,6 +62,7 @@ pub fn platform_from_string(platform_str string) ?Platform {
 		'js' { return .js }
 		'solaris' { return .solaris }
 		'serenity' { return .serenity }
+		'vinix' { return .vinix }
 		'android' { return .android }
 		'haiku' { return .haiku }
 		'nix' { return .linux }
@@ -262,9 +264,6 @@ pub fn (mut d Doc) stmt(stmt ast.Stmt, filename string) ?DocNode {
 			}
 			if stmt.is_unsafe {
 				node.tags << 'unsafe'
-			}
-			if node.tags.len > 0 {
-				eprintln(node.tags)
 			}
 			node.kind = .function
 			node.return_type = d.type_to_str(stmt.return_type)
