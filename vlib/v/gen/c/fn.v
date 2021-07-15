@@ -146,7 +146,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 		for concrete_types in g.table.fn_generic_types[node.name] {
 			if g.pref.is_verbose {
 				syms := concrete_types.map(g.table.get_type_symbol(it))
-				the_type := syms.map(node.name).join(', ')
+				the_type := syms.map(it.name).join(', ')
 				println('gen fn `$node.name` for type `$the_type`')
 			}
 			g.table.cur_concrete_types = concrete_types
@@ -778,7 +778,13 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			&& node.name in ['first', 'last', 'repeat'] {
 			g.write('*')
 		}
-		g.expr(node.left)
+		if node.left is ast.MapInit {
+			g.write('(map[]){')
+			g.expr(node.left)
+			g.write('}[0]')
+		} else {
+			g.expr(node.left)
+		}
 		if node.from_embed_type != 0 {
 			embed_name := typ_sym.embed_name()
 			if node.left_type.is_ptr() {
@@ -1054,7 +1060,7 @@ fn (mut g Gen) autofree_call_pregen(node ast.CallExpr) {
 			s = 'string $t = '
 		}
 		// g.expr(arg.expr)
-		s += g.write_expr_to_string(arg.expr)
+		s += g.expr_string(arg.expr)
 		// g.writeln(';// new af pre')
 		s += ';// new af2 pre'
 		g.strs_to_free0 << s
