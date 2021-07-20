@@ -3821,7 +3821,7 @@ fn (mut g Gen) match_expr(node ast.MatchExpr) {
 		g.empty_line = true
 		cur_line = g.go_before_stmt(0).trim_left(' \t')
 		tmp_var = g.new_tmp_var()
-		g.writeln('${g.typ(node.return_type)} $tmp_var;')
+		g.writeln('${g.typ(node.return_type)} $tmp_var = ${g.type_default(node.return_type)};')
 	}
 
 	if is_expr && !need_tmp_var {
@@ -4905,9 +4905,11 @@ fn (mut g Gen) const_decl(node ast.ConstDecl) {
 				}
 			}
 			else {
-				if ct_value := field.comptime_expr_value() {
-					if g.const_decl_precomputed(field.mod, name, ct_value, field.typ) {
-						continue
+				if g.pref.build_mode != .build_module {
+					if ct_value := field.comptime_expr_value() {
+						if g.const_decl_precomputed(field.mod, name, ct_value, field.typ) {
+							continue
+						}
 					}
 				}
 				if field.is_simple_define_const() {
