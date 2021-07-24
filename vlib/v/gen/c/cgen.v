@@ -1358,6 +1358,19 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 			g.writeln('goto $node.name;')
 		}
 		ast.HashStmt {
+			mut ct_condition := ''
+			if node.ct_conds.len > 0 {
+				ct_condition_start := g.out.len
+				for idx, ct_expr in node.ct_conds {
+					g.comp_if_cond(ct_expr, false)
+					if idx < node.ct_conds.len - 1 {
+						g.write(' && ')
+					}
+				}
+				ct_condition = g.out.cut_to(ct_condition_start).trim_space()
+				// dump(node)
+				// dump(ct_condition)
+			}
 			// #include etc
 			if node.kind == 'include' {
 				mut missing_message := 'Header file $node.main, needed for module `$node.mod` was not found.'
@@ -1372,17 +1385,39 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 					guarded_include = '#include $node.main'
 				}
 				if node.main.contains('.m') {
+					g.definitions.writeln('\n')
+					if ct_condition.len > 0 {
+						g.definitions.writeln('#if $ct_condition')
+					}
 					// Objective C code import, include it after V types, so that e.g. `string` is
 					// available there
-					g.definitions.writeln('// added by module `$node.mod`:')
+					g.definitions.writeln('// added by module `$node.mod`')
 					g.definitions.writeln(guarded_include)
+					if ct_condition.len > 0 {
+						g.definitions.writeln('#endif // \$if $ct_condition')
+					}
+					g.definitions.writeln('\n')
 				} else {
-					g.includes.writeln('// added by module `$node.mod`:')
+					g.includes.writeln('\n')
+					if ct_condition.len > 0 {
+						g.includes.writeln('#if $ct_condition')
+					}
+					g.includes.writeln('// added by module `$node.mod`')
 					g.includes.writeln(guarded_include)
+					if ct_condition.len > 0 {
+						g.includes.writeln('#endif // \$if $ct_condition')
+					}
+					g.includes.writeln('\n')
 				}
 			} else if node.kind == 'define' {
-				g.includes.writeln('// defined by module `$node.mod` in file `$node.source_file`:')
+				if ct_condition.len > 0 {
+					g.includes.writeln('#if $ct_condition')
+				}
+				g.includes.writeln('// defined by module `$node.mod`')
 				g.includes.writeln('#define $node.main')
+				if ct_condition.len > 0 {
+					g.includes.writeln('#endif // \$if $ct_condition')
+				}
 			}
 		}
 		ast.Import {}
@@ -2230,6 +2265,7 @@ fn (mut g Gen) gen_assign_stmt(assign_stmt ast.AssignStmt) {
 	}
 	mut return_type := ast.void_type
 	is_decl := assign_stmt.op == .decl_assign
+	g.assign_op = assign_stmt.op
 	op := if is_decl { token.Kind.assign } else { assign_stmt.op }
 	right_expr := assign_stmt.right[0]
 	match right_expr {
@@ -2359,20 +2395,40 @@ fn (mut g Gen) gen_assign_stmt(assign_stmt ast.AssignStmt) {
 				}
 				g.expr(lx)
 				noscan := if is_auto_heap { g.check_noscan(return_type) } else { '' }
-				if is_opt {
-					mr_base_styp := g.base_type(return_type)
-					if is_auto_heap {
-						g.writeln(' = HEAP${noscan}($mr_base_styp, *($mr_base_styp*)${mr_var_name}.data).arg$i);')
+				if g.is_arraymap_set {
+					if is_opt {
+						mr_base_styp := g.base_type(return_type)
+						if is_auto_heap {
+							g.writeln('HEAP${noscan}($mr_base_styp, *($mr_base_styp*)${mr_var_name}.data).arg$i) });')
+						} else {
+							g.writeln('(*($mr_base_styp*)${mr_var_name}.data).arg$i });')
+						}
 					} else {
-						g.writeln(' = (*($mr_base_styp*)${mr_var_name}.data).arg$i;')
+						if is_auto_heap {
+							g.writeln('HEAP${noscan}($styp, ${mr_var_name}.arg$i) });')
+						} else {
+							g.writeln('${mr_var_name}.arg$i });')
+						}
 					}
 				} else {
-					if is_auto_heap {
-						g.writeln(' = HEAP${noscan}($styp, ${mr_var_name}.arg$i);')
+					if is_opt {
+						mr_base_styp := g.base_type(return_type)
+						if is_auto_heap {
+							g.writeln(' = HEAP${noscan}($mr_base_styp, *($mr_base_styp*)${mr_var_name}.data).arg$i);')
+						} else {
+							g.writeln(' = (*($mr_base_styp*)${mr_var_name}.data).arg$i;')
+						}
 					} else {
-						g.writeln(' = ${mr_var_name}.arg$i;')
+						if is_auto_heap {
+							g.writeln(' = HEAP${noscan}($styp, ${mr_var_name}.arg$i);')
+						} else {
+							g.writeln(' = ${mr_var_name}.arg$i;')
+						}
 					}
 				}
+			}
+			if g.is_arraymap_set {
+				g.is_arraymap_set = false
 			}
 			return
 		}
