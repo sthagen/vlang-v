@@ -745,13 +745,13 @@ fn test_eq() {
 		age: 22
 		name: 'bob'
 	}]
-	assert [map{
+	assert [{
 		'bob': 22
-	}, map{
+	}, {
 		'tom': 33
-	}] == [map{
+	}] == [{
 		'bob': 22
-	}, map{
+	}, {
 		'tom': 33
 	}]
 	assert [[1, 2, 3], [4]] == [[1, 2, 3], [4]]
@@ -895,6 +895,24 @@ fn test_i64_sort() {
 	assert f[0] == 0
 	assert f[1] == 1
 	assert f[6] == 79
+}
+
+fn test_a_b_paras_sort() {
+	mut arr_i := [1, 3, 2]
+	arr_i.sort(a < b)
+	println(arr_i)
+	assert arr_i == [1, 2, 3]
+	arr_i.sort(b < a)
+	println(arr_i)
+	assert arr_i == [3, 2, 1]
+
+	mut arr_f := [1.1, 3.3, 2.2]
+	arr_f.sort(a < b)
+	println(arr_f)
+	assert arr_f == [1.1, 2.2, 3.3]
+	arr_f.sort(b < a)
+	println(arr_f)
+	assert arr_f == [3.3, 2.2, 1.1]
 }
 
 /*
@@ -1297,20 +1315,20 @@ fn test_struct_array_of_multi_type_in() {
 	ivan := Person{
 		name: 'ivan'
 		nums: [1, 2, 3]
-		kv: map{
+		kv: {
 			'aaa': '111'
 		}
 	}
 	people := [Person{
 		name: 'ivan'
 		nums: [1, 2, 3]
-		kv: map{
+		kv: {
 			'aaa': '111'
 		}
 	}, Person{
 		name: 'bob'
 		nums: [2]
-		kv: map{
+		kv: {
 			'bbb': '222'
 		}
 	}]
@@ -1322,20 +1340,20 @@ fn test_struct_array_of_multi_type_index() {
 	ivan := Person{
 		name: 'ivan'
 		nums: [1, 2, 3]
-		kv: map{
+		kv: {
 			'aaa': '111'
 		}
 	}
 	people := [Person{
 		name: 'ivan'
 		nums: [1, 2, 3]
-		kv: map{
+		kv: {
 			'aaa': '111'
 		}
 	}, Person{
 		name: 'bob'
 		nums: [2]
-		kv: map{
+		kv: {
 			'bbb': '222'
 		}
 	}]
