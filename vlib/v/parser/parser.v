@@ -2208,7 +2208,12 @@ fn (mut p Parser) index_expr(left ast.Expr) ast.IndexExpr {
 		has_low = false
 		// [..end]
 		p.next()
-		high := p.expr(0)
+		mut high := ast.empty_expr()
+		mut has_high := false
+		if p.tok.kind != .rsbr {
+			high = p.expr(0)
+			has_high = true
+		}
 		pos := start_pos.extend(p.tok.position())
 		p.check(.rsbr)
 		return ast.IndexExpr{
@@ -2217,7 +2222,7 @@ fn (mut p Parser) index_expr(left ast.Expr) ast.IndexExpr {
 			index: ast.RangeExpr{
 				low: ast.empty_expr()
 				high: high
-				has_high: true
+				has_high: has_high
 				pos: pos
 			}
 		}
@@ -3123,6 +3128,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 	p.check(.key_type)
 	end_pos := p.tok.position()
 	decl_pos := start_pos.extend(end_pos)
+	name_pos := p.tok.position()
 	name := p.check_name()
 	if name.len == 1 && name[0].is_capital() {
 		p.error_with_pos('single letter capital names are reserved for generic template types.',
@@ -3197,6 +3203,11 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 			}
 			is_public: is_pub
 		})
+		if typ == -1 {
+			p.error_with_pos('cannot register sum type `$name`, another type with this name exists',
+				name_pos)
+			return ast.SumTypeDecl{}
+		}
 		comments = p.eat_comments(same_line: true)
 		return ast.SumTypeDecl{
 			name: name
@@ -3233,7 +3244,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 	type_end_pos := p.prev_tok.position()
 	if idx == -1 {
 		p.error_with_pos('cannot register alias `$name`, another type with this name exists',
-			decl_pos.extend(type_alias_pos))
+			name_pos)
 		return ast.AliasTypeDecl{}
 	}
 	if idx == pidx {

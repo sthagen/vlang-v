@@ -179,6 +179,7 @@ mut:
 	expected_cast_type ast.Type // for match expr of sumtypes
 	defer_vars         []string
 	anon_fn            bool
+	array_sort_fn      map[string]bool
 }
 
 pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
@@ -1874,14 +1875,41 @@ fn (mut g Gen) write_sumtype_casting_fn(got_ ast.Type, exp_ ast.Type) {
 	got_cname, exp_cname := got_sym.cname, exp_sym.cname
 	sb.writeln('static inline $exp_cname ${got_cname}_to_sumtype_${exp_cname}($got_cname* x) {')
 	sb.writeln('\t$got_cname* ptr = memdup(x, sizeof($got_cname));')
+	for embed_hierarchy in g.table.get_embeds(got_sym) {
+		// last embed in the hierarchy
+		mut embed_cname := ''
+		mut embed_name := ''
+		mut accessor := '&x->'
+		for j, embed in embed_hierarchy {
+			embed_sym := g.table.get_type_symbol(embed)
+			embed_cname = embed_sym.cname
+			embed_name = embed_sym.embed_name()
+			if j > 0 {
+				accessor += '.'
+			}
+			accessor += embed_name
+		}
+		// if the variable is not used, the C compiler will optimize it away
+		sb.writeln('\t$embed_cname* ${embed_name}_ptr = memdup($accessor, sizeof($embed_cname));')
+	}
 	sb.write_string('\treturn ($exp_cname){ ._$got_cname = ptr, ._typ = ${g.type_sidx(got)}')
 	for field in (exp_sym.info as ast.SumType).fields {
+		mut ptr := 'ptr'
+		mut type_cname := got_cname
+		_, embed_types := g.table.find_field_from_embeds_recursive(got_sym, field.name) or {
+			ast.StructField{}, []ast.Type{}
+		}
+		if embed_types.len > 0 {
+			embed_sym := g.table.get_type_symbol(embed_types.last())
+			ptr = '${embed_sym.embed_name()}_ptr'
+			type_cname = embed_sym.cname
+		}
 		field_styp := g.typ(field.typ)
 		if got_sym.kind in [.sum_type, .interface_] {
 			// the field is already a wrapped pointer; we shouldn't wrap it once again
 			sb.write_string(', .$field.name = ptr->$field.name')
 		} else {
-			sb.write_string(', .$field.name = ($field_styp*)((char*)ptr + __offsetof_ptr(ptr, $got_cname, $field.name))')
+			sb.write_string(', .$field.name = ($field_styp*)((char*)$ptr + __offsetof_ptr($ptr, $type_cname, $field.name))')
 		}
 	}
 	sb.writeln('};\n}')
@@ -2003,7 +2031,10 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 		} else {
 			g.writeln('($shared_styp*)__dup${shared_styp}(&($shared_styp){.mtx = {0}, .val =')
 		}
+		old_is_shared := g.is_shared
+		g.is_shared = false
 		g.expr(expr)
+		g.is_shared = old_is_shared
 		g.writeln('}, sizeof($shared_styp))')
 		return
 	}
@@ -3279,6 +3310,7 @@ fn (mut g Gen) expr(node ast.Expr) {
 					g.writeln('($shared_styp*)__dup${shared_styp}(&($shared_styp){.mtx = {0}, .val =')
 				}
 			}
+			last_stmt_pos := g.stmt_path_pos.last()
 			g.call_expr(node)
 			// if g.fileis('1.strings') {
 			// println('before:' + node.autofree_pregen)
@@ -3290,7 +3322,7 @@ fn (mut g Gen) expr(node ast.Expr) {
 				// so just skip it
 				g.autofree_call_pregen(node)
 				if g.strs_to_free0.len > 0 {
-					g.insert_before_stmt(g.strs_to_free0.join('\n') + '/* inserted before */')
+					g.insert_at(last_stmt_pos, g.strs_to_free0.join('\n') + '/* inserted before */')
 				}
 				g.strs_to_free0 = []
 				// println('pos=$node.pos.pos')
@@ -5069,7 +5101,7 @@ fn (mut g Gen) const_decl_precomputed(mod string, name string, ct_value ast.Comp
 		rune {
 			rune_code := u32(ct_value)
 			if rune_code <= 255 {
-				if rune_code in [`"`, `\\`, `\'`] {
+				if rune_code in [`"`, `\\`, `'`] {
 					return false
 				}
 				escval := util.smart_quote(byte(rune_code).ascii_str(), false)
@@ -5239,7 +5271,11 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 	}
 	// User set fields
 	mut initialized := false
+	mut old_is_shared := g.is_shared
 	for i, field in struct_init.fields {
+		if !field.typ.has_flag(.shared_f) {
+			g.is_shared = false
+		}
 		inited_fields[field.name] = i
 		if sym.kind != .struct_ {
 			field_name := if sym.language == .v { c_name(field.name) } else { field.name }
@@ -5271,7 +5307,9 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 			}
 			initialized = true
 		}
+		g.is_shared = old_is_shared
 	}
+	g.is_shared = old_is_shared
 	// The rest of the fields are zeroed.
 	// `inited_fields` is a list of fields that have been init'ed, they are skipped
 	mut nr_fields := 1
@@ -5282,6 +5320,7 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 			verror('union must not have more than 1 initializer')
 		}
 		if !info.is_union {
+			old_is_shared2 := g.is_shared
 			mut used_embed_fields := []string{}
 			init_field_names := info.fields.map(it.name)
 			// fields that are initialized but belong to the embedding
@@ -5309,10 +5348,14 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 					initialized = true
 				}
 			}
+			g.is_shared = old_is_shared2
 		}
 		// g.zero_struct_fields(info, inited_fields)
 		// nr_fields = info.fields.len
 		for mut field in info.fields {
+			if !field.typ.has_flag(.shared_f) {
+				g.is_shared = false
+			}
 			if mut sym.info is ast.Struct {
 				mut found_equal_fields := 0
 				for mut sifield in sym.info.fields {
@@ -5389,7 +5432,9 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 				g.write(',')
 			}
 			initialized = true
+			g.is_shared = old_is_shared
 		}
+		g.is_shared = old_is_shared
 	}
 	if is_multiline {
 		g.indent--
@@ -5839,6 +5884,12 @@ fn (mut g Gen) insert_before_stmt(s string) {
 	g.write(cur_line)
 }
 
+fn (mut g Gen) insert_at(pos int, s string) {
+	cur_line := g.out.cut_to(pos)
+	g.writeln(s)
+	g.write(cur_line)
+}
+
 // fn (mut g Gen) start_tmp() {
 // }
 // If user is accessing the return value eg. in assigment, pass the variable name.
@@ -5924,6 +5975,7 @@ fn (mut g Gen) or_block(var_name string, or_block ast.OrExpr, return_type ast.Ty
 		}
 	}
 	g.writeln('}')
+	g.stmt_path_pos << g.out.len
 }
 
 [inline]

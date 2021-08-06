@@ -2465,6 +2465,10 @@ fn (mut c Checker) array_builtin_method_call(mut call_expr ast.CallExpr, left_ty
 		// position of `it` doesn't matter
 		scope_register_it(mut call_expr.scope, call_expr.pos, elem_typ)
 	} else if method_name == 'sort' {
+		if call_expr.left is ast.CallExpr {
+			c.error('the `sort()` method can be called only on mutable receivers, but `$call_expr.left` is a call expression',
+				call_expr.pos)
+		}
 		c.fail_if_immutable(call_expr.left)
 		// position of `a` and `b` doesn't matter, they're the same
 		scope_register_a_b(mut call_expr.scope, call_expr.pos, elem_typ)
@@ -3020,14 +3024,18 @@ fn (mut c Checker) deprecate_fnmethod(kind string, name string, the_fn ast.Fn, c
 			}
 		}
 	}
-	if after_time < now {
-		c.warn(semicolonize('$start_message has been deprecated since $after_time.ymmdd()',
+	error_time := after_time.add_days(180)
+	if error_time < now {
+		c.error(semicolonize('$start_message has been deprecated since $after_time.ymmdd()',
+			deprecation_message), call_expr.pos)
+	} else if after_time < now {
+		c.warn(semicolonize('$start_message has been deprecated since $after_time.ymmdd(), it will be an error after $error_time.ymmdd()',
 			deprecation_message), call_expr.pos)
 	} else if after_time == now {
 		c.warn(semicolonize('$start_message has been deprecated', deprecation_message),
 			call_expr.pos)
 	} else {
-		c.note(semicolonize('$start_message will be deprecated after $after_time.ymmdd()',
+		c.note(semicolonize('$start_message will be deprecated after $after_time.ymmdd(), and will become an error after $error_time.ymmdd()',
 			deprecation_message), call_expr.pos)
 	}
 }
