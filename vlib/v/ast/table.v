@@ -39,6 +39,8 @@ pub mut:
 	// When table.gostmts > 0, __VTHREADS__ is defined, which can be checked with `$if threads {`
 }
 
+// used by vls to avoid leaks
+// TODO remove manual memory management
 [unsafe]
 pub fn (t &Table) free() {
 	unsafe {
