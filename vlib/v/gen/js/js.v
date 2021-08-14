@@ -428,6 +428,9 @@ fn (mut g JsGen) js_name(name_ string) string {
 			'*' {
 				'\$mul'
 			}
+			'%' {
+				'\$mod'
+			}
 			'==' {
 				'eq'
 			}
@@ -1767,10 +1770,39 @@ fn (mut g JsGen) gen_infix_expr(it ast.InfixExpr) {
 	if is_not {
 		g.write('!(')
 	}
-
+	is_arithmetic := it.op in [token.Kind.plus, .minus, .mul, .div, .mod]
+	if is_arithmetic && ((l_sym.kind == .i64 || l_sym.kind == .u64)
+		|| (r_sym.kind == .i64 || r_sym.kind == .u64)) {
+		// if left or right is i64 or u64 we convert them to bigint to perform operation.
+		greater_typ := g.greater_typ(it.left_type, it.right_type)
+		if g.ns.name == 'builtin' {
+			g.write('new ')
+		}
+		g.write('${g.typ(greater_typ)}(')
+		g.cast_stack << greater_typ
+		g.write('BigInt((')
+		g.expr(it.left)
+		g.write(').\$toJS())')
+		g.write(' $it.op ')
+		g.write('BigInt((')
+		g.expr(it.right)
+		g.write(').\$toJS())')
+		g.cast_stack.delete_last()
+		g.write(')')
+		if is_not {
+			g.write(')')
+		}
+		return
+	}
 	if it.op == .eq || it.op == .ne {
-		// Shallow equatables
-		if l_sym.kind in js.shallow_equatables && r_sym.kind in js.shallow_equatables {
+		has_operator_overloading := g.table.type_has_method(l_sym, '==')
+		if has_operator_overloading {
+			g.expr(it.left)
+			g.write('.eq(')
+			g.expr(it.right)
+			g.write(')')
+			// Shallow equatables
+		} else if l_sym.kind in js.shallow_equatables && r_sym.kind in js.shallow_equatables {
 			// wrap left expr in parens so binary operations will work correctly.
 			g.write('(')
 			g.expr(it.left)
@@ -1816,35 +1848,78 @@ fn (mut g JsGen) gen_infix_expr(it ast.InfixExpr) {
 		g.expr(it.left)
 		g.write(' instanceof ')
 		g.write(g.typ(it.right_type))
-	} else {
-		is_arithmetic := it.op in [token.Kind.plus, .minus, .mul, .div, .mod]
-
-		mut greater_typ := 0
-		// todo(playX): looks like this cast is always required to perform .eq operation on types.
-		if is_arithmetic {
-			greater_typ = g.greater_typ(it.left_type, it.right_type)
-			if g.cast_stack.len > 0 {
-				// needs_cast = g.cast_stack.last() != greater_typ
-			}
+	} else if it.op in [.lt, .gt, .ge, .le] && g.table.type_has_method(l_sym, '<')
+		&& l_sym.kind == r_sym.kind {
+		if it.op in [.le, .ge] {
+			g.write('!')
 		}
-
-		if is_arithmetic {
-			if g.ns.name == 'builtin' {
-				g.write('new ')
-			}
-			g.write('${g.typ(greater_typ)}(')
-			g.cast_stack << greater_typ
-		}
-
-		g.expr(it.left)
-
-		g.write(' $it.op ')
-
-		g.expr(it.right)
-
-		if is_arithmetic {
-			g.cast_stack.delete_last()
+		if it.op in [.lt, .ge] {
+			g.expr(it.left)
+			g.write('.\$lt (')
+			g.expr(it.right)
 			g.write(')')
+		} else {
+			g.expr(it.right)
+			g.write('.\$lt (')
+			g.expr(it.left)
+			g.write(')')
+		}
+	} else {
+		has_operator_overloading := g.table.type_has_method(l_sym, it.op.str())
+		if has_operator_overloading {
+			g.expr(it.left)
+			name := match it.op.str() {
+				'+' {
+					'\$add'
+				}
+				'-' {
+					'\$sub'
+				}
+				'/' {
+					'\$div'
+				}
+				'*' {
+					'\$mul'
+				}
+				'%' {
+					'\$mod'
+				}
+				else {
+					panic('unreachable')
+					''
+				}
+			}
+			g.write('.$name (')
+			g.expr(it.right)
+			g.write(')')
+		} else {
+			mut greater_typ := 0
+			// todo(playX): looks like this cast is always required to perform .eq operation on types.
+			if is_arithmetic {
+				greater_typ = g.greater_typ(it.left_type, it.right_type)
+				if g.cast_stack.len > 0 {
+					// needs_cast = g.cast_stack.last() != greater_typ
+				}
+			}
+
+			if is_arithmetic {
+				if g.ns.name == 'builtin' {
+					g.write('new ')
+				}
+				g.write('${g.typ(greater_typ)}(')
+				g.cast_stack << greater_typ
+			}
+
+			g.expr(it.left)
+
+			g.write(' $it.op ')
+
+			g.expr(it.right)
+
+			if is_arithmetic {
+				g.cast_stack.delete_last()
+				g.write(')')
+			}
 		}
 	}
 
@@ -1873,7 +1948,9 @@ fn (mut g JsGen) greater_typ(left ast.Type, right ast.Type) ast.Type {
 	}
 	should_int := (l in ast.integer_type_idxs && r in ast.integer_type_idxs)
 	if should_int {
-		// cant add to u64 - if (ast.u64_type_idx in lr) { return ast.Type(ast.u64_type_idx) }
+		if ast.u64_type_idx in lr {
+			return ast.Type(ast.u64_type_idx)
+		}
 		// just guessing this order
 		if ast.i64_type_idx in lr {
 			return ast.Type(ast.i64_type_idx)
@@ -2046,8 +2123,20 @@ fn (mut g JsGen) gen_type_cast_expr(it ast.CastExpr) {
 	is_literal := ((it.expr is ast.IntegerLiteral && it.typ in ast.integer_type_idxs)
 		|| (it.expr is ast.FloatLiteral && it.typ in ast.float_type_idxs))
 	// Skip cast if type is the same as the parrent caster
+	tsym := g.table.get_type_symbol(it.typ)
+	if it.expr is ast.IntegerLiteral && (tsym.kind == .i64 || tsym.kind == .u64) {
+		if g.ns.name == 'builtin' {
+			g.write('new ')
+		}
+		g.write(tsym.kind.str())
+		g.write('(BigInt(')
+		g.write(it.expr.val)
+		g.write('n))')
+		return
+	}
 	if g.cast_stack.len > 0 && is_literal {
 		if it.typ == g.cast_stack[g.cast_stack.len - 1] {
+			g.expr(it.expr)
 			return
 		}
 	}
