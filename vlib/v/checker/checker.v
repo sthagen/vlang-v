@@ -2679,7 +2679,13 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr) ast.Type {
 			return ast.void_type
 		}
 		expr := node.args[0].expr
-		if expr !is ast.TypeNode {
+		if expr is ast.TypeNode {
+			sym := c.table.get_type_symbol(expr.typ)
+			if !c.table.known_type(sym.name) {
+				c.error('json.decode: unknown type `$sym.name`', node.pos)
+			}
+		} else {
+			// if expr !is ast.TypeNode {
 			typ := expr.type_name()
 			c.error('json.decode: first argument needs to be a type, got `$typ`', node.pos)
 			return ast.void_type
@@ -8139,6 +8145,19 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 				if field_sym.kind == .function {
 					c.error('type `$sym.name` has both field and method named `$node.name`',
 						node.pos)
+				}
+			}
+			if node.name == 'free' {
+				if node.return_type != ast.void_type {
+					c.error('`.free()` methods should not have a return type', node.return_type_pos)
+				}
+				if !node.receiver.typ.is_ptr() {
+					tname := sym.name.after_char(`.`)
+					c.error('`.free()` methods should be defined on either a `(mut x &$tname)`, or a `(x &$tname)` receiver',
+						node.receiver_pos)
+				}
+				if node.params.len != 1 {
+					c.error('`.free()` methods should have 0 arguments', node.pos)
 				}
 			}
 		}
