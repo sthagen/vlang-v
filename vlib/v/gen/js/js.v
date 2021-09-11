@@ -76,7 +76,7 @@ mut:
 	cast_stack            []ast.Type
 	call_stack            []ast.CallExpr
 	is_vlines_enabled     bool // is it safe to generate #line directives when -g is passed
-	sourcemap             sourcemap.SourceMap // maps lines in generated javascrip file to original source files and line
+	sourcemap             &sourcemap.SourceMap // maps lines in generated javascrip file to original source files and line
 	comptime_var_type_map map[string]ast.Type
 	defer_ifdef           string
 	out                   strings.Builder = strings.new_builder(128)
@@ -98,6 +98,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		ns: 0
 		enable_doc: true
 		file: 0
+		sourcemap: 0
 	}
 	g.doc = new_jsdoc(g)
 	// TODO: Add '[-no]-jsdoc' flag
@@ -155,6 +156,45 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	if g.pref.is_test {
 		g.gen_js_main_for_tests()
 	}
+	g.enter_namespace('main')
+	// generate JS methods for interface methods
+	for _, iface_types in g.table.iface_types {
+		for ty in iface_types {
+			sym := g.table.get_type_symbol(ty)
+			for method in sym.methods {
+				p_sym := g.table.get_type_symbol(method.params[0].typ)
+				mname := g.js_name(p_sym.name) + '_' + method.name
+				g.write('${g.js_name(sym.name)}.prototype.$method.name = function(')
+				for i, param in method.params {
+					if i == 0 {
+						continue
+					}
+					g.write('${g.js_name(param.name)}')
+					if i != method.params.len - 1 {
+						g.write(',')
+					}
+				}
+				g.writeln(') {')
+				g.inc_indent()
+				g.write('return ${mname}(')
+				for i, param in method.params {
+					if i == 0 {
+						g.write('this')
+					} else {
+						g.write('${g.js_name(param.name)}')
+					}
+					if i != method.params.len - 1 {
+						g.write(',')
+					}
+				}
+				g.writeln(')')
+				g.dec_indent()
+				g.writeln('}')
+			}
+		}
+	}
+	g.write('js_main();')
+	g.escape_namespace()
 	// resolve imports
 	deps_resolved := graph.resolve()
 	nodes := deps_resolved.nodes
@@ -177,6 +217,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	out += g.out.str()
 
 	/*
+	TODO(playX): Again add support for these doc comments
 	for node in nodes {
 		name := g.js_name(node.name).replace('.', '_')
 		if g.enable_doc {
@@ -185,7 +226,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		// out += 'const $name = (function ('
 		mut namespace := g.namespaces[node.name]
 
-		
+
 		if g.pref.sourcemap {
 			// calculate current output start line
 			mut current_line := u32(out.count('\n') + 1)
@@ -206,11 +247,12 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 				sm_pos = sourcemap_ns_entry.ns_pos
 			}
 		}
-		
+
 
 		// public scope
 		out += '\n'
 	}*/
+
 	if g.pref.sourcemap {
 		out += g.create_sourcemap()
 	}
@@ -228,7 +270,7 @@ fn (g JsGen) create_sourcemap() string {
 
 pub fn (mut g JsGen) gen_js_main_for_tests() {
 	g.enter_namespace('main')
-	g.writeln('(function() {  ')
+	g.writeln('function js_main() {  ')
 	g.inc_indent()
 	all_tfuncs := g.get_all_test_function_names()
 
@@ -255,7 +297,7 @@ pub fn (mut g JsGen) gen_js_main_for_tests() {
 		g.writeln('bt.end_testing();')
 	}
 	g.dec_indent()
-	g.writeln('})();')
+	g.writeln('}')
 	g.escape_namespace()
 }
 
@@ -887,8 +929,12 @@ fn (mut g JsGen) expr(node ast.Expr) {
 				if node.op == .amp {
 					// if !node.right_type.is_pointer() {
 					// kind of weird way to handle references but it allows us to access type methods easily.
+					/*
 					g.write('(function(x) {')
 					g.write(' return { val: x, __proto__: Object.getPrototypeOf(x), valueOf: function() { return this.val; } }})(  ')
+					g.expr(node.right)
+					g.write(')')*/
+					g.write('new \$ref(')
 					g.expr(node.right)
 					g.write(')')
 					//} else {
@@ -1405,11 +1451,11 @@ fn (mut g JsGen) gen_method_decl(it ast.FnDecl, typ FnGenType) {
 		// there is no concept of main in JS but we do have iife
 		g.writeln('/* program entry point */')
 
-		g.write('(')
+		// g.write('(')
 		if has_go {
 			g.write('async ')
 		}
-		g.write('function(')
+		g.write('function js_main(')
 	} else if it.is_anon {
 		g.write('function (')
 	} else {
@@ -1450,9 +1496,18 @@ fn (mut g JsGen) gen_method_decl(it ast.FnDecl, typ FnGenType) {
 	g.writeln('}')
 
 	if is_main {
-		g.write(')();')
+		// g.write(')')
 	}
 	g.writeln('')
+
+	for attr in it.attrs {
+		match attr.name {
+			'export' {
+				g.writeln('globalThis.$attr.arg = ${g.js_name(it.name)};')
+			}
+			else {}
+		}
+	}
 	/*
 	if typ == .alias_method || typ == .iface_method {
 		sym := g.table.get_final_type_symbol(it.params[0].typ.set_nr_muls(0))
@@ -1732,7 +1787,7 @@ fn (mut g JsGen) gen_return_stmt(it ast.Return) {
 	fn_return_is_optional := g.fn_decl.return_type.has_flag(.optional)
 	if node.exprs.len == 0 {
 		if fn_return_is_optional {
-			g.writeln('return {}')
+			g.writeln('return {state: new int(0)}')
 		} else {
 			g.writeln('return;')
 		}

@@ -33,6 +33,7 @@ mut:
 	peek_tok            token.Token
 	table               &ast.Table
 	language            ast.Language
+	fn_language         ast.Language // .c for `fn C.abcd()` declarations
 	inside_test_file    bool // when inside _test.v or _test.vv file
 	inside_if           bool
 	inside_if_expr      bool
@@ -147,12 +148,12 @@ pub fn (mut p Parser) set_path(path string) {
 	}
 	before_dot_v := path.all_before_last('.v') // also works for .vv and .vsh
 	language := before_dot_v.all_after_last('.')
-	langauge_with_underscore := before_dot_v.all_after_last('_')
-	if language == before_dot_v && langauge_with_underscore == before_dot_v {
+	language_with_underscore := before_dot_v.all_after_last('_')
+	if language == before_dot_v && language_with_underscore == before_dot_v {
 		p.file_backend_mode = .v
 		return
 	}
-	actual_language := if language == before_dot_v { langauge_with_underscore } else { language }
+	actual_language := if language == before_dot_v { language_with_underscore } else { language }
 	match actual_language {
 		'c' {
 			p.file_backend_mode = .c
@@ -1097,7 +1098,7 @@ fn (mut p Parser) asm_stmt(is_top_level bool) ast.AsmStmt {
 fn (mut p Parser) reg_or_alias() ast.AsmArg {
 	p.check(.name)
 	if p.prev_tok.lit in p.scope.objects {
-		x := p.scope.objects[p.prev_tok.lit]
+		x := unsafe { p.scope.objects[p.prev_tok.lit] }
 		if x is ast.AsmRegister {
 			return ast.AsmArg(x as ast.AsmRegister)
 		} else {
@@ -2170,7 +2171,7 @@ pub fn (mut p Parser) name_expr() ast.Expr {
 	} else if (p.peek_tok.kind == .lcbr || (p.peek_tok.kind == .lt && lit0_is_capital))
 		&& (!p.inside_match || (p.inside_select && prev_tok_kind == .arrow && lit0_is_capital))
 		&& !p.inside_match_case && (!p.inside_if || p.inside_select)
-		&& (!p.inside_for || p.inside_select) { // && (p.tok.lit[0].is_capital() || p.builtin_mod) {
+		&& (!p.inside_for || p.inside_select) && !known_var { // && (p.tok.lit[0].is_capital() || p.builtin_mod) {
 		// map.v has struct literal: map{field: expr}
 		if p.peek_tok.kind == .lcbr && !(p.builtin_mod
 			&& p.file_base in ['map.v', 'map_d_gcboehm_opt.v']) && p.tok.lit == 'map' {

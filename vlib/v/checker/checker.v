@@ -2938,7 +2938,7 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr) ast.Type {
 			c.error('function with `shared` arguments cannot be called inside `lock`/`rlock` block',
 				call_arg.pos)
 		}
-		if call_arg.is_mut && func.language == .v {
+		if call_arg.is_mut {
 			to_lock, pos := c.fail_if_immutable(call_arg.expr)
 			if !call_arg.expr.is_lvalue() {
 				c.error('cannot pass expression as `mut`', call_arg.expr.position())
@@ -4018,6 +4018,17 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 						}
 					}
 				}
+			}
+		}
+		// Do not allow `a := 0; b := 0; a = &b`
+		if !is_decl && left is ast.Ident && !is_blank_ident && !left_type.is_real_pointer()
+			&& right_type.is_real_pointer() {
+			left_sym := c.table.get_type_symbol(left_type)
+			if left_sym.kind != .function {
+				c.warn(
+					'cannot assign a reference to a value (this will be an error soon) left=${c.table.type_str(left_type)} $left_type.is_ptr() ' +
+					'right=${c.table.type_str(right_type)} $right_type.is_real_pointer() ptr=$right_type.is_ptr()',
+					node.pos)
 			}
 		}
 		node.left_types << left_type
@@ -5742,7 +5753,8 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 }
 
 fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
-	node.sym = c.table.get_type_symbol(c.unwrap_generic(c.expr(node.left)))
+	sym := c.table.get_type_symbol(c.unwrap_generic(c.expr(node.left)))
+	node.sym = *sym
 	if node.is_env {
 		env_value := util.resolve_env_value("\$env('$node.args_var')", false) or {
 			c.error(err.msg, node.env_pos)
@@ -5771,8 +5783,8 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 				i++
 				continue
 			}
-			if k in c.fn_scope.objects && c.fn_scope.objects[k] is ast.Var {
-				mut vsc := c.fn_scope.objects[k] as ast.Var
+			if k in c.fn_scope.objects && unsafe { c.fn_scope.objects[k] } is ast.Var {
+				mut vsc := unsafe { c.fn_scope.objects[k] } as ast.Var
 				vsc.is_used = true
 				c.fn_scope.objects[k] = vsc
 			}
@@ -7425,6 +7437,12 @@ pub fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 				err := c.expected_msg(index_type, info.key_type)
 				c.error('invalid key: $err', node.pos)
 			}
+			value_sym := c.table.get_type_symbol(info.value_type)
+			if !node.is_setter && value_sym.kind == .sum_type && node.or_expr.kind == .absent
+				&& !c.inside_unsafe {
+				c.warn('`or {}` block required when indexing a map with sum type value',
+					node.pos)
+			}
 		} else {
 			index_type := c.expr(node.index)
 			c.check_index(typ_sym, node.index, index_type, node.pos, false)
@@ -7770,7 +7788,7 @@ fn (mut c Checker) sql_expr(mut node ast.SqlExpr) ast.Type {
 	}
 	sym := c.table.get_type_symbol(node.table_expr.typ)
 	c.ensure_type_exists(node.table_expr.typ, node.pos) or { return ast.void_type }
-	c.cur_orm_ts = sym
+	c.cur_orm_ts = *sym
 	info := sym.info as ast.Struct
 	fields := c.fetch_and_verify_orm_fields(info, node.table_expr.pos, sym.name)
 	mut sub_structs := map[int]ast.SqlExpr{}
@@ -7868,7 +7886,7 @@ fn (mut c Checker) sql_stmt_line(mut node ast.SqlStmtLine) ast.Type {
 	}
 	c.ensure_type_exists(node.table_expr.typ, node.pos) or { return ast.void_type }
 	table_sym := c.table.get_type_symbol(node.table_expr.typ)
-	c.cur_orm_ts = table_sym
+	c.cur_orm_ts = *table_sym
 	if table_sym.info !is ast.Struct {
 		c.error('unknown type `$table_sym.name`', node.pos)
 		return ast.void_type
@@ -8071,7 +8089,7 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 		c.check_valid_snake_case(node.name, 'function name', node.pos)
 	}
 	if node.name == 'main.main' {
-		c.main_fn_decl_node = node
+		c.main_fn_decl_node = *node
 	}
 	if node.return_type != ast.void_type {
 		if ct_attr_idx := node.attrs.find_comptime_define() {

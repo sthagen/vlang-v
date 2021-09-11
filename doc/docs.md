@@ -963,7 +963,7 @@ println(nums[..4]) // [0, 10, 20, 30]
 println(nums[1..]) // [10, 20, 30, 40]
 ```
 
-In V slices are arrays themselves (they are no distinct types). As a result
+In V slices are arrays themselves (they are not distinct types). As a result
 all array operations may be performed on them. E.g. they can be pushed onto an
 array of the same type:
 
@@ -2247,6 +2247,8 @@ struct Node<T> {
 	right &Node<T>
 }
 ```
+
+To dereference a reference, use the `*` operator, just like in C.
 
 ## Constants
 
