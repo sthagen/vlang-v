@@ -416,8 +416,13 @@ pub fn (mut g Gen) init() {
 #endif'
 		g.cheaders.writeln(tcc_undef_has_include)
 		g.includes.writeln(tcc_undef_has_include)
-		g.cheaders.writeln(get_guarded_include_text('<inttypes.h>', 'The C compiler can not find <inttypes.h>. Please install build-essentials')) // int64_t etc
-		g.cheaders.writeln(get_guarded_include_text('<stddef.h>', 'The C compiler can not find <stddef.h>. Please install build-essentials')) // size_t, ptrdiff_t
+		if g.pref.os == .freebsd {
+			g.cheaders.writeln('#include <inttypes.h>')
+			g.cheaders.writeln('#include <stddef.h>')
+		} else {
+			g.cheaders.writeln(get_guarded_include_text('<inttypes.h>', 'The C compiler can not find <inttypes.h>. Please install build-essentials')) // int64_t etc
+			g.cheaders.writeln(get_guarded_include_text('<stddef.h>', 'The C compiler can not find <stddef.h>. Please install build-essentials')) // size_t, ptrdiff_t
+		}
 		g.cheaders.writeln(c_builtin_types)
 		if g.pref.is_bare {
 			g.cheaders.writeln(c_bare_headers)
@@ -2374,6 +2379,9 @@ fn (mut g Gen) gen_assign_stmt(assign_stmt ast.AssignStmt) {
 	if assign_stmt.is_static {
 		g.write('static ')
 	}
+	if assign_stmt.is_volatile {
+		g.write('volatile ')
+	}
 	mut return_type := ast.void_type
 	is_decl := assign_stmt.op == .decl_assign
 	g.assign_op = assign_stmt.op
@@ -3243,7 +3251,7 @@ fn (mut g Gen) autofree_variable(v ast.Var) {
 	}
 	if sym.has_method('free') {
 		g.autofree_var_call(c_name(sym.name) + '_free', v)
-	} else if v.typ.is_ptr() && sym.name.after('.')[0].is_capital() {
+	} else if g.pref.experimental && v.typ.is_ptr() && sym.name.after('.')[0].is_capital() {
 		// Free user reference types
 		g.autofree_var_call('free', v)
 	}
@@ -3616,7 +3624,7 @@ fn (mut g Gen) expr(node ast.Expr) {
 				g.error('unknown type `$sym.name`', node.pos)
 			}
 			styp := g.typ(node_typ)
-			g.write('/*SizeOf*/ sizeof(${util.no_dots(styp)})')
+			g.write('sizeof(${util.no_dots(styp)})')
 		}
 		ast.IsRefType {
 			typ := if node.typ == g.field_data_type { g.comp_for_field_value.typ } else { node.typ }
@@ -4798,6 +4806,7 @@ fn (mut g Gen) if_expr(node ast.IfExpr) {
 		}
 	}
 	g.writeln('}')
+	g.stmt_path_pos << g.out.len
 	if needs_tmp_var {
 		if g.infix_left_var_name.len > 0 {
 			g.indent--
