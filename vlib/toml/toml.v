@@ -67,9 +67,9 @@ pub fn parse_text(text string) ?Doc {
 	}
 }
 
-// parse parses the TOML document provided in `input`.
-// parse automatically try to determine if the type of `input` is a file or text.
-// For explicit parsing of input see `parse_file` or `parse_text`.
+// parse parses the TOML document provided in `toml`.
+// parse automatically try to determine if the type of `toml` is a file or text.
+// For explicit parsing of input types see `parse_file` or `parse_text`.
 pub fn parse(toml string) ?Doc {
 	mut input_config := input.Config{}
 	if !toml.contains('\n') && os.is_file(toml) {
@@ -95,20 +95,20 @@ pub fn parse(toml string) ?Doc {
 	}
 }
 
-// to_json returns a compact json string of the complete document
+// to_json returns a compact json string of the complete document.
 pub fn (d Doc) to_json() string {
 	return d.ast.to_json()
 }
 
 // value queries a value from the TOML document.
 pub fn (d Doc) value(key string) Any {
-	values := d.ast.table as map[string]ast.Node
+	values := d.ast.table as map[string]ast.Value
 	// any_values := d.ast_to_any(values) as map[string]Any
 	return d.get_map_value_as_any(values, key)
 }
 
-// ast_to_any_value converts `from` ast.Node to toml.Any value.
-fn (d Doc) ast_to_any(value ast.Node) Any {
+// ast_to_any_value converts `from` ast.Value to toml.Any value.
+fn (d Doc) ast_to_any(value ast.Value) Any {
 	// `match` isn't currently very suitable for further unwrapping sumtypes in the if's...
 	if value is ast.Date || value is ast.Time || value is ast.DateTime {
 		mut tim := time.Time{}
@@ -119,7 +119,7 @@ fn (d Doc) ast_to_any(value ast.Node) Any {
 				return Any(Null{})
 				// TODO decide this
 				// panic(@MOD + '.' + @STRUCT + '.' + @FN +
-				//	' failed converting "$date_str" to iso8601: $err')
+				//	' failed converting "$date_str" to rfc3339: $err')
 			}
 		} else if value is ast.Time {
 			time_str := (value as ast.Time).text
@@ -162,8 +162,8 @@ fn (d Doc) ast_to_any(value ast.Node) Any {
 			}
 			return Any(false)
 		}
-		map[string]ast.Node {
-			m := (value as map[string]ast.Node)
+		map[string]ast.Value {
+			m := (value as map[string]ast.Value)
 			mut am := map[string]Any{}
 			for k, v in m {
 				am[k] = d.ast_to_any(v)
@@ -171,8 +171,8 @@ fn (d Doc) ast_to_any(value ast.Node) Any {
 			return am
 			// return d.get_map_value(m, key_split[1..].join('.'))
 		}
-		[]ast.Node {
-			a := (value as []ast.Node)
+		[]ast.Value {
+			a := (value as []ast.Value)
 			mut aa := []Any{}
 			for val in a {
 				aa << d.ast_to_any(val)
@@ -191,7 +191,7 @@ fn (d Doc) ast_to_any(value ast.Node) Any {
 }
 
 // get_map_value_as_any returns the value found at `key` in the map `values` as `Any` type.
-fn (d Doc) get_map_value_as_any(values map[string]ast.Node, key string) Any {
+fn (d Doc) get_map_value_as_any(values map[string]ast.Value, key string) Any {
 	key_split := key.split('.')
 	util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, ' getting "${key_split[0]}"')
 	if key_split[0] in values.keys() {
@@ -201,8 +201,8 @@ fn (d Doc) get_map_value_as_any(values map[string]ast.Node, key string) Any {
 			// panic(@MOD + '.' + @STRUCT + '.' + @FN + ' key "$key" does not exist')
 		}
 		// `match` isn't currently very suitable for these types of sum type constructs...
-		if value is map[string]ast.Node {
-			m := (value as map[string]ast.Node)
+		if value is map[string]ast.Value {
+			m := (value as map[string]ast.Value)
 			next_key := key_split[1..].join('.')
 			if next_key == '' {
 				return d.ast_to_any(value)

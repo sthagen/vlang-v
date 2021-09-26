@@ -13,11 +13,19 @@ pub fn (k Key) str() string {
 	return k.text
 }
 
-// Node is a sumtype representing all possible value types
+// Value is a sumtype representing all possible value types
 // found in a TOML document.
-pub type Node = Bool | Date | DateTime | Null | Number | Quoted | Time | []Node | map[string]Node
+pub type Value = Bool
+	| Date
+	| DateTime
+	| Null
+	| Number
+	| Quoted
+	| Time
+	| []Value
+	| map[string]Value
 
-pub fn (v Node) to_json() string {
+pub fn (v Value) to_json() string {
 	match v {
 		Quoted, Date, DateTime, Time {
 			return '"$v.text"'
@@ -25,7 +33,7 @@ pub fn (v Node) to_json() string {
 		Bool, Null, Number {
 			return v.text
 		}
-		map[string]Node {
+		map[string]Value {
 			mut str := '{'
 			for key, val in v {
 				str += ' "$key": $val.to_json(),'
@@ -34,7 +42,7 @@ pub fn (v Node) to_json() string {
 			str += ' }'
 			return str
 		}
-		[]Node {
+		[]Value {
 			mut str := '['
 			for val in v {
 				str += ' $val.to_json(),'
@@ -50,14 +58,15 @@ pub fn (v Node) to_json() string {
 // found in a TOML document.
 pub type DateTimeType = Date | DateTime | Time
 
+// str returns the `string` representation of the `DateTimeType` type.
 pub fn (dtt DateTimeType) str() string {
 	return dtt.text
 }
 
 // value queries a value from the map.
-// `key` should be in "dotted" form e.g.: `"a.b.c.d"`
-pub fn (v map[string]Node) value(key string) &Node {
-	null := &Node(Null{})
+// `key` should be in "dotted" form (`a.b.c`).
+pub fn (v map[string]Value) value(key string) &Value {
+	null := &Value(Null{})
 	key_split := key.split('.')
 	// util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, ' retreiving value at "$key"')
 	if key_split[0] in v.keys() {
@@ -66,8 +75,8 @@ pub fn (v map[string]Node) value(key string) &Node {
 			// TODO return error(@MOD + '.' + @STRUCT + '.' + @FN + ' key "$key" does not exist')
 		}
 		// `match` isn't currently very suitable for these types of sum type constructs...
-		if value is map[string]Node {
-			m := (value as map[string]Node)
+		if value is map[string]Value {
+			m := (value as map[string]Value)
 			next_key := key_split[1..].join('.')
 			if next_key == '' {
 				return &value
@@ -80,14 +89,14 @@ pub fn (v map[string]Node) value(key string) &Node {
 	// TODO return error(@MOD + '.' + @STRUCT + '.' + @FN + ' key "$key" does not exist')
 }
 
-// value queries a value from the map.
-pub fn (v map[string]Node) exists(key string) bool {
+// exists returns true if the "dotted" `key` path exists in the map.
+pub fn (v map[string]Value) exists(key string) bool {
 	key_split := key.split('.')
 	if key_split[0] in v.keys() {
 		value := v[key_split[0]] or { return false }
 		// `match` isn't currently very suitable for these types of sum type constructs...
-		if value is map[string]Node {
-			m := (value as map[string]Node)
+		if value is map[string]Value {
+			m := (value as map[string]Value)
 			next_key := key_split[1..].join('.')
 			if next_key == '' {
 				return true
@@ -99,12 +108,14 @@ pub fn (v map[string]Node) exists(key string) bool {
 	return false
 }
 
+// Comment is the data representation of a TOML comment (`# This is a comment`).
 pub struct Comment {
 pub:
 	text string
 	pos  token.Position
 }
 
+// str returns the `string` representation of the `Comment` type.
 pub fn (c Comment) str() string {
 	mut s := typeof(c).name + '{\n'
 	s += '  text:  \'$c.text\'\n'
@@ -120,16 +131,20 @@ pub:
 	pos  token.Position
 }
 
+// str returns the `string` representation of the `Null` type
 pub fn (n Null) str() string {
 	return n.text
 }
 
+// Quoted is the data representation of a TOML quoted type (`"quoted-key" = "I'm a quoted value"`).
+// Quoted types can appear both as keys and values in TOML documents.
 pub struct Quoted {
 pub:
 	text string
 	pos  token.Position
 }
 
+// str returns the `string` representation of the `Quoted` type.
 pub fn (q Quoted) str() string {
 	mut str := typeof(q).name + '{\n'
 	str += '  text:  \'$q.text\'\n'
@@ -138,12 +153,16 @@ pub fn (q Quoted) str() string {
 	return str
 }
 
+// Bare is the data representation of a TOML bare type (`bare_key = ...`).
+// Bare types can appear only as keys in TOML documents. Otherwise they take the
+// form of Bool or Numbers.
 pub struct Bare {
 pub:
 	text string
 	pos  token.Position
 }
 
+// str returns the `string` representation of the `Bare` type.
 pub fn (b Bare) str() string {
 	mut str := typeof(b).name + '{\n'
 	str += '  text:  \'$b.text\'\n'
@@ -152,12 +171,16 @@ pub fn (b Bare) str() string {
 	return str
 }
 
+// Bool is the data representation of a TOML boolean type (`... = true`).
+// Bool types can appear only as values in TOML documents. Keys named `true` or `false`
+// are considered as Bare types.
 pub struct Bool {
 pub:
 	text string
 	pos  token.Position
 }
 
+// str returns the `string` representation of the `Bool` type.
 pub fn (b Bool) str() string {
 	mut str := typeof(b).name + '{\n'
 	str += '  text:  \'$b.text\'\n'
@@ -166,12 +189,16 @@ pub fn (b Bool) str() string {
 	return str
 }
 
+// Number is the data representation of a TOML number type (`25 = 5e2`).
+// Number types can appear both as keys and values in TOML documents.
+// Number can be integers, floats, infinite, NaN - they can have exponents (`5e2`) and be sign prefixed (`+2`).
 pub struct Number {
 pub:
 	text string
 	pos  token.Position
 }
 
+// str returns the `string` representation of the `Number` type.
 pub fn (n Number) str() string {
 	mut str := typeof(n).name + '{\n'
 	str += '  text:  \'$n.text\'\n'
@@ -180,12 +207,16 @@ pub fn (n Number) str() string {
 	return str
 }
 
+// Date is the data representation of a TOML date type (`YYYY-MM-DD`).
+// Date types can appear both as keys and values in TOML documents.
+// Keys named like dates e.g. `1980-12-29` are considered Bare key types.
 pub struct Date {
 pub:
 	text string
 	pos  token.Position
 }
 
+// str returns the `string` representation of the `Date` type.
 pub fn (d Date) str() string {
 	mut str := typeof(d).name + '{\n'
 	str += '  text:  \'$d.text\'\n'
@@ -194,6 +225,8 @@ pub fn (d Date) str() string {
 	return str
 }
 
+// Time is the data representation of a TOML time type (`HH:MM:SS.milli`).
+// Time types can appear only as values in TOML documents.
 pub struct Time {
 pub:
 	text   string
@@ -201,6 +234,7 @@ pub:
 	pos    token.Position
 }
 
+// str returns the `string` representation of the `Time` type.
 pub fn (t Time) str() string {
 	mut str := typeof(t).name + '{\n'
 	str += '  text:  \'$t.text\'\n'
@@ -210,6 +244,8 @@ pub fn (t Time) str() string {
 	return str
 }
 
+// DateTime is the data representation of a TOML date-time type (`YYYY-MM-DDTHH:MM:SS.milli`).
+// DateTime types can appear only as values in TOML documents.
 pub struct DateTime {
 pub:
 	text string
@@ -218,6 +254,7 @@ pub:
 	time Time
 }
 
+// str returns the `string` representation of the `DateTime` type.
 pub fn (dt DateTime) str() string {
 	mut str := typeof(dt).name + '{\n'
 	str += '  text:  \'$dt.text\'\n'
@@ -228,11 +265,13 @@ pub fn (dt DateTime) str() string {
 	return str
 }
 
+// EOF is the data representation of the end of the TOML document.
 pub struct EOF {
 pub:
 	pos token.Position
 }
 
+// str returns the `string` representation of the `EOF` type.
 pub fn (e EOF) str() string {
 	mut str := typeof(e).name + '{\n'
 	str += '  pos:  $e.pos\n'
