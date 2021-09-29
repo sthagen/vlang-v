@@ -188,24 +188,6 @@ jobs:
       - name: Build v
         run: make
 
-      - name: v.c can be compiled and run with -os cross
-        run: |
-          ./v -os cross -o /tmp/v.c cmd/v
-          gcc  -g -std=gnu11 -w -o v_from_vc /tmp/v.c  -lm -lpthread
-          ls -lart v_from_vc
-          ./v_from_vc version
-
-      - name: Ensure v up works
-        run: |
-          ./v cmd/tools/oldv.v
-          ./cmd/tools/oldv -v HEAD^^^^^
-          cd ~/.cache/oldv/v_at_HEAD_____/
-          ./v version
-          ./v -v up
-          ./v version
-          ./v  -o v2 cmd/v
-          ./v2 -o v3 cmd/v
-
       - name: Ensure V can be compiled with -autofree
         run: ./v -autofree -o v2 cmd/v  ## NB: this does not mean it runs, but at least keeps it from regressing
 
@@ -235,7 +217,7 @@ jobs:
       - name: g++ version
         run: g++-9 --version
       - name: V self compilation with g++
-        run: ./v -cc g++-9 -o v2 cmd/v && ./v2 -cc g++-9 -o v3 cmd/v
+        run: ./v -cc g++-9 -no-std -cflags -std=c++11 -o v2 cmd/v && ./v2 -cc g++-9 -no-std -cflags -std=c++11 -o v3 cmd/v
   ##    - name: Running tests with g++
   ##      run: ./v -cc g++-9 -silent test-self
 
@@ -257,18 +239,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v2
 
-      - name: Build V
-        run: |
-          make CC=clang
-      - name: Show PWD and Environment
+      - name: Show Environment
         run: |
           echo "PWD:"
           pwd
-          echo "ENVIRONMENT"
+          echo "ENVIRONMENT:"
           env
+          echo "C Compiler:"
+          gcc --version
+
+      - name: Build V
+        run: CC=gcc make
+
       - name: Test V fixed tests
-        run: |
-          ./v -silent test-self
+        run: ./v -silent test-self
 
   macos:
     needs: no-scheduling
@@ -319,13 +303,6 @@ jobs:
         run: |
           ./v cmd/tools/test_if_v_test_system_works.v
           ./cmd/tools/test_if_v_test_system_works
-
-      - name: v.c can be compiled and run with -os cross
-        run: |
-          ./v -os cross -o /tmp/v.c cmd/v
-          cc -g -std=gnu11 -w -o v_from_vc /tmp/v.c  -lm -lpthread
-          ls -lart v_from_vc
-          ./v_from_vc version
 
       - name: Self tests
         run: VJOBS=1 ./v -silent test-self
@@ -627,7 +604,7 @@ jobs:
           gcc --version
           .\make.bat -gcc
       - name: Test new v.c
-        run: .\v.exe -o v.c cmd/v && gcc -Werror -municode -w v.c
+        run: .\v.exe -o v.c cmd/v && gcc -Werror -I ./thirdparty/stdatomic/win -municode -w v.c
       - name: Install dependencies
         run: |
           .\v.exe setup-freetype
@@ -669,7 +646,7 @@ jobs:
         run: |
           echo %VFLAGS%
           echo $VFLAGS
-          .\make.bat -msvc --verbose
+          .\make.bat -msvc
           .\v.exe -cflags /WX self
       - name: Install dependencies
         run: |
@@ -713,9 +690,9 @@ jobs:
           node-version: 12.x
       - name: Build with make.bat -tcc
         run: |
-          .\make.bat -tcc --verbose
+          .\make.bat -tcc
       - name: Test new v.c
-        run: .\v.exe -o v.c cmd/v && .\thirdparty\tcc\tcc.exe -Werror -w -ladvapi32 -bt10 v.c
+        run: .\v.exe -o v.c cmd/v && .\thirdparty\tcc\tcc.exe -I ./thirdparty/stdatomic/win -Werror -w -ladvapi32 -bt10 v.c
       - name: Install dependencies
         run: |
           .\v.exe setup-freetype
@@ -762,9 +739,9 @@ jobs:
         run: |
           Remove-Item -Recurse -Force .\thirdparty\tcc
           .\v.exe wipe-cache
-          .\make.bat -tcc32 --verbose
+          .\make.bat -tcc32
       - name: Test new v.c
-        run: .\v.exe -o v.c cmd/v && .\thirdparty\tcc\tcc.exe -Werror -w -ladvapi32 -bt10 v.c
+        run: .\v.exe -o v.c cmd/v && .\thirdparty\tcc\tcc.exe -I ./thirdparty/stdatomic/win -Werror -w -ladvapi32 -bt10 v.c
       - name: v doctor
         run: ./v doctor
 

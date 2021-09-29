@@ -136,6 +136,12 @@ pub fn (mut p Preferences) fill_with_defaults() {
 	if p.bare_builtin_dir == '' {
 		p.bare_builtin_dir = os.join_path(p.vroot, 'vlib', 'builtin', 'linux_bare')
 	}
+	$if prealloc {
+		if !p.no_parallel {
+			eprintln('disabling parallel cgen, since V was built with -prealloc')
+		}
+		p.no_parallel = true
+	}
 }
 
 pub const cc_to_windows = 'x86_64-w64-mingw32-gcc'
