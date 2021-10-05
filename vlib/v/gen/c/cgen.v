@@ -877,7 +877,10 @@ fn (mut g Gen) write_shareds() {
 		done_types << typ
 		sh_typ := '__shared__$base'
 		mtx_typ := 'sync__RwMutex'
-		g.shared_types.writeln('struct $sh_typ { $mtx_typ mtx; $base val; };')
+		g.shared_types.writeln('struct $sh_typ {')
+		g.shared_types.writeln('\t$mtx_typ mtx;')
+		g.shared_types.writeln('\t$base val;')
+		g.shared_types.writeln('};')
 		g.shared_functions.writeln('static inline voidptr __dup${sh_typ}(voidptr src, int sz) {')
 		g.shared_functions.writeln('\t$sh_typ* dest = memdup(src, sz);')
 		g.shared_functions.writeln('\tsync__RwMutex_init(&dest->mtx);')
@@ -2237,7 +2240,12 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 				got_styp)
 			g.inside_cast_in_heap--
 		} else {
-			got_styp := g.cc_type(got_type, true)
+			mut got_styp := g.cc_type(got_type, true)
+			got_styp = match got_styp {
+				'int' { 'int_literal' }
+				'f64' { 'float_literal' }
+				else { got_styp }
+			}
 			exp_styp := exp_sym.cname
 			mut fname := '/*$exp_sym*/I_${got_styp}_to_Interface_$exp_styp'
 			if exp_sym.info.is_generic {
