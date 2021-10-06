@@ -111,6 +111,12 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 		return
 	}
 
+	old_is_vlines_enabled := g.is_vlines_enabled
+	g.is_vlines_enabled = true
+	defer {
+		g.is_vlines_enabled = old_is_vlines_enabled
+	}
+
 	tmp_defer_vars := g.defer_vars // must be here because of workflow
 	if !g.anon_fn {
 		g.defer_vars = []string{}
@@ -1477,7 +1483,7 @@ fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type ast.Type, lang as
 }
 
 fn (mut g Gen) is_gui_app() bool {
-	$if windows {
+	if g.pref.os == .windows {
 		if g.force_main_console {
 			return false
 		}

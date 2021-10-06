@@ -301,7 +301,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 					done_optionals: global_g.done_optionals
 					is_autofree: global_g.pref.autofree
 				}
-				g.gen()
+				g.gen_file()
 				return g
 			}
 		)
@@ -310,6 +310,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		global_g.timers.start('cgen unification')
 		// tg = thread gen
 		for g in pp.get_results<Gen>() {
+			global_g.embedded_files << g.embedded_files
 			global_g.out.write(g.out) or { panic(err) }
 			global_g.cheaders.write(g.cheaders) or { panic(err) }
 			global_g.includes.write(g.includes) or { panic(err) }
@@ -326,6 +327,9 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 			global_g.embedded_data.write(g.embedded_data) or { panic(err) }
 			global_g.shared_types.write(g.shared_types) or { panic(err) }
 			global_g.shared_functions.write(g.channel_definitions) or { panic(err) }
+
+			global_g.force_main_console = global_g.force_main_console || g.force_main_console
+
 			// merge maps
 			for k, v in g.shareds {
 				global_g.shareds[k] = v
@@ -380,7 +384,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	} else {
 		for file in files {
 			global_g.file = file
-			global_g.gen()
+			global_g.gen_file()
 			global_g.inits[file.mod.name].write(global_g.init) or { panic(err) }
 			global_g.init = strings.new_builder(100)
 			global_g.cleanups[file.mod.name].write(global_g.cleanup) or { panic(err) }
@@ -521,12 +525,15 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	return b.str()
 }
 
-pub fn (mut g Gen) gen() {
+pub fn (mut g Gen) gen_file() {
 	g.timers.start('cgen_file $g.file.path')
 
 	if g.pref.is_vlines {
 		g.vlines_path = util.vlines_escape_path(g.file.path, g.pref.ccompiler)
+		g.is_vlines_enabled = true
+		g.inside_ternary = 0
 	}
+
 	g.stmts(g.file.stmts)
 	// Transfer embedded files
 	for path in g.file.embedded_files {
@@ -2487,6 +2494,9 @@ fn (mut g Gen) asm_arg(arg ast.AsmArg, stmt ast.AsmStmt) {
 			g.write('%$arg.name')
 		}
 		ast.AsmAddressing {
+			if arg.segment != '' {
+				g.write('%%$arg.segment:')
+			}
 			base := arg.base
 			index := arg.index
 			displacement := arg.displacement
@@ -2499,7 +2509,6 @@ fn (mut g Gen) asm_arg(arg ast.AsmArg, stmt ast.AsmStmt) {
 				}
 				.displacement {
 					g.asm_arg(displacement, stmt)
-					g.write('()')
 				}
 				.base_plus_displacement {
 					g.asm_arg(displacement, stmt)
