@@ -377,7 +377,7 @@ pub fn run<T>(global_app &T, port int) {
 			// println('vweb no db')
 		}
 		$for field in T.fields {
-			if field.is_shared {
+			if 'vweb_global' in field.attrs || field.is_shared {
 				request_app.$(field.name) = global_app.$(field.name)
 			}
 		}
@@ -473,7 +473,16 @@ fn handle_conn<T>(mut conn net.TcpConn, mut app T, routes map[string]Route) {
 				// should be called first.
 				if !route.path.contains('/:') && url_words == route_words {
 					// We found a match
-					app.$method()
+					if req.method == .post && method.args.len > 0 {
+						// Populate method args with form values
+						mut args := []string{cap: method.args.len}
+						for param in method.args {
+							args << form[param.name]
+						}
+						app.$method(args)
+					} else {
+						app.$method()
+					}
 					return
 				}
 

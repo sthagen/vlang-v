@@ -508,11 +508,14 @@ fn (mut g Gen) nsyscall_write() int {
 		.linux {
 			return 1
 		}
+		.windows {
+			return 0
+		}
 		.macos {
 			return 0x2000004
 		}
 		else {
-			g.n_error('unsupported exit syscall for this platform')
+			g.n_error('unsupported write syscall for this platform')
 		}
 	}
 	return 0
@@ -525,6 +528,9 @@ fn (mut g Gen) nsyscall_exit() int {
 		}
 		.macos {
 			return 0x2000001
+		}
+		.windows {
+			return 0
 		}
 		else {
 			g.n_error('unsupported exit syscall for this platform')
@@ -1369,8 +1375,8 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 	g.push(.rbp)
 	g.mov_rbp_rsp()
 	locals_count := node.scope.objects.len + node.params.len
-	stackframe_size := (locals_count * 8) + 0x10
-	g.sub8(.rsp, stackframe_size)
+	g.stackframe_size = (locals_count * 8) + 0x10
+	g.sub8(.rsp, g.stackframe_size)
 
 	if node.params.len > 0 {
 		// g.mov(.r12, 0x77777777)
@@ -1395,7 +1401,7 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 		return
 	}
 	// g.leave()
-	g.add8(.rsp, stackframe_size)
+	g.add8(.rsp, g.stackframe_size)
 	g.pop(.rbp)
 	g.ret()
 }
