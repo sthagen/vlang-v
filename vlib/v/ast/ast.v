@@ -866,12 +866,12 @@ pub mut:
 pub struct MatchBranch {
 pub:
 	ecmnts        [][]Comment // inline comments for each left side expr
-	stmts         []Stmt      // right side
 	pos           token.Position
 	is_else       bool
 	post_comments []Comment      // comments below ´... }´
 	branch_pos    token.Position // for checker errors about invalid branches
 pub mut:
+	stmts []Stmt // right side
 	exprs []Expr // left side
 	scope &Scope
 }
@@ -1136,6 +1136,7 @@ pub:
 	has_len       bool
 	has_cap       bool
 	has_default   bool
+	has_it        bool // true if temp variable it is used
 pub mut:
 	expr_types []Type // [Dog, Cat] // also used for interface_types
 	elem_type  Type   // element type

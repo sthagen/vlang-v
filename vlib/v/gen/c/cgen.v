@@ -104,6 +104,7 @@ mut:
 	inside_map_index       bool
 	inside_opt_data        bool
 	inside_if_optional     bool
+	loop_depth             int
 	ternary_names          map[string]string
 	ternary_level_names    map[string][]string
 	stmt_path_pos          []int // positions of each statement start, for inserting C statements before the current statement
@@ -1780,6 +1781,7 @@ fn (mut g Gen) write_defer_stmts() {
 }
 
 fn (mut g Gen) for_c_stmt(node ast.ForCStmt) {
+	g.loop_depth++
 	if node.is_multi {
 		g.is_vlines_enabled = false
 		if node.label.len > 0 {
@@ -1853,9 +1855,11 @@ fn (mut g Gen) for_c_stmt(node ast.ForCStmt) {
 			g.writeln('${node.label}__break: {}')
 		}
 	}
+	g.loop_depth--
 }
 
 fn (mut g Gen) for_stmt(node ast.ForStmt) {
+	g.loop_depth++
 	g.is_vlines_enabled = false
 	if node.label.len > 0 {
 		g.writeln('$node.label:')
@@ -1878,9 +1882,11 @@ fn (mut g Gen) for_stmt(node ast.ForStmt) {
 	if node.label.len > 0 {
 		g.writeln('${node.label}__break: {}')
 	}
+	g.loop_depth--
 }
 
 fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
+	g.loop_depth++
 	if node.label.len > 0 {
 		g.writeln('\t$node.label: {}')
 	}
@@ -2120,6 +2126,7 @@ fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
 	if node.label.len > 0 {
 		g.writeln('\t${node.label}__break: {}')
 	}
+	g.loop_depth--
 }
 
 struct SumtypeCastingFn {
@@ -3269,9 +3276,22 @@ fn (mut g Gen) gen_cross_tmp_variable(left []ast.Expr, val ast.Expr) {
 			}
 		}
 		ast.InfixExpr {
-			g.gen_cross_tmp_variable(left, val.left)
-			g.write(val.op.str())
-			g.gen_cross_tmp_variable(left, val.right)
+			sym := g.table.get_type_symbol(val.left_type)
+			if _ := g.table.type_find_method(sym, val.op.str()) {
+				left_styp := g.typ(val.left_type.set_nr_muls(0))
+				g.write(left_styp)
+				g.write('_')
+				g.write(util.replace_op(val.op.str()))
+				g.write('(')
+				g.gen_cross_tmp_variable(left, val.left)
+				g.write(', ')
+				g.gen_cross_tmp_variable(left, val.right)
+				g.write(')')
+			} else {
+				g.gen_cross_tmp_variable(left, val.left)
+				g.write(val.op.str())
+				g.gen_cross_tmp_variable(left, val.right)
+			}
 		}
 		ast.PrefixExpr {
 			g.write(val.op.str())
@@ -4242,9 +4262,13 @@ fn (mut g Gen) unlock_locks() {
 
 fn (mut g Gen) need_tmp_var_in_match(node ast.MatchExpr) bool {
 	if node.is_expr && node.return_type != ast.void_type && node.return_type != 0 {
+		cond_sym := g.table.get_final_type_symbol(node.cond_type)
 		sym := g.table.get_type_symbol(node.return_type)
 		if sym.kind == .multi_return {
 			return false
+		}
+		if cond_sym.kind == .enum_ && node.branches.len > 5 {
+			return true
 		}
 		for branch in node.branches {
 			if branch.stmts.len > 1 {
@@ -4263,6 +4287,27 @@ fn (mut g Gen) need_tmp_var_in_match(node ast.MatchExpr) bool {
 		}
 	}
 	return false
+}
+
+fn (mut g Gen) branches_all_resolvable_in_runtime(node ast.MatchExpr, typ ast.TypeSymbol) bool {
+	for branch in node.branches {
+		for expr in branch.exprs {
+			if expr is ast.EnumVal {
+				continue
+			} else if expr is ast.RangeExpr {
+				return false
+				// we must implement constant folding on enum fields and make it accessible
+				// anywhere to prove that range expr's actual branches are resolvale
+
+				// if expr.high !is ast.IntegerLiteral || expr.low !is ast.IntegerLiteral {
+				// 	return false
+				// }
+				// continue
+			}
+			return true
+		}
+	}
+	return true
 }
 
 fn (mut g Gen) match_expr(node ast.MatchExpr) {
@@ -4308,8 +4353,13 @@ fn (mut g Gen) match_expr(node ast.MatchExpr) {
 		// brackets needed otherwise '?' will apply to everything on the left
 		g.write('(')
 	}
+	typ := g.table.get_final_type_symbol(node.cond_type)
+	all_resolvable := g.branches_all_resolvable_in_runtime(node, typ)
 	if node.is_sum_type {
 		g.match_expr_sumtype(node, is_expr, cond_var, tmp_var)
+	} else if typ.kind == .enum_ && g.loop_depth == 0 && node.branches.len > 5 && g.fn_decl != 0
+		&& all_resolvable { // do not optimize while in top-level
+		g.match_expr_switch(node, is_expr, cond_var, tmp_var, typ)
 	} else {
 		g.match_expr_classic(node, is_expr, cond_var, tmp_var)
 	}
@@ -4396,6 +4446,46 @@ fn (mut g Gen) match_expr_sumtype(node ast.MatchExpr, is_expr bool, cond_var str
 		// reset global field for next use
 		g.aggregate_type_idx = 0
 	}
+}
+
+fn (mut g Gen) match_expr_switch(node ast.MatchExpr, is_expr bool, cond_var string, tmp_var string, enum_typ ast.TypeSymbol) {
+	cname := '${enum_typ.cname}__'
+	mut covered_enum := []string{cap: (enum_typ.info as ast.Enum).vals.len}
+	g.empty_line = true
+	g.writeln('switch ($cond_var) {')
+	g.indent++
+	for branch in node.branches {
+		if branch.is_else {
+			for val in (enum_typ.info as ast.Enum).vals {
+				if val !in covered_enum {
+					g.writeln('case $cname$val:')
+				}
+			}
+			g.writeln('default:')
+		} else {
+			for expr in branch.exprs {
+				if expr is ast.EnumVal {
+					covered_enum << (expr as ast.EnumVal).val
+					g.write('case ')
+					g.expr(expr)
+					g.writeln(': ')
+				} else if expr is ast.RangeExpr {
+					// low, high := (expr.low as ast.IntegerLiteral).val.int(), (expr.high as ast.IntegerLiteral).val.int()
+					// for val in (enum_typ.info as ast.Enum).vals[low..high + 1] {
+					// 	covered_enum << val
+					// 	g.writeln('case $cname$val:')
+					// }
+				}
+			}
+		}
+		g.indent++
+		g.writeln('{')
+		g.stmts_with_tmp_var(branch.stmts, tmp_var)
+		g.writeln('} break;')
+		g.indent--
+	}
+	g.indent--
+	g.writeln('}')
 }
 
 fn (mut g Gen) match_expr_classic(node ast.MatchExpr, is_expr bool, cond_var string, tmp_var string) {
@@ -5051,9 +5141,24 @@ fn (mut g Gen) if_expr(node ast.IfExpr) {
 					}
 				}
 				else {
-					g.write('if (')
+					mut no_needs_par := false
+					if branch.cond is ast.InfixExpr {
+						if branch.cond.op == .key_in && branch.cond.left !is ast.InfixExpr
+							&& branch.cond.right is ast.ArrayInit {
+							no_needs_par = true
+						}
+					}
+					if no_needs_par {
+						g.write('if ')
+					} else {
+						g.write('if (')
+					}
 					g.expr(branch.cond)
-					g.writeln(') {')
+					if no_needs_par {
+						g.writeln(' {')
+					} else {
+						g.writeln(') {')
+					}
 				}
 			}
 		}
@@ -5606,7 +5711,7 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 		g.go_back_out(3)
 		return
 	}
-	sym := g.table.get_final_type_symbol(g.unwrap_generic(struct_init.typ))
+	mut sym := g.table.get_final_type_symbol(g.unwrap_generic(struct_init.typ))
 	is_amp := g.is_amp
 	is_multiline := struct_init.fields.len > 5
 	g.is_amp = false // reset the flag immediately so that other struct inits in this expr are handled correctly
@@ -5693,7 +5798,7 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 	// `inited_fields` is a list of fields that have been init'ed, they are skipped
 	mut nr_fields := 1
 	if sym.kind == .struct_ {
-		info := sym.info as ast.Struct
+		mut info := sym.info as ast.Struct
 		nr_fields = info.fields.len
 		if info.is_union && struct_init.fields.len > 1 {
 			verror('union must not have more than 1 initializer')

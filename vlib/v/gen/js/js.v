@@ -84,6 +84,8 @@ mut:
 	defer_ifdef            string
 	out                    strings.Builder = strings.new_builder(128)
 	array_sort_fn          map[string]bool
+	wasm_export            map[string][]string
+	wasm_import            map[string][]string
 }
 
 fn (mut g JsGen) write_tests_definitions() {
@@ -211,14 +213,38 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 			}
 		}
 	}
-	g.write('js_main();')
+	if !g.pref.is_shared {
+		g.write('loadRoutine().then(_ => js_main());')
+	}
 	g.escape_namespace()
 	// resolve imports
-	deps_resolved := graph.resolve()
-	nodes := deps_resolved.nodes
+	// deps_resolved := graph.resolve()
+	// nodes := deps_resolved.nodes
 
 	mut out := g.definitions.str() + g.hashes()
-
+	out += '\nlet wasmExportObject;\n'
+	out += 'const loadRoutine = async () => {\n'
+	for mod, functions in g.wasm_import {
+		if g.pref.backend == .js_browser {
+			out += '\nawait fetch("$mod").then(respone => respone.arrayBuffer()).then(bytes => '
+			out += 'WebAssembly.instantiate(bytes,'
+			exports := g.wasm_export[mod]
+			out += '{ imports: { \n'
+			for i, exp in exports {
+				out += g.js_name(exp) + ':' + '\$wasm' + g.js_name(exp)
+				if i != exports.len - 1 {
+					out += ',\n'
+				}
+			}
+			out += '}})).then(obj => wasmExportObject = obj.instance.exports);\n'
+			for fun in functions {
+				out += 'globalThis.${g.js_name(fun)} = wasmExportObject.${g.js_name(fun)};\n'
+			}
+		} else {
+			verror('WebAssembly export is supported only for browser backend at the moment')
+		}
+	}
+	out += '}\n'
 	// equality check for js objects
 	// TODO: Fix msvc bug that's preventing $embed_file('fast_deep_equal.js')
 	// unsafe {
@@ -226,12 +252,12 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	//	out += eq_fn.data().vstring()
 	//}
 	out += fast_deep_eq_fn
-
+	/*
 	if pref.is_shared {
 		// Export, through CommonJS, the module of the entry file if `-shared` was passed
 		export := nodes[nodes.len - 1].name
 		out += 'if (typeof module === "object" && module.exports) module.exports = $export;\n'
-	}
+	}*/
 	out += '\n'
 
 	out += g.out.str()
@@ -1812,13 +1838,11 @@ fn (mut g JsGen) gen_array_init_expr(it ast.ArrayInit) {
 
 	if it.has_len {
 		t1 := g.new_tmp_var()
-		t2 := g.new_tmp_var()
 		g.writeln('(function(length) {')
 		g.inc_indent()
 		g.writeln('const $t1 = [];')
-		g.write('for (let $t2 = 0; $t2 < length')
-
-		g.writeln('; $t2++) {')
+		g.write('for (let it = 0; it < length')
+		g.writeln('; it++) {')
 		g.inc_indent()
 		g.write('${t1}.push(')
 		if it.has_default {
@@ -1932,9 +1956,13 @@ fn (mut g JsGen) gen_lock_expr(node ast.LockExpr) {
 
 fn (mut g JsGen) need_tmp_var_in_match(node ast.MatchExpr) bool {
 	if node.is_expr && node.return_type != ast.void_type && node.return_type != 0 {
+		cond_sym := g.table.get_final_type_symbol(node.cond_type)
 		sym := g.table.get_type_symbol(node.return_type)
 		if sym.kind == .multi_return {
 			return false
+		}
+		if cond_sym.kind == .enum_ && node.branches.len > 5 {
+			return true
 		}
 		for branch in node.branches {
 			if branch.stmts.len > 1 {
@@ -2141,6 +2169,7 @@ fn (mut g JsGen) match_expr(node ast.MatchExpr) {
 	is_expr := (node.is_expr && node.return_type != ast.void_type) || g.inside_ternary
 	mut cond_var := MatchCond(CondString{''})
 	mut tmp_var := ''
+	mut cur_line := ''
 	if is_expr && !need_tmp_var {
 		g.inside_ternary = true
 	}
@@ -2156,17 +2185,23 @@ fn (mut g JsGen) match_expr(node ast.MatchExpr) {
 		g.writeln(';')
 	}
 	if need_tmp_var {
+		g.empty_line = true
+		cur_line = g.out.cut_to(g.stmt_start_pos).trim_left(' \t')
 		tmp_var = g.new_tmp_var()
 		g.writeln('let $tmp_var = undefined;')
 	}
 	if is_expr && !need_tmp_var {
 		g.write('(')
 	}
+	typ := g.table.get_final_type_symbol(node.cond_type)
 	if node.is_sum_type {
 		g.match_expr_sumtype(node, is_expr, cond_var, tmp_var)
+	} else if typ.kind == .enum_ && !g.inside_loop && node.branches.len > 5 && g.fn_decl != 0 { // do not optimize while in top-level
+		g.match_expr_switch(node, is_expr, cond_var, tmp_var)
 	} else {
 		g.match_expr_classic(node, is_expr, cond_var, tmp_var)
 	}
+	g.write(cur_line)
 	if need_tmp_var {
 		g.write('$tmp_var')
 	}
@@ -2276,6 +2311,32 @@ fn (mut g JsGen) match_expr_sumtype(node ast.MatchExpr, is_expr bool, cond_var M
 			}
 		}
 	}
+}
+
+fn (mut g JsGen) match_expr_switch(node ast.MatchExpr, is_expr bool, cond_var MatchCond, tmp_var string) {
+	g.empty_line = true
+	g.write('switch (')
+	g.match_cond(cond_var)
+	g.writeln(') {')
+	g.inc_indent()
+	for branch in node.branches {
+		if branch.is_else {
+			g.writeln('default:')
+		} else {
+			for expr in branch.exprs {
+				g.write('case ')
+				g.expr(expr)
+				g.writeln(': ')
+			}
+		}
+		g.inc_indent()
+		g.writeln('{')
+		g.stmts_with_tmp_var(branch.stmts, tmp_var)
+		g.writeln('} break;')
+		g.dec_indent()
+	}
+	g.dec_indent()
+	g.writeln('}')
 }
 
 fn (mut g JsGen) need_tmp_var_in_if(node ast.IfExpr) bool {
@@ -2982,6 +3043,40 @@ fn (mut g JsGen) gen_typeof_expr(it ast.TypeOf) {
 	} else {
 		g.write('"$sym.name"')
 	}
+}
+
+fn (mut g JsGen) gen_cast_tmp(tmp string, typ_ ast.Type) {
+	// Skip cast if type is the same as the parrent caster
+	tsym := g.table.get_final_type_symbol(typ_)
+	if tsym.kind == .i64 || tsym.kind == .u64 {
+		g.write('new ')
+
+		g.write('$tsym.kind.str()')
+		g.write('(BigInt(')
+		g.write(tmp)
+		g.write('n))')
+		return
+	}
+	g.cast_stack << typ_
+	typ := g.typ(typ_)
+
+	if typ_.is_ptr() {
+		g.write('new \$ref(')
+	}
+
+	g.write('new ')
+	g.write('${typ}(')
+	g.write(tmp)
+	if typ == 'string' {
+		g.write('.toString()')
+	}
+
+	g.write(')')
+	if typ_.is_ptr() {
+		g.write(')')
+	}
+
+	g.cast_stack.delete_last()
 }
 
 fn (mut g JsGen) gen_type_cast_expr(it ast.CastExpr) {
