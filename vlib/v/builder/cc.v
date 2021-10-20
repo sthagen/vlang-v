@@ -162,7 +162,11 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 	// arguments for the C compiler
 	ccoptions.args = [v.pref.cflags]
 	if !v.pref.no_std {
-		ccoptions.args << '-std=c99 -D_DEFAULT_SOURCE'
+		if v.pref.os == .linux {
+			ccoptions.args << '-std=gnu99 -D_DEFAULT_SOURCE'
+		} else {
+			ccoptions.args << '-std=c99 -D_DEFAULT_SOURCE'
+		}
 	}
 	ccoptions.wargs = [
 		'-Wall',
@@ -880,8 +884,9 @@ fn (mut v Builder) build_thirdparty_obj_file(path string, moduleflags []cflag.CF
 		os.cp(obj_path, opath) or { panic(err) }
 		return
 	}
-	println(rebuild_reason_message)
-	//
+	if v.pref.is_verbose {
+		println(rebuild_reason_message)
+	}
 	// prepare for tcc, it needs relative paths to thirdparty/tcc to work:
 	current_folder := os.getwd()
 	os.chdir(os.dir(pref.vexe_path())) or {}

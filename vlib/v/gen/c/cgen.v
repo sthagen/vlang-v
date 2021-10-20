@@ -4264,6 +4264,9 @@ fn (mut g Gen) need_tmp_var_in_match(node ast.MatchExpr) bool {
 	if node.is_expr && node.return_type != ast.void_type && node.return_type != 0 {
 		cond_sym := g.table.get_final_type_symbol(node.cond_type)
 		sym := g.table.get_type_symbol(node.return_type)
+		if g.table.type_kind(node.return_type) == .sum_type {
+			return true
+		}
 		if sym.kind == .multi_return {
 			return false
 		}
@@ -4289,27 +4292,6 @@ fn (mut g Gen) need_tmp_var_in_match(node ast.MatchExpr) bool {
 	return false
 }
 
-fn (mut g Gen) branches_all_resolvable_in_runtime(node ast.MatchExpr, typ ast.TypeSymbol) bool {
-	for branch in node.branches {
-		for expr in branch.exprs {
-			if expr is ast.EnumVal {
-				continue
-			} else if expr is ast.RangeExpr {
-				return false
-				// we must implement constant folding on enum fields and make it accessible
-				// anywhere to prove that range expr's actual branches are resolvale
-
-				// if expr.high !is ast.IntegerLiteral || expr.low !is ast.IntegerLiteral {
-				// 	return false
-				// }
-				// continue
-			}
-			return true
-		}
-	}
-	return true
-}
-
 fn (mut g Gen) match_expr(node ast.MatchExpr) {
 	// println('match expr typ=$it.expr_type')
 	// TODO
@@ -4319,6 +4301,7 @@ fn (mut g Gen) match_expr(node ast.MatchExpr) {
 	}
 	need_tmp_var := g.need_tmp_var_in_match(node)
 	is_expr := (node.is_expr && node.return_type != ast.void_type) || g.inside_ternary > 0
+
 	mut cond_var := ''
 	mut tmp_var := ''
 	mut cur_line := ''
@@ -4354,11 +4337,9 @@ fn (mut g Gen) match_expr(node ast.MatchExpr) {
 		g.write('(')
 	}
 	typ := g.table.get_final_type_symbol(node.cond_type)
-	all_resolvable := g.branches_all_resolvable_in_runtime(node, typ)
 	if node.is_sum_type {
 		g.match_expr_sumtype(node, is_expr, cond_var, tmp_var)
-	} else if typ.kind == .enum_ && g.loop_depth == 0 && node.branches.len > 5 && g.fn_decl != 0
-		&& all_resolvable { // do not optimize while in top-level
+	} else if typ.kind == .enum_ && g.loop_depth == 0 && node.branches.len > 5 && g.fn_decl != 0 { // do not optimize while in top-level
 		g.match_expr_switch(node, is_expr, cond_var, tmp_var, typ)
 	} else {
 		g.match_expr_classic(node, is_expr, cond_var, tmp_var)
@@ -4450,7 +4431,9 @@ fn (mut g Gen) match_expr_sumtype(node ast.MatchExpr, is_expr bool, cond_var str
 
 fn (mut g Gen) match_expr_switch(node ast.MatchExpr, is_expr bool, cond_var string, tmp_var string, enum_typ ast.TypeSymbol) {
 	cname := '${enum_typ.cname}__'
-	mut covered_enum := []string{cap: (enum_typ.info as ast.Enum).vals.len}
+	mut covered_enum := []string{cap: (enum_typ.info as ast.Enum).vals.len} // collects missing enum variant branches to avoid cstrict errors
+	mut range_branches := []ast.MatchBranch{cap: node.branches.len} // branches have RangeExpr cannot emit as switch case branch, we handle it in default branch
+	mut default_generated := false
 	g.empty_line = true
 	g.writeln('switch ($cond_var) {')
 	g.indent++
@@ -4462,26 +4445,106 @@ fn (mut g Gen) match_expr_switch(node ast.MatchExpr, is_expr bool, cond_var stri
 				}
 			}
 			g.writeln('default:')
+			default_generated = true
+			if range_branches.len > 0 {
+				g.indent++
+				for range_branch in range_branches {
+					g.write('if (')
+					for i, expr in range_branch.exprs {
+						if i > 0 {
+							g.write(' || ')
+						}
+						if expr is ast.RangeExpr {
+							// if type is unsigned and low is 0, check is unneeded
+							mut skip_low := false
+							if expr.low is ast.IntegerLiteral {
+								if node.cond_type in [ast.u16_type, ast.u32_type, ast.u64_type]
+									&& expr.low.val == '0' {
+									skip_low = true
+								}
+							}
+							g.write('(')
+							if !skip_low {
+								g.write('$cond_var >= ')
+								g.expr(expr.low)
+								g.write(' && ')
+							}
+							g.write('$cond_var <= ')
+							g.expr(expr.high)
+							g.write(')')
+						} else {
+							g.write('$cond_var == (')
+							g.expr(expr)
+							g.write(')')
+						}
+					}
+					g.writeln(') {')
+					g.stmts_with_tmp_var(range_branch.stmts, tmp_var)
+					g.writeln('}')
+				}
+				g.indent--
+			}
 		} else {
+			if branch.exprs.any(it is ast.RangeExpr) {
+				range_branches << branch
+				continue
+			}
 			for expr in branch.exprs {
 				if expr is ast.EnumVal {
-					covered_enum << (expr as ast.EnumVal).val
+					covered_enum << expr.val
 					g.write('case ')
 					g.expr(expr)
 					g.writeln(': ')
-				} else if expr is ast.RangeExpr {
-					// low, high := (expr.low as ast.IntegerLiteral).val.int(), (expr.high as ast.IntegerLiteral).val.int()
-					// for val in (enum_typ.info as ast.Enum).vals[low..high + 1] {
-					// 	covered_enum << val
-					// 	g.writeln('case $cname$val:')
-					// }
 				}
 			}
 		}
 		g.indent++
 		g.writeln('{')
+		if is_expr && tmp_var.len > 0 && g.table.get_type_symbol(node.return_type).kind == .sum_type {
+			g.expected_cast_type = node.return_type
+		}
 		g.stmts_with_tmp_var(branch.stmts, tmp_var)
+		g.expected_cast_type = 0
 		g.writeln('} break;')
+		g.indent--
+	}
+	if range_branches.len > 0 && !default_generated {
+		g.writeln('default:')
+		g.indent++
+		for range_branch in range_branches {
+			g.write('if (')
+			for i, expr in range_branch.exprs {
+				if i > 0 {
+					g.write(' || ')
+				}
+				if expr is ast.RangeExpr {
+					// if type is unsigned and low is 0, check is unneeded
+					mut skip_low := false
+					if expr.low is ast.IntegerLiteral {
+						if node.cond_type in [ast.u16_type, ast.u32_type, ast.u64_type]
+							&& expr.low.val == '0' {
+							skip_low = true
+						}
+					}
+					g.write('(')
+					if !skip_low {
+						g.write('$cond_var >= ')
+						g.expr(expr.low)
+						g.write(' && ')
+					}
+					g.write('$cond_var <= ')
+					g.expr(expr.high)
+					g.write(')')
+				} else {
+					g.write('$cond_var == (')
+					g.expr(expr)
+					g.write(')')
+				}
+			}
+			g.writeln(') {')
+			g.stmts_with_tmp_var(range_branch.stmts, tmp_var)
+			g.writeln('}')
+		}
 		g.indent--
 	}
 	g.indent--
@@ -4589,7 +4652,11 @@ fn (mut g Gen) match_expr_classic(node ast.MatchExpr, is_expr bool, cond_var str
 				g.writeln(') {')
 			}
 		}
+		if is_expr && tmp_var.len > 0 && g.table.get_type_symbol(node.return_type).kind == .sum_type {
+			g.expected_cast_type = node.return_type
+		}
 		g.stmts_with_tmp_var(branch.stmts, tmp_var)
+		g.expected_cast_type = 0
 		if g.inside_ternary == 0 && node.branches.len >= 1 {
 			g.write('}')
 		}
