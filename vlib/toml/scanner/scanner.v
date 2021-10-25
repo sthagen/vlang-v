@@ -95,15 +95,18 @@ pub fn (mut s Scanner) scan() ?token.Token {
 		is_sign := byte_c in [`+`, `-`]
 		is_signed_number := is_sign && byte(s.at()).is_digit() && !byte(s.peek(-1)).is_digit()
 
-		// TODO (+/-)nan & (+/-)inf
-		/*
-		mut is_nan := s.peek(1) == `n` && s.peek(2) == `a` && s.peek(3) == `n`
-		mut is_inf := s.peek(1) == `i` && s.peek(2) == `n` && s.peek(3) == `f`
-		if is_nan || is_inf {
-			util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'identified a special number "$key" ($key.len)')
-			return s.new_token(.number, key, key.len)
+		// (+/-)nan & (+/-)inf
+		is_nan := byte_c == `n` && s.at() == `a` && s.peek(1) == `n` && s.peek(2) == `\n`
+		is_inf := byte_c == `i` && s.at() == `n` && s.peek(1) == `f` && s.peek(2) == `\n`
+		is_signed_nan := is_sign && s.at() == `n` && s.peek(1) == `a` && s.peek(2) == `n`
+			&& s.peek(3) == `\n`
+		is_signed_inf := is_sign && s.at() == `i` && s.peek(1) == `n` && s.peek(2) == `f`
+			&& s.peek(3) == `\n`
+		if is_nan || is_inf || is_signed_nan || is_signed_inf {
+			num := s.extract_nan_or_inf_number() ?
+			util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'identified a special number "$num" ($num.len)')
+			return s.new_token(.number, num, num.len)
 		}
-		*/
 
 		is_digit := byte_c.is_digit()
 		if is_digit || is_signed_number {
@@ -172,7 +175,7 @@ pub fn (mut s Scanner) scan() ?token.Token {
 			}
 			`#` {
 				start := s.pos //+ 1
-				s.ignore_line()
+				s.ignore_line() ?
 				hash := s.text[start..s.pos]
 				util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'identified comment hash "$hash" ($hash.len)')
 				return s.new_token(.hash, hash, hash.len + 1)
@@ -315,9 +318,14 @@ fn (mut s Scanner) new_token(kind token.Kind, lit string, len int) token.Token {
 
 // ignore_line forwards the scanner to the end of the current line.
 [direct_array_access; inline]
-fn (mut s Scanner) ignore_line() {
+fn (mut s Scanner) ignore_line() ? {
 	util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, ' ignoring until EOL')
 	for c := s.at(); c != -1 && c != `\n`; c = s.at() {
+		// Check for control characters (allow TAB)
+		if util.is_illegal_ascii_control_character(c) {
+			return error(@MOD + '.' + @STRUCT + '.' + @FN +
+				' control character `$c.hex()` is not allowed ($s.line_nr,$s.col) "${byte(s.at()).ascii_str()}" near ...${s.excerpt(s.pos, 5)}...')
+		}
 		s.next()
 		util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'skipping "${byte(c).ascii_str()}"')
 		continue
@@ -391,6 +399,11 @@ fn (mut s Scanner) extract_string() ?string {
 				continue
 			}
 		}
+		// Check for control characters (allow TAB)
+		if util.is_illegal_ascii_control_character(c) {
+			return error(@MOD + '.' + @STRUCT + '.' + @FN +
+				' control character `$c.hex()` is not allowed at $start ($s.line_nr,$s.col) "${byte(s.at()).ascii_str()}" near ...${s.excerpt(s.pos, 5)}...')
+		}
 
 		if c == quote {
 			s.pos++
@@ -454,6 +467,11 @@ fn (mut s Scanner) extract_multiline_string() ?string {
 				continue
 			}
 		}
+		// Check for control characters (allow TAB)
+		if util.is_illegal_ascii_control_character(c) {
+			return error(@MOD + '.' + @STRUCT + '.' + @FN +
+				' control character `$c.hex()` is not allowed at $start ($s.line_nr,$s.col) "${byte(s.at()).ascii_str()}" near ...${s.excerpt(s.pos, 5)}...')
+		}
 
 		if c == quote {
 			if s.peek(1) == quote && s.peek(2) == quote {
@@ -515,7 +533,7 @@ fn (mut s Scanner) handle_escapes(quote byte, is_multiline bool) (string, int) {
 }
 
 // extract_number collects and returns a string containing
-// any bytes recognized as a TOML number.
+// any bytes recognized as a TOML number except for "(+/-)nan" and "(+/-)inf".
 // TOML numbers can include digits 0-9 and `_`.
 [direct_array_access; inline]
 fn (mut s Scanner) extract_number() ?string {
@@ -550,6 +568,36 @@ fn (mut s Scanner) extract_number() ?string {
 	}
 	key := s.text[start..s.pos]
 	util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'identified number "$key" in range [$start .. $s.pos]')
+	return key
+}
+
+// extract_nan_or_inf_number collects and returns a string containing
+// any bytes recognized as infinity or not-a-number TOML numbers.
+[direct_array_access; inline]
+fn (mut s Scanner) extract_nan_or_inf_number() ?string {
+	// extract_nan_or_inf_number is called when the scanner has already identified that
+	// +/- or 'nan'/'inf' bytes is up but we rewind it to start at the correct position
+	s.pos--
+	s.col--
+	start := s.pos
+
+	mut c := s.at()
+	if c !in [`+`, `-`, `n`, `i`] {
+		return error(@MOD + '.' + @STRUCT + '.' + @FN +
+			' ${byte(c).ascii_str()} is not a number at ${s.excerpt(s.pos, 10)}')
+	}
+	s.pos++
+	s.col++
+	for s.pos < s.text.len {
+		c = s.at()
+		if c !in [`n`, `a`, `i`, `f`] {
+			break
+		}
+		s.pos++
+		s.col++
+	}
+	key := s.text[start..s.pos]
+	util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'identified special number "$key" in range [$start .. $s.pos]')
 	return key
 }
 

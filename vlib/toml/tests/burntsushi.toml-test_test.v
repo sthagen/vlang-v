@@ -9,7 +9,6 @@ import toml
 // TODO Goal: make parsing AND value retrieval of all of https://github.com/BurntSushi/toml-test/test/ pass
 const (
 	valid_exceptions   = [
-		'float/inf-and-nan.toml',
 		'table/array-table-array.toml',
 	]
 	invalid_exceptions = [
@@ -20,24 +19,9 @@ const (
 		'string/basic-out-of-range-unicode-escape-1.toml',
 		'string/basic-out-of-range-unicode-escape-2.toml',
 		'string/bad-uni-esc.toml',
-		// Integer
-		'integer/capital-bin.toml',
-		'integer/invalid-bin.toml',
-		'integer/invalid-oct.toml',
 		// Encoding
 		'encoding/bad-utf8-in-comment.toml',
 		'encoding/bad-utf8-in-string.toml',
-		// Float
-		'float/exp-double-us.toml',
-		'float/exp-leading-us.toml',
-		'float/nan_underscore.toml',
-		'float/nan-incomplete-1.toml',
-		'invalid/float/exp-point-1.toml',
-		'float/trailing-us.toml',
-		'float/us-after-point.toml',
-		'float/exp-double-e-1.toml',
-		'float/inf-incomplete-1.toml',
-		'float/inf_underscore.toml',
 		// Table
 		'table/rrbrace.toml',
 		'table/duplicate-table-array2.toml',
@@ -49,37 +33,14 @@ const (
 		'table/duplicate-table-array.toml',
 		// Array
 		'array/tables-1.toml',
-		'array/no-close-2.toml',
 		'array/missing-separator.toml',
 		'array/text-after-array-entries.toml',
-		'array/no-close.toml',
 		'array/text-before-array-separator.toml',
 		// Date / Time
 		'datetime/impossible-date.toml',
 		'datetime/no-leads-with-milli.toml',
 		'datetime/no-leads.toml',
-		// Control
-		'control/string-us.toml',
-		'control/comment-lf.toml',
-		'control/multi-us.toml',
-		'control/rawstring-del.toml',
-		'control/rawmulti-del.toml',
-		'control/rawstring-us.toml',
-		'control/string-bs.toml',
-		'control/multi-null.toml',
-		'control/rawstring-lf.toml',
-		'control/rawmulti-null.toml',
-		'control/comment-null.toml',
-		'control/multi-lf.toml',
-		'control/comment-del.toml',
-		'control/rawstring-null.toml',
-		'control/rawmulti-lf.toml',
-		'control/multi-del.toml',
-		'control/string-del.toml',
-		'control/rawmulti-us.toml',
-		'control/comment-us.toml',
-		'control/string-lf.toml',
-		'control/string-null.toml',
+		// Inline table
 		'inline-table/empty.toml',
 		'inline-table/double-comma.toml',
 		'inline-table/trailing-comma.toml',

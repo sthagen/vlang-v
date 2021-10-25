@@ -591,10 +591,12 @@ pub fn (mut g Gen) init() {
 	g.write_multi_return_types()
 	g.definitions.writeln('// end of definitions #endif')
 	//
-	g.stringliterals.writeln('')
-	g.stringliterals.writeln('// >> string literal consts')
-	if g.pref.build_mode != .build_module {
-		g.stringliterals.writeln('void vinit_string_literals(){')
+	if !g.pref.no_builtin {
+		g.stringliterals.writeln('')
+		g.stringliterals.writeln('// >> string literal consts')
+		if g.pref.build_mode != .build_module {
+			g.stringliterals.writeln('void vinit_string_literals(void){')
+		}
 	}
 	if g.pref.compile_defines_all.len > 0 {
 		g.comptime_defines.writeln('// V compile time defines by -d or -define flags:')
@@ -665,11 +667,13 @@ pub fn (mut g Gen) init() {
 }
 
 pub fn (mut g Gen) finish() {
-	if g.pref.build_mode != .build_module {
-		g.stringliterals.writeln('}')
+	if !g.pref.no_builtin {
+		if g.pref.build_mode != .build_module {
+			g.stringliterals.writeln('}')
+		}
+		g.stringliterals.writeln('// << string literal consts')
+		g.stringliterals.writeln('')
 	}
-	g.stringliterals.writeln('// << string literal consts')
-	g.stringliterals.writeln('')
 	if g.pref.is_prof && g.pref.build_mode != .build_module {
 		g.gen_vprint_profile_stats()
 	}
@@ -736,6 +740,9 @@ pub fn (mut g Gen) write_typeof_functions() {
 			}
 			g.writeln('}')
 		} else if typ.kind == .interface_ {
+			if typ.info !is ast.Interface {
+				continue
+			}
 			inter_info := typ.info as ast.Interface
 			if inter_info.is_generic {
 				continue
@@ -1153,6 +1160,9 @@ pub fn (mut g Gen) write_interface_typedef(sym ast.TypeSymbol) {
 }
 
 pub fn (mut g Gen) write_interface_typesymbol_declaration(sym ast.TypeSymbol) {
+	if sym.info !is ast.Interface {
+		return
+	}
 	info := sym.info as ast.Interface
 	if info.is_generic {
 		return
@@ -4480,6 +4490,7 @@ fn (mut g Gen) match_expr_switch(node ast.MatchExpr, is_expr bool, cond_var stri
 					}
 					g.writeln(') {')
 					g.stmts_with_tmp_var(range_branch.stmts, tmp_var)
+					g.writeln('break;')
 					g.writeln('}')
 				}
 				g.indent--
@@ -4543,6 +4554,7 @@ fn (mut g Gen) match_expr_switch(node ast.MatchExpr, is_expr bool, cond_var stri
 			}
 			g.writeln(') {')
 			g.stmts_with_tmp_var(range_branch.stmts, tmp_var)
+			g.writeln('break;')
 			g.writeln('}')
 		}
 		g.indent--
@@ -6092,6 +6104,9 @@ fn (g &Gen) checker_bug(s string, pos token.Position) {
 }
 
 fn (mut g Gen) write_init_function() {
+	if g.pref.no_builtin {
+		return
+	}
 	util.timing_start(@METHOD)
 	defer {
 		util.timing_measure(@METHOD)
@@ -6137,7 +6152,7 @@ fn (mut g Gen) write_init_function() {
 	}
 	//
 	fn_vcleanup_start_pos := g.out.len
-	g.writeln('void _vcleanup() {')
+	g.writeln('void _vcleanup(void) {')
 	if g.is_autofree {
 		// g.writeln('puts("cleaning up...");')
 		reversed_table_modules := g.table.modules.reverse()
@@ -6177,6 +6192,9 @@ const (
 )
 
 fn (mut g Gen) write_builtin_types() {
+	if g.pref.no_builtin {
+		return
+	}
 	mut builtin_types := []ast.TypeSymbol{} // builtin types
 	// builtin types need to be on top
 	// everything except builtin will get sorted
@@ -6311,7 +6329,7 @@ fn (mut g Gen) write_types(types []ast.TypeSymbol) {
 						g.type_definitions.writeln('} $name;')
 					}
 				} else {
-					if !g.pref.is_bare {
+					if !g.pref.is_bare && !g.pref.no_builtin {
 						g.type_definitions.writeln('typedef pthread_t $name;')
 					}
 				}
@@ -7034,6 +7052,9 @@ fn (mut g Gen) interface_table() string {
 	mut conversion_functions := strings.new_builder(100)
 	for ityp in g.table.type_symbols {
 		if ityp.kind != .interface_ {
+			continue
+		}
+		if ityp.info !is ast.Interface {
 			continue
 		}
 		inter_info := ityp.info as ast.Interface

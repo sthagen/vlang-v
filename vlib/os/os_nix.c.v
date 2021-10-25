@@ -43,20 +43,6 @@ pub const (
 	s_ixoth = 0o0001 // Execute by others
 )
 
-struct C.utsname {
-mut:
-	sysname  &char
-	nodename &char
-	release  &char
-	version  &char
-	machine  &char
-}
-
-struct C.utimbuf {
-	actime  int
-	modtime int
-}
-
 fn C.utime(&char, voidptr) int
 
 fn C.uname(name voidptr) int
@@ -268,6 +254,9 @@ fn init_os_args(argc int, argv &&byte) []string {
 }
 
 pub fn ls(path string) ?[]string {
+	if path.len == 0 {
+		return error('ls() expects a folder, not an empty string')
+	}
 	mut res := []string{}
 	dir := unsafe { C.opendir(&char(path.str)) }
 	if isnil(dir) {

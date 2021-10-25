@@ -17,7 +17,7 @@ const (
 		'if', 'implements', 'import', 'in', 'instanceof', 'interface', 'let', 'new', 'package',
 		'private', 'protected', 'public', 'return', 'static', 'super', 'switch', 'this', 'throw',
 		'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', 'Number', 'String', 'Boolean',
-		'Array', 'Map']
+		'Array', 'Map', 'document']
 	// used to generate type structs
 	v_types            = ['i8', 'i16', 'int', 'i64', 'byte', 'u16', 'u32', 'u64', 'f32', 'f64',
 		'int_literal', 'float_literal', 'bool', 'string', 'map', 'array', 'rune', 'any']
@@ -86,6 +86,7 @@ mut:
 	array_sort_fn          map[string]bool
 	wasm_export            map[string][]string
 	wasm_import            map[string][]string
+	init_global            map[string]map[string]ast.Expr // initializers for constants or globals, should be invoked before module init.
 }
 
 fn (mut g JsGen) write_tests_definitions() {
@@ -204,6 +205,11 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 
 	for mod_name in g.table.modules {
 		g.writeln('// Initializations for module $mod_name')
+		for global, expr in g.init_global[mod_name] {
+			g.write('$global = ')
+			g.expr(expr)
+			g.writeln(';')
+		}
 		init_fn_name := '${mod_name}.init'
 		if initfn := g.table.find_fn(init_fn_name) {
 			if initfn.return_type == ast.void_type && initfn.params.len == 0 {
@@ -213,6 +219,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 			}
 		}
 	}
+
 	if !g.pref.is_shared {
 		g.write('loadRoutine().then(_ => js_main());')
 	}
@@ -1214,7 +1221,7 @@ fn (mut g JsGen) gen_assert_stmt(orig_node ast.AssertStmt) {
 fn (mut g JsGen) gen_assign_stmt(stmt ast.AssignStmt, semicolon bool) {
 	if stmt.left.len > stmt.right.len {
 		// multi return
-		g.write('const [')
+		g.write('let [')
 		for i, left in stmt.left {
 			if !left.is_blank_ident() {
 				g.expr(left)
@@ -1469,8 +1476,17 @@ fn (mut g JsGen) gen_const_decl(it ast.ConstDecl) {
 		if field.is_pub {
 			g.push_pub_var(field.name)
 		}
-		g.write('const ${g.js_name(field.name)} = ')
-		g.expr(field.expr)
+
+		if field.expr is ast.StringInterLiteral || field.expr is ast.StringLiteral
+			|| field.expr is ast.IntegerLiteral || field.expr is ast.FloatLiteral
+			|| field.expr is ast.BoolLiteral {
+			g.write('const ${g.js_name(field.name)} = ')
+			g.expr(field.expr)
+		} else {
+			g.write('let ${g.js_name(field.name)} = ')
+			g.write('undefined')
+			g.init_global[g.ns.name][g.js_name(field.name)] = field.expr
+		}
 		g.writeln(';')
 	}
 	g.writeln('')
@@ -1532,6 +1548,9 @@ fn (mut g JsGen) cc_type(typ ast.Type, is_prefix_struct bool) string {
 			}
 		}
 		else {}
+	}
+	if styp.starts_with('JS__') {
+		styp = styp[4..]
 	}
 	return styp
 }
@@ -1729,6 +1748,7 @@ fn (mut g JsGen) gen_return_stmt(it ast.Return) {
 		g.write('const $tmp = new ')
 
 		g.writeln('Option({});')
+		g.write('${tmp}.state = new byte(0);')
 		g.write('${tmp}.data = ')
 		if it.exprs.len == 1 {
 			g.expr(it.exprs[0])
@@ -1765,11 +1785,21 @@ fn (mut g JsGen) gen_struct_decl(node ast.StructDecl) {
 	g.doc.gen_fac_fn(node.fields)
 	g.write('function ${js_name}({ ')
 	for i, field in node.fields {
-		g.write('$field.name = ')
-		if field.has_default_expr {
-			g.expr(field.default_expr)
-		} else {
-			g.write('${g.to_js_typ_val(field.typ)}')
+		g.write('$field.name')
+		mut keep := true
+		for attr in field.attrs {
+			if attr.name == 'noinit' {
+				keep = false
+			}
+		}
+		if keep {
+			g.write(' = ')
+
+			if field.has_default_expr {
+				g.expr(field.default_expr)
+			} else {
+				g.write('${g.to_js_typ_val(field.typ)}')
+			}
 		}
 		if i < node.fields.len - 1 {
 			g.write(', ')
@@ -1786,7 +1816,7 @@ fn (mut g JsGen) gen_struct_decl(node ast.StructDecl) {
 	g.inc_indent()
 	for embed in node.embeds {
 		etyp := g.typ(embed.typ)
-		g.writeln('...${etyp}.prototype,')
+		g.writeln('...${g.js_name(etyp)}.prototype,')
 	}
 	fns := g.method_fn_decls[name]
 	// gen toString method
@@ -1813,8 +1843,16 @@ fn (mut g JsGen) gen_struct_decl(node ast.StructDecl) {
 	for field in node.fields {
 		typ := g.typ(field.typ)
 		g.doc.gen_typ(typ)
-		g.write('$field.name: ${g.to_js_typ_val(field.typ)}')
-		g.writeln(',')
+		mut keep := true
+		for attr in field.attrs {
+			if attr.name == 'noinit' {
+				keep = false
+			}
+		}
+		if keep {
+			g.write('$field.name: ${g.to_js_typ_val(field.typ)}')
+			g.writeln(',')
+		}
 	}
 	g.writeln('\$toJS() { return this; }')
 
@@ -2362,6 +2400,7 @@ fn (mut g JsGen) match_expr_switch(node ast.MatchExpr, is_expr bool, cond_var Ma
 					}
 					g.writeln(') {')
 					g.stmts_with_tmp_var(range_branch.stmts, tmp_var)
+					g.writeln('break;')
 					g.writeln('}')
 				}
 				g.dec_indent()
@@ -2423,6 +2462,7 @@ fn (mut g JsGen) match_expr_switch(node ast.MatchExpr, is_expr bool, cond_var Ma
 			}
 			g.writeln(') {')
 			g.stmts_with_tmp_var(range_branch.stmts, tmp_var)
+			g.writeln('break;')
 			g.writeln('}')
 		}
 		g.dec_indent()
