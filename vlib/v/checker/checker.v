@@ -1663,8 +1663,9 @@ fn (mut c Checker) fail_if_immutable(expr ast.Expr) (string, token.Position) {
 					c.fail_if_immutable(expr.expr)
 				}
 				.array, .string {
-					// This should only happen in `builtin`
-					if c.file.mod.name != 'builtin' {
+					// should only happen in `builtin` and unsafe blocks
+					inside_builtin := c.file.mod.name == 'builtin'
+					if !inside_builtin && !c.inside_unsafe {
 						c.error('`$typ_sym.kind` can not be modified', expr.pos)
 						return '', expr.pos
 					}
@@ -2226,13 +2227,15 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 			concrete_types = node.concrete_types
 		}
 		// resolve return generics struct to concrete type
-		if method.generic_names.len > 0 && method.return_type.has_flag(.generic) {
+		if method.generic_names.len > 0 && method.return_type.has_flag(.generic)
+			&& c.table.cur_fn.generic_names.len == 0 {
 			node.return_type = c.table.unwrap_generic_type(method.return_type, method.generic_names,
 				concrete_types)
 		} else {
 			node.return_type = method.return_type
 		}
-		if node.concrete_types.len > 0 && method.return_type != 0 {
+		if node.concrete_types.len > 0 && method.return_type != 0
+			&& c.table.cur_fn.generic_names.len == 0 {
 			if typ := c.table.resolve_generic_to_concrete(method.return_type, method.generic_names,
 				concrete_types)
 			{
@@ -2885,13 +2888,14 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 		}
 	}
 	// resolve return generics struct to concrete type
-	if func.generic_names.len > 0 && func.return_type.has_flag(.generic) {
+	if func.generic_names.len > 0 && func.return_type.has_flag(.generic)
+		&& c.table.cur_fn.generic_names.len == 0 {
 		node.return_type = c.table.unwrap_generic_type(func.return_type, func.generic_names,
 			concrete_types)
 	} else {
 		node.return_type = func.return_type
 	}
-	if node.concrete_types.len > 0 && func.return_type != 0 {
+	if node.concrete_types.len > 0 && func.return_type != 0 && c.table.cur_fn.generic_names.len == 0 {
 		if typ := c.table.resolve_generic_to_concrete(func.return_type, func.generic_names,
 			concrete_types)
 		{
@@ -3711,6 +3715,17 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 				right_len = 0
 			}
 		}
+		if right is ast.InfixExpr {
+			if right.op == .arrow {
+				c.error('cannot use `<-` on the right-hand side of an assignment, as it does not return any values',
+					right.pos)
+			}
+		}
+		if right is ast.Ident {
+			if right.is_mut {
+				c.error('unexpected `mut` on right-hand side of assignment', right.mut_pos)
+			}
+		}
 	}
 	if node.left.len != right_len {
 		if right_first is ast.CallExpr {
@@ -4488,7 +4503,7 @@ fn (mut c Checker) stmt(node ast.Stmt) {
 		stmt_pos := node.pos
 		eprintln('checking file: ${c.file.path:-30} | stmt pos: ${stmt_pos.str():-45} | stmt')
 	}
-	// c.expected_type = ast.void_type
+	c.expected_type = ast.void_type
 	match mut node {
 		ast.EmptyStmt {
 			if c.pref.is_verbose {
@@ -5156,6 +5171,12 @@ fn (mut c Checker) stmts(stmts []ast.Stmt) {
 			}
 		}
 		c.stmt(stmt)
+		if stmt is ast.GotoLabel {
+			unreachable = token.Position{
+				line_nr: -1
+			}
+			c.scope_returns = false
+		}
 	}
 	if unreachable.line_nr >= 0 {
 		c.error('unreachable code', unreachable)
@@ -6658,6 +6679,7 @@ pub fn (mut c Checker) if_expr(mut node ast.IfExpr) ast.Type {
 						is_comptime_type_is_expr = true
 					} else if branch.cond.right is ast.TypeNode && left is ast.TypeNode
 						&& sym.kind == .interface_ {
+						is_comptime_type_is_expr = true
 						// is interface
 						checked_type := c.unwrap_generic(left.typ)
 						should_skip = !c.table.does_type_implement_interface(checked_type,
@@ -7881,7 +7903,7 @@ fn (mut c Checker) fetch_field_name(field ast.StructField) string {
 		}
 	}
 	sym := c.table.get_type_symbol(field.typ)
-	if sym.kind == .struct_ {
+	if sym.kind == .struct_ && sym.name != 'time.Time' {
 		name = '${name}_id'
 	}
 	return name

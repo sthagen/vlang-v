@@ -45,10 +45,9 @@ pub mut:
 	is_print_rel_paths_on_error bool
 	quote                       byte // which quote is used to denote current string: ' or "
 	inter_quote                 byte
-	line_ends                   []int // the positions of source lines ends   (i.e. \n signs)
-	nr_lines                    int   // total number of lines in the source file that were scanned
-	is_vh                       bool  // Keep newlines
-	is_fmt                      bool  // Used for v fmt.
+	nr_lines                    int  // total number of lines in the source file that were scanned
+	is_vh                       bool // Keep newlines
+	is_fmt                      bool // Used for v fmt.
 	comments_mode               CommentsMode
 	is_inside_toplvl_statement  bool // *only* used in comments_mode: .toplevel_comments, toggled by parser
 	all_tokens                  []token.Token // *only* used in comments_mode: .toplevel_comments, contains all tokens
@@ -152,7 +151,11 @@ fn (mut s Scanner) init_scanner() {
 [unsafe]
 pub fn (mut s Scanner) free() {
 	unsafe {
-		s.text.free()
+		// NB: s.text is not freed here, because it is shared with all other util.read_file instances,
+		// and strings are not reference counted yet:
+		// s.text.free()
+		// .all_tokens however are not shared with anything, and can be freed:
+		s.all_tokens.free()
 	}
 }
 
@@ -223,10 +226,11 @@ fn (mut s Scanner) ident_name() string {
 	s.pos++
 	for s.pos < s.text.len {
 		c := s.text[s.pos]
-		if !(util.is_name_char(c) || c.is_digit()) {
-			break
+		if (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`) || (c >= `0` && c <= `9`) || c == `_` {
+			s.pos++
+			continue
 		}
-		s.pos++
+		break
 	}
 	name := s.text[start..s.pos]
 	s.pos--
@@ -512,6 +516,11 @@ fn (mut s Scanner) ident_number() string {
 fn (mut s Scanner) skip_whitespace() {
 	for s.pos < s.text.len {
 		c := s.text[s.pos]
+		if c == 8 {
+			// tabs are most common
+			s.pos++
+			continue
+		}
 		if !(c == 32 || (c > 8 && c < 14) || (c == 0x85) || (c == 0xa0)) {
 			return
 		}
@@ -556,6 +565,8 @@ pub fn (mut s Scanner) scan_all_tokens_in_buffer(mode CommentsMode) {
 	}
 	oldmode := s.comments_mode
 	s.comments_mode = mode
+	// preallocate space for tokens
+	s.all_tokens = []token.Token{cap: s.text.len / 3}
 	s.scan_remaining_text()
 	s.comments_mode = oldmode
 	s.tidx = 0
@@ -671,7 +682,7 @@ fn (mut s Scanner) text_scan() token.Token {
 			// tmp hack to detect . in ${}
 			// Check if not .eof to prevent panic
 			next_char := s.look_ahead(1)
-			kind := token.keywords[name]
+			kind := token.matcher.find(name)
 			if kind != .unknown {
 				return s.new_token(kind, name, name.len)
 			}
@@ -1354,7 +1365,6 @@ fn (mut s Scanner) inc_line_number() {
 		s.last_nl_pos++
 	}
 	s.line_nr++
-	s.line_ends << s.pos
 	if s.line_nr > s.nr_lines {
 		s.nr_lines = s.line_nr
 	}
@@ -1449,15 +1459,19 @@ pub fn verror(s string) {
 	util.verror('scanner error', s)
 }
 
+// codegen allows you to generate V code, so that it can be parsed,
+// checked, markused, cgen-ed etc further, just like user's V code.
 pub fn (mut s Scanner) codegen(newtext string) {
 	$if debug_codegen ? {
 		eprintln('scanner.codegen:\n $newtext')
 	}
-	// codegen makes sense only during normal compilation
-	// feeding code generated V code to vfmt or vdoc will
-	// cause them to output/document ephemeral stuff.
 	if s.comments_mode == .skip_comments {
-		s.all_tokens.delete_last() // remove .eof from end of .all_tokens
+		// Calling codegen makes sense only during normal compilation, since
+		// feeding code generated V code to vfmt or vdoc will cause them to
+		// output/document ephemeral stuff.
+		for s.all_tokens.len > 0 && s.all_tokens.last().kind == .eof {
+			s.all_tokens.delete_last()
+		}
 		s.text += newtext
 		old_tidx := s.tidx
 		s.tidx = s.all_tokens.len

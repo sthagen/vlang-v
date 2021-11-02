@@ -1150,7 +1150,9 @@ pub fn (t &Table) fn_signature_using_aliases(func &Fn, import_aliases map[string
 		param := func.params[i]
 		mut typ := param.typ
 		if param.is_mut {
-			typ = typ.deref()
+			if param.typ.is_ptr() {
+				typ = typ.deref()
+			}
 			sb.write_string('mut ')
 		}
 		if !opts.type_only {
@@ -1183,6 +1185,11 @@ pub fn (t &TypeSymbol) embed_name() string {
 
 pub fn (t &TypeSymbol) has_method(name string) bool {
 	t.find_method(name) or { return false }
+	return true
+}
+
+pub fn (t &TypeSymbol) has_method_with_generic_parent(name string) bool {
+	t.find_method_with_generic_parent(name) or { return false }
 	return true
 }
 
@@ -1240,7 +1247,7 @@ pub fn (t &TypeSymbol) str_method_info() (bool, bool, int) {
 	mut has_str_method := false
 	mut expects_ptr := false
 	mut nr_args := 0
-	if sym_str_method := t.find_method('str') {
+	if sym_str_method := t.find_method_with_generic_parent('str') {
 		has_str_method = true
 		nr_args = sym_str_method.params.len
 		if nr_args > 0 {

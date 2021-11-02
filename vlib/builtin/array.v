@@ -5,19 +5,26 @@ module builtin
 
 import strings
 
-// array is a struct used for denoting array types in V
+// `array` is a struct, used for denoting all array types in V.
+// `.data` is a void pointer to the backing heap memory block,
+// which avoids using generics and thus without generating extra
+// code for every type.
 pub struct array {
 pub:
 	element_size int // size in bytes of one element in the array.
 pub mut:
 	data   voidptr
 	offset int // in bytes (should be `usize`)
-	len    int // length of the array.
-	cap    int // capacity of the array.
+	len    int // length of the array in elements.
+	cap    int // capacity of the array in elements.
+	flags  ArrayFlags
 }
 
-// array.data uses a void pointer, which allows implementing arrays without generics and without generating
-// extra code for every type.
+[flag]
+pub enum ArrayFlags {
+	noslices
+}
+
 // Internal function, used by V (`nums := []int`)
 fn __new_array(mylen int, cap int, elm_size int) array {
 	cap_ := if cap < mylen { mylen } else { cap }
@@ -34,9 +41,13 @@ fn __new_array_with_default(mylen int, cap int, elm_size int, val voidptr) array
 	cap_ := if cap < mylen { mylen } else { cap }
 	mut arr := array{
 		element_size: elm_size
-		data: vcalloc(cap_ * elm_size)
 		len: mylen
 		cap: cap_
+	}
+	if cap_ > 0 && mylen == 0 {
+		arr.data = unsafe { malloc(cap_ * elm_size) }
+	} else {
+		arr.data = vcalloc(cap_ * elm_size)
 	}
 	if val != 0 {
 		for i in 0 .. arr.len {
@@ -50,7 +61,7 @@ fn __new_array_with_array_default(mylen int, cap int, elm_size int, val array) a
 	cap_ := if cap < mylen { mylen } else { cap }
 	mut arr := array{
 		element_size: elm_size
-		data: vcalloc(cap_ * elm_size)
+		data: unsafe { malloc(cap_ * elm_size) }
 		len: mylen
 		cap: cap_
 	}
@@ -100,6 +111,11 @@ fn (mut a array) ensure_cap(required int) {
 	if a.data != voidptr(0) {
 		unsafe { vmemcpy(new_data, a.data, a.len * a.element_size) }
 		// TODO: the old data may be leaked when no GC is used (ref-counting?)
+		if a.flags.has(.noslices) {
+			unsafe {
+				free(a.data)
+			}
+		}
 	}
 	a.data = new_data
 	a.offset = 0
@@ -221,6 +237,11 @@ pub fn (mut a array) delete_many(i int, size int) {
 	unsafe {
 		vmemcpy(&byte(a.data) + i * a.element_size, &byte(old_data) + (i + size) * a.element_size,
 			(a.len - i - size) * a.element_size)
+	}
+	if a.flags.has(.noslices) {
+		unsafe {
+			free(old_data)
+		}
 	}
 	a.len = new_size
 	a.cap = new_cap
@@ -540,18 +561,25 @@ pub fn (mut a []string) free() {
 // => '["a", "b", "c"]'.
 [manualfree]
 pub fn (a []string) str() string {
-	mut sb := strings.new_builder(a.len * 3)
-	sb.write_string('[')
+	mut sb_len := 4 // 2x" + 1x, + 1xspace
+	if a.len > 0 {
+		// assume that most strings will be ~large as the first
+		sb_len += a[0].len
+		sb_len *= a.len
+	}
+	sb_len += 2 // 1x[ + 1x]
+	mut sb := strings.new_builder(sb_len)
+	sb.write_b(`[`)
 	for i in 0 .. a.len {
 		val := a[i]
-		sb.write_string("'")
+		sb.write_b(`'`)
 		sb.write_string(val)
-		sb.write_string("'")
+		sb.write_b(`'`)
 		if i < a.len - 1 {
 			sb.write_string(', ')
 		}
 	}
-	sb.write_string(']')
+	sb.write_b(`]`)
 	res := sb.str()
 	unsafe { sb.free() }
 	return res
