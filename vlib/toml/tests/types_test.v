@@ -68,3 +68,25 @@ open_sourced = "Jun 22 2019 20:20:28"'
 	value := toml_doc.value('v.open_sourced').string()
 	assert value == 'Jun 22 2019 20:20:28'
 }
+
+fn test_hex_values() {
+	// Regression test
+	// '0xb' is carefully chosen to include the 'b' character that also denotes binary via 0b prefix.
+	toml_txt := 'hex = 0xb'
+	toml_doc := toml.parse(toml_txt) or { panic(err) }
+
+	value := toml_doc.value('hex')
+	assert value as i64 == 11
+	assert value.i64() == 11
+}
+
+fn test_comment_as_last_value() {
+	toml_txt := '
+test = 42
+# this line has comment as last thing'
+	toml_doc := toml.parse(toml_txt) or { panic(err) }
+
+	value := toml_doc.value('test')
+	assert value as i64 == 42
+	assert value.i64() == 42
+}

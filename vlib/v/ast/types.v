@@ -427,6 +427,13 @@ pub const (
 	u8_type_idx            = 30
 )
 
+// NB: builtin_type_names must be in the same order as the idx consts above
+pub const builtin_type_names = ['void', 'voidptr', 'byteptr', 'charptr', 'i8', 'i16', 'int', 'i64',
+	'isize', 'byte', 'u16', 'u32', 'u64', 'usize', 'f32', 'f64', 'char', 'bool', 'none', 'string',
+	'rune', 'array', 'map', 'chan', 'any', 'float_literal', 'int_literal', 'thread', 'Error', 'u8']
+
+pub const builtin_type_names_matcher = build_builtin_type_names_matcher()
+
 pub const (
 	integer_type_idxs          = [i8_type_idx, i16_type_idx, int_type_idx, i64_type_idx,
 		byte_type_idx, u8_type_idx, u16_type_idx, u32_type_idx, u64_type_idx, isize_type_idx,
@@ -488,13 +495,6 @@ pub fn merge_types(params ...[]Type) []Type {
 	}
 	return res
 }
-
-pub const (
-	// must be in the same order as the idx consts above
-	builtin_type_names = ['void', 'voidptr', 'byteptr', 'charptr', 'i8', 'i16', 'int', 'i64', 'isize',
-		'byte', 'u16', 'u32', 'u64', 'usize', 'f32', 'f64', 'char', 'bool', 'none', 'string', 'rune',
-		'array', 'map', 'chan', 'any', 'float_literal', 'int_literal', 'thread', 'Error', 'u8']
-)
 
 pub struct MultiReturn {
 pub mut:
@@ -1184,8 +1184,12 @@ pub fn (t &TypeSymbol) embed_name() string {
 }
 
 pub fn (t &TypeSymbol) has_method(name string) bool {
-	t.find_method(name) or { return false }
-	return true
+	for mut method in unsafe { t.methods } {
+		if method.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 pub fn (t &TypeSymbol) has_method_with_generic_parent(name string) bool {
@@ -1194,7 +1198,7 @@ pub fn (t &TypeSymbol) has_method_with_generic_parent(name string) bool {
 }
 
 pub fn (t &TypeSymbol) find_method(name string) ?Fn {
-	for method in t.methods {
+	for mut method in unsafe { t.methods } {
 		if method.name == name {
 			return method
 		}
@@ -1268,7 +1272,7 @@ pub fn (t &TypeSymbol) find_field(name string) ?StructField {
 }
 
 fn (a &Aggregate) find_field(name string) ?StructField {
-	for field in a.fields {
+	for mut field in unsafe { a.fields } {
 		if field.name == name {
 			return field
 		}
@@ -1277,7 +1281,7 @@ fn (a &Aggregate) find_field(name string) ?StructField {
 }
 
 pub fn (i &Interface) find_field(name string) ?StructField {
-	for field in i.fields {
+	for mut field in unsafe { i.fields } {
 		if field.name == name {
 			return field
 		}
@@ -1286,7 +1290,7 @@ pub fn (i &Interface) find_field(name string) ?StructField {
 }
 
 pub fn (i &Interface) find_method(name string) ?Fn {
-	for method in i.methods {
+	for mut method in unsafe { i.methods } {
 		if method.name == name {
 			return method
 		}
@@ -1295,14 +1299,16 @@ pub fn (i &Interface) find_method(name string) ?Fn {
 }
 
 pub fn (i &Interface) has_method(name string) bool {
-	if _ := i.find_method(name) {
-		return true
+	for mut method in unsafe { i.methods } {
+		if method.name == name {
+			return true
+		}
 	}
 	return false
 }
 
 pub fn (s Struct) find_field(name string) ?StructField {
-	for field in s.fields {
+	for mut field in unsafe { s.fields } {
 		if field.name == name {
 			return field
 		}
@@ -1318,7 +1324,7 @@ pub fn (s Struct) get_field(name string) StructField {
 }
 
 pub fn (s &SumType) find_field(name string) ?StructField {
-	for field in s.fields {
+	for mut field in unsafe { s.fields } {
 		if field.name == name {
 			return field
 		}
@@ -1327,7 +1333,7 @@ pub fn (s &SumType) find_field(name string) ?StructField {
 }
 
 pub fn (i Interface) defines_method(name string) bool {
-	for method in i.methods {
+	for mut method in unsafe { i.methods } {
 		if method.name == name {
 			return true
 		}

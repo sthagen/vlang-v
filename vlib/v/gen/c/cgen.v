@@ -988,6 +988,7 @@ fn (mut g Gen) register_thread_array_wait_call(eltyp string) string {
 void ${fn_name}($thread_arr_typ a) {
 	for (int i = 0; i < a.len; ++i) {
 		$thread_typ t = (($thread_typ*)a.data)[i];
+		if (t == 0) continue;
 		__v_thread_wait(t);
 	}
 }')
@@ -996,8 +997,13 @@ void ${fn_name}($thread_arr_typ a) {
 $ret_typ ${fn_name}($thread_arr_typ a) {
 	$ret_typ res = __new_array_with_default(a.len, a.len, sizeof($eltyp), 0);
 	for (int i = 0; i < a.len; ++i) {
-		$thread_typ t = (($thread_typ*)a.data)[i];
-		(($eltyp*)res.data)[i] = __v_thread_${eltyp}_wait(t);
+		$thread_typ t = (($thread_typ*)a.data)[i];')
+			if g.pref.os == .windows {
+				g.gowrappers.writeln('\t\tif (t.handle == 0) continue;')
+			} else {
+				g.gowrappers.writeln('\t\tif (t == 0) continue;')
+			}
+			g.gowrappers.writeln('\t\t(($eltyp*)res.data)[i] = __v_thread_${eltyp}_wait(t);
 	}
 	return res;
 }')
@@ -1099,7 +1105,7 @@ pub fn (mut g Gen) write_typedef_types() {
 			.array {
 				info := typ.info as ast.Array
 				elem_sym := g.table.get_type_symbol(info.elem_type)
-				if elem_sym.kind != .placeholder {
+				if elem_sym.kind != .placeholder && !info.elem_type.has_flag(.generic) {
 					g.type_definitions.writeln('typedef array $typ.cname;')
 				}
 			}
@@ -2165,7 +2171,11 @@ fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
 		g.writeln('\tif (${t_var}.state != 0) break;')
 		val := if node.val_var in ['', '_'] { g.new_tmp_var() } else { node.val_var }
 		val_styp := g.typ(node.val_type)
-		g.writeln('\t$val_styp $val = *($val_styp*)${t_var}.data;')
+		if node.val_is_mut {
+			g.writeln('\t$val_styp* $val = ($val_styp*)${t_var}.data;')
+		} else {
+			g.writeln('\t$val_styp $val = *($val_styp*)${t_var}.data;')
+		}
 	} else {
 		typ_str := g.table.type_to_str(node.cond_type)
 		g.error('for in: unhandled symbol `$node.cond` of type `$typ_str`', node.pos)
@@ -6339,7 +6349,8 @@ fn (mut g Gen) write_types(types []ast.TypeSymbol) {
 						}
 						type_name := g.typ(field.typ)
 						field_name := c_name(field.name)
-						g.type_definitions.writeln('\t$type_name $field_name;')
+						volatile_prefix := if field.is_volatile { 'volatile ' } else { '' }
+						g.type_definitions.writeln('\t$volatile_prefix$type_name $field_name;')
 					}
 				} else {
 					g.type_definitions.writeln('\tEMPTY_STRUCT_DECLARATION;')

@@ -113,7 +113,7 @@ fn gg_frame_fn(user_data voidptr) {
 			return
 		}
 	}
-	ctx.config.frame_fn(ctx.config.user_data)
+	ctx.config.frame_fn(ctx.user_data)
 	ctx.needs_refresh = false
 }
 
@@ -122,7 +122,7 @@ pub fn (mut ctx Context) refresh_ui() {
 	ctx.ticks = 0
 }
 
-fn gg_event_fn(ce &C.sapp_event, user_data voidptr) {
+fn gg_event_fn(ce voidptr, user_data voidptr) {
 	// e := unsafe { &sapp.Event(ce) }
 	mut e := unsafe { &Event(ce) }
 	mut g := unsafe { &Context(user_data) }
@@ -237,6 +237,7 @@ fn gg_cleanup_fn(user_data voidptr) {
 	if g.config.cleanup_fn != voidptr(0) {
 		g.config.cleanup_fn(g.config.user_data)
 	}
+	gfx.shutdown()
 }
 
 fn gg_fail_fn(msg &char, user_data voidptr) {

@@ -173,11 +173,13 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	}
 	g.enter_namespace('main')
 	// generate JS methods for interface methods
-	for _, iface_types in g.table.iface_types {
+	for iface_name, iface_types in g.table.iface_types {
+		iface := g.table.find_type(iface_name) or { panic('unreachable: interface must exist') }
 		for ty in iface_types {
 			sym := g.table.get_type_symbol(ty)
-			for method in sym.methods {
-				p_sym := g.table.get_type_symbol(method.params[0].typ)
+
+			for method in iface.methods {
+				p_sym := g.table.get_type_symbol(ty)
 				mname := g.js_name(p_sym.name) + '_' + method.name
 				g.write('${g.js_name(sym.name)}.prototype.$method.name = function(')
 				for i, param in method.params {
@@ -1702,6 +1704,10 @@ fn (mut g JsGen) gen_import_stmt(it ast.Import) {
 }
 
 fn (mut g JsGen) gen_interface_decl(it ast.InterfaceDecl) {
+	if it.language != .v {
+		// JS interfaces do not need codegen
+		return
+	}
 	// JS is dynamically typed, so we don't need any codegen at all
 	// We just need the JSDoc so TypeScript type checking works
 	g.doc.gen_interface(it)
@@ -1828,6 +1834,17 @@ fn (mut g JsGen) gen_struct_decl(node ast.StructDecl) {
 	for embed in node.embeds {
 		etyp := g.typ(embed.typ)
 		g.writeln('...${g.js_name(etyp)}.prototype,')
+	}
+	for iface, iface_types in g.table.iface_types {
+		if iface.starts_with('JS.') {
+			for ty in iface_types {
+				sym := g.table.get_type_symbol(ty)
+
+				if sym.name == node.name {
+					g.writeln('...${g.js_name(iface)}.prototype,')
+				}
+			}
+		}
 	}
 	fns := g.method_fn_decls[name]
 	// gen toString method
@@ -2335,7 +2352,9 @@ fn (mut g JsGen) match_expr_sumtype(node ast.MatchExpr, is_expr bool, cond_var M
 					g.write(' instanceof ')
 					g.expr(branch.exprs[sumtype_index])
 				} else if sym.kind == .interface_ {
-					g.write('.val')
+					if !sym.name.starts_with('JS.') {
+						g.write('.val')
+					}
 					if branch.exprs[sumtype_index] is ast.TypeNode {
 						g.write(' instanceof ')
 						g.expr(branch.exprs[sumtype_index])
@@ -3226,8 +3245,39 @@ fn (mut g JsGen) gen_cast_tmp(tmp string, typ_ ast.Type) {
 fn (mut g JsGen) gen_type_cast_expr(it ast.CastExpr) {
 	is_literal := ((it.expr is ast.IntegerLiteral && it.typ in ast.integer_type_idxs)
 		|| (it.expr is ast.FloatLiteral && it.typ in ast.float_type_idxs))
+	from_type_sym := g.table.get_type_symbol(it.expr_type)
+	to_type_sym := g.table.get_type_symbol(it.typ) // type to be used as cast
+	if it.typ.is_bool() && from_type_sym.name == 'JS.Boolean' {
+		g.write('new bool(')
+		g.expr(it.expr)
+		g.write(')')
+		return
+	}
+	if it.expr_type.is_bool() && to_type_sym.name == 'JS.Boolean' {
+		g.expr(it.expr)
+		g.write('.\$toJS()')
+		return
+	}
+	if (to_type_sym.is_number() && from_type_sym.name == 'JS.Number')
+		|| (to_type_sym.is_number() && from_type_sym.name == 'JS.BigInt')
+		|| (to_type_sym.is_string() && from_type_sym.name == 'JS.String') {
+		g.write('new ${to_type_sym.kind.str()}(')
+		g.expr(it.expr)
+		g.write(')')
+		return
+	}
+
+	if (from_type_sym.is_number() && to_type_sym.name == 'JS.Number')
+		|| (from_type_sym.is_number() && to_type_sym.name == 'JS.BigInt')
+		|| (from_type_sym.is_string() && to_type_sym.name == 'JS.String') {
+		g.write('${g.typ(it.typ)}(')
+		g.expr(it.expr)
+		g.write('.\$toJS())')
+		return
+	}
+
 	// Skip cast if type is the same as the parrent caster
-	tsym := g.table.get_final_type_symbol(it.typ)
+	tsym := to_type_sym
 	if tsym.kind == .sum_type {
 		g.expr(it.expr)
 		return

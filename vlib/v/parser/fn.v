@@ -38,7 +38,7 @@ pub fn (mut p Parser) call_expr(language ast.Language, mod string) ast.CallExpr 
 	if p.tok.kind == .lt {
 		// `foo<int>(10)`
 		p.expr_mod = ''
-		concrete_types = p.parse_generic_type_list()
+		concrete_types = p.parse_concrete_types()
 		concrete_list_pos = concrete_list_pos.extend(p.prev_tok.position())
 		// In case of `foo<T>()`
 		// T is unwrapped and registered in the checker.
@@ -313,7 +313,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 		}
 	}
 	// <T>
-	mut generic_names := p.parse_generic_names()
+	_, mut generic_names := p.parse_generic_types()
 	// generic names can be infer with receiver's generic names
 	if is_method && rec.typ.has_flag(.generic) {
 		sym := p.table.get_type_symbol(rec.typ)
@@ -591,6 +591,10 @@ fn (mut p Parser) fn_receiver(mut params []ast.Param, mut rec ReceiverParsingInf
 		}
 	}
 
+	if rec.language != .v {
+		p.check_for_impure_v(rec.language, rec.type_pos)
+	}
+
 	params << ast.Param{
 		pos: rec_start_pos
 		name: rec.name
@@ -602,57 +606,6 @@ fn (mut p Parser) fn_receiver(mut params []ast.Param, mut rec ReceiverParsingInf
 	p.check(.rpar)
 
 	return
-}
-
-fn (mut p Parser) parse_generic_names() []string {
-	mut param_names := []string{}
-	if p.tok.kind != .lt {
-		return param_names
-	}
-	p.check(.lt)
-	mut first_done := false
-	mut count := 0
-	for p.tok.kind !in [.gt, .eof] {
-		if first_done {
-			p.check(.comma)
-		}
-		name := p.tok.lit
-		if name.len > 0 && !name[0].is_capital() {
-			p.error('generic parameter needs to be uppercase')
-		}
-		if name.len > 1 {
-			p.error('generic parameter name needs to be exactly one char')
-		}
-		if !util.is_generic_type_name(p.tok.lit) {
-			p.error('`$p.tok.lit` is a reserved name and cannot be used for generics')
-		}
-		if name in param_names {
-			p.error('duplicated generic parameter `$name`')
-		}
-		if count > 8 {
-			p.error('cannot have more than 9 generic parameters')
-		}
-		p.check(.name)
-		param_names << name
-		if p.table.find_type_idx(name) == 0 {
-			p.table.register_type_symbol(ast.TypeSymbol{
-				name: name
-				cname: util.no_dots(name)
-				mod: p.mod
-				kind: .any
-				is_public: true
-			})
-		}
-		first_done = true
-		count++
-	}
-	p.check(.gt)
-	return param_names
-}
-
-// is_generic_name returns true if the current token is a generic name.
-fn (p Parser) is_generic_name() bool {
-	return p.tok.kind == .name && util.is_generic_type_name(p.tok.lit)
 }
 
 fn (mut p Parser) anon_fn() ast.AnonFn {
@@ -833,6 +786,10 @@ fn (mut p Parser) fn_args() ([]ast.Param, bool, bool) {
 				}
 				p.next()
 			}
+			alanguage := p.table.get_type_symbol(arg_type).language
+			if alanguage != .v {
+				p.check_for_impure_v(alanguage, pos)
+			}
 			args << ast.Param{
 				pos: pos
 				name: ''
@@ -918,6 +875,10 @@ fn (mut p Parser) fn_args() ([]ast.Param, bool, bool) {
 				typ = ast.new_type(p.table.find_or_register_array(typ)).derive(typ).set_flag(.variadic)
 			}
 			for i, arg_name in arg_names {
+				alanguage := p.table.get_type_symbol(typ).language
+				if alanguage != .v {
+					p.check_for_impure_v(alanguage, type_pos[i])
+				}
 				args << ast.Param{
 					pos: arg_pos[i]
 					name: arg_name

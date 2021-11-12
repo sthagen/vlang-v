@@ -47,7 +47,7 @@ fn (mut p Parser) struct_decl() ast.StructDecl {
 			name_pos)
 		return ast.StructDecl{}
 	}
-	generic_types := p.parse_generic_type_list()
+	generic_types, _ := p.parse_generic_types()
 	no_body := p.tok.kind != .lcbr
 	if language == .v && no_body {
 		p.error('`$p.tok.lit` lacks body')
@@ -170,6 +170,11 @@ fn (mut p Parser) struct_decl() ast.StructDecl {
 				}
 			}
 			field_start_pos := p.tok.position()
+			mut is_field_volatile := false
+			if p.tok.kind == .key_volatile {
+				p.next()
+				is_field_volatile = true
+			}
 			is_embed := ((p.tok.lit.len > 1 && p.tok.lit[0].is_capital())
 				|| p.peek_tok.kind == .dot) && language == .v && p.peek_tok.kind != .key_fn
 			is_on_top := ast_fields.len == 0 && !(is_field_mut || is_field_global)
@@ -255,6 +260,7 @@ fn (mut p Parser) struct_decl() ast.StructDecl {
 					is_pub: is_embed || is_field_pub
 					is_mut: is_embed || is_field_mut
 					is_global: is_field_global
+					is_volatile: is_field_volatile
 				}
 			}
 			// save embeds as table fields too, it will be used in generation phase
@@ -270,6 +276,7 @@ fn (mut p Parser) struct_decl() ast.StructDecl {
 				is_pub: is_embed || is_field_pub
 				is_mut: is_embed || is_field_mut
 				is_global: is_field_global
+				is_volatile: is_field_volatile
 			}
 			p.attrs = []
 		}
@@ -443,8 +450,13 @@ fn (mut p Parser) interface_decl() ast.InterfaceDecl {
 	name_pos := p.tok.position()
 	p.check_for_impure_v(language, name_pos)
 	modless_name := p.check_name()
-	interface_name := p.prepend_mod(modless_name).clone()
-	generic_types := p.parse_generic_type_list()
+	mut interface_name := ''
+	if language == .js {
+		interface_name = 'JS.' + modless_name
+	} else {
+		interface_name = p.prepend_mod(modless_name)
+	}
+	generic_types, _ := p.parse_generic_types()
 	// println('interface decl $interface_name')
 	p.check(.lcbr)
 	pre_comments := p.eat_comments()
@@ -465,6 +477,7 @@ fn (mut p Parser) interface_decl() ast.InterfaceDecl {
 			is_generic: generic_types.len > 0
 			generic_types: generic_types
 		}
+		language: language
 	)
 	if reg_idx == -1 {
 		p.error_with_pos('cannot register interface `$interface_name`, another type with this name exists',
@@ -485,8 +498,11 @@ fn (mut p Parser) interface_decl() ast.InterfaceDecl {
 	for p.tok.kind != .rcbr && p.tok.kind != .eof {
 		if p.tok.kind == .name && p.tok.lit.len > 0 && p.tok.lit[0].is_capital() {
 			iface_pos := p.tok.position()
-			iface_name := p.tok.lit
+			mut iface_name := p.tok.lit
 			iface_type := p.parse_type()
+			if iface_name == 'JS' {
+				iface_name = p.table.get_type_symbol(iface_type).name
+			}
 			comments := p.eat_comments()
 			ifaces << ast.InterfaceEmbedding{
 				name: iface_name

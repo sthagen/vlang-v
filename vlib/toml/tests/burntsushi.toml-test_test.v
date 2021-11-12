@@ -8,43 +8,18 @@ import toml
 // See also the CI toml tests
 // TODO Goal: make parsing AND value retrieval of all of https://github.com/BurntSushi/toml-test/test/ pass
 const (
-	valid_exceptions   = [
-		'table/array-table-array.toml',
-	]
+	// Kept for easier handling of future updates to the tests
+	valid_exceptions   = []string{}
 	invalid_exceptions = [
 		// Table
-		'table/rrbrace.toml',
 		'table/duplicate-table-array2.toml',
 		'table/duplicate.toml',
 		'table/array-implicit.toml',
 		'table/injection-2.toml',
-		'table/llbrace.toml',
 		'table/injection-1.toml',
 		'table/duplicate-table-array.toml',
 		// Array
 		'array/tables-1.toml',
-		//'array/missing-separator.toml',
-		'array/text-after-array-entries.toml',
-		'array/text-before-array-separator.toml',
-		// Date / Time
-		'datetime/impossible-date.toml',
-		'datetime/no-leads-with-milli.toml',
-		'datetime/no-leads.toml',
-		// Inline table
-		'inline-table/linebreak-4.toml',
-		'inline-table/linebreak-3.toml',
-		'inline-table/linebreak-1.toml',
-		'inline-table/linebreak-2.toml',
-		// Key
-		'key/duplicate.toml',
-		'key/after-table.toml',
-		'key/duplicate-keys.toml',
-		'key/after-value.toml',
-		'key/newline.toml',
-		'key/without-value-2.toml',
-		'key/no-eol.toml',
-		'key/after-array.toml',
-		'key/multiline.toml',
 	]
 )
 

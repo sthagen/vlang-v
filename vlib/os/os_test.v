@@ -841,3 +841,23 @@ fn test_expand_tilde_to_home() {
 	assert home_test == home_expansion_test
 	assert os.expand_tilde_to_home('~') == os.home_dir()
 }
+
+fn test_execute() ? {
+	print0script := os.join_path(tfolder, 'print0.v')
+	// The output of the next command contains a 0 byte in the middle.
+	// Nevertheless, the execute function *should* return a string that
+	// contains it.
+	os.write_file(print0script, 'C.printf(c"start%cMIDDLE%cfinish\nxx", 0, 0)\n') ?
+	defer {
+		os.rm(print0script) or {}
+	}
+	result := os.execute('"' + @VEXE + '" run "$print0script"')
+	hexresult := result.output.bytes().hex()
+	// println('exit_code: $result.exit_code')
+	// println('output: |$result.output|')
+	// println('output.len: $result.output.len')
+	// println('output hexresult: $hexresult')
+	assert result.exit_code == 0
+	assert hexresult.starts_with('7374617274004d4944444c450066696e697368')
+	assert hexresult.ends_with('0a7878')
+}
