@@ -979,16 +979,8 @@ fn (mut g JsGen) expr(node ast.Expr) {
 				}
 			} else {
 				g.write(node.op.str())
-
-				if node.op in [.inc, .dec] {
-					g.expr(node.right)
-					g.write('.val ')
-				} else {
-					g.write('(')
-					g.expr(node.right)
-					g.write('.valueOf()')
-					g.write(')')
-				}
+				g.expr(node.right)
+				g.write('.val ')
 			}
 		}
 		ast.RangeExpr {
@@ -2533,7 +2525,7 @@ fn (mut g JsGen) need_tmp_var_in_if(node ast.IfExpr) bool {
 
 fn (mut g JsGen) gen_if_expr(node ast.IfExpr) {
 	if node.is_comptime {
-		g.comp_if(node)
+		g.comptime_if(node)
 		return
 	}
 	// For simpe if expressions we can use C's `?:`
