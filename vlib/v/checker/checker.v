@@ -31,8 +31,8 @@ const (
 	valid_comptime_not_user_defined = all_valid_comptime_idents()
 	array_builtin_methods           = ['filter', 'clone', 'repeat', 'reverse', 'map', 'slice',
 		'sort', 'contains', 'index', 'wait', 'any', 'all', 'first', 'last', 'pop']
-	reserved_type_names             = ['bool', 'i8', 'i16', 'int', 'i64', 'byte', 'u16', 'u32',
-		'u64', 'f32', 'f64', 'string', 'rune']
+	reserved_type_names             = ['bool', 'char', 'i8', 'i16', 'int', 'i64', 'byte', 'u16',
+		'u32', 'u64', 'f32', 'f64', 'map', 'string', 'rune']
 	vroot_is_deprecated_message     = '@VROOT is deprecated, use @VMODROOT or @VEXEROOT instead'
 )
 
@@ -413,8 +413,10 @@ pub fn (mut c Checker) sum_type_decl(node ast.SumTypeDecl) {
 				variant.pos)
 		} else if sym.kind in [.placeholder, .int_literal, .float_literal] {
 			c.error('unknown type `$sym.name`', variant.pos)
-		} else if sym.kind == .interface_ {
+		} else if sym.kind == .interface_ && sym.language != .js {
 			c.error('sum type cannot hold an interface', variant.pos)
+		} else if sym.kind == .struct_ && sym.language == .js {
+			c.error('sum type cannot hold an JS struct', variant.pos)
 		}
 		if sym.name.trim_prefix(sym.mod + '.') == node.name {
 			c.error('sum type cannot hold itself', variant.pos)
@@ -555,8 +557,7 @@ pub fn (mut c Checker) interface_decl(mut node ast.InterfaceDecl) {
 			c.ensure_type_exists(method.return_type, method.return_type_pos) or { return }
 			if is_js {
 				mtyp := c.table.get_type_symbol(method.return_type)
-				if (mtyp.language != .js && !method.return_type.is_void())
-					&& !mtyp.name.starts_with('JS.') {
+				if !mtyp.is_js_compatible() {
 					c.error('method $method.name returns non JS type', method.pos)
 				}
 			}
@@ -565,10 +566,14 @@ pub fn (mut c Checker) interface_decl(mut node ast.InterfaceDecl) {
 					continue // no need to check first param
 				}
 				c.ensure_type_exists(param.typ, param.pos) or { return }
+				if param.name in checker.reserved_type_names {
+					c.error('invalid use of reserved type `$param.name` as a parameter name',
+						param.pos)
+				}
 				if is_js {
 					ptyp := c.table.get_type_symbol(param.typ)
-					if ptyp.kind != .function && ptyp.language != .js
-						&& !ptyp.name.starts_with('JS.') {
+					if !ptyp.is_js_compatible() && !(j == method.params.len - 1
+						&& method.is_variadic) {
 						c.error('method `$method.name` accepts non JS type as parameter',
 							method.pos)
 					}
@@ -594,11 +599,11 @@ pub fn (mut c Checker) interface_decl(mut node ast.InterfaceDecl) {
 			c.ensure_type_exists(field.typ, field.pos) or { return }
 			if is_js {
 				tsym := c.table.get_type_symbol(field.typ)
-				if tsym.language != .js && !tsym.name.starts_with('JS.') {
+				if !tsym.is_js_compatible() {
 					c.error('field `$field.name` uses non JS type', field.pos)
 				}
 			}
-			if field.typ == node.typ {
+			if field.typ == node.typ && node.language != .js {
 				c.error('recursive interface fields are not allowed because they cannot be initialised',
 					field.type_pos)
 			}
@@ -638,6 +643,10 @@ pub fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 			}
 		}
 		for i, field in node.fields {
+			if field.typ == ast.any_type {
+				c.error('struct field cannot be the `any` type, use generics instead',
+					field.type_pos)
+			}
 			c.ensure_type_exists(field.typ, field.type_pos) or { return }
 			if field.typ.has_flag(.generic) {
 				has_generic_types = true
@@ -765,7 +774,7 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 		c.error('cast to sum type using `${type_sym.name}($sexpr)` not `$type_sym.name{$sexpr}`',
 			node.pos)
 	}
-	if type_sym.kind == .interface_ {
+	if type_sym.kind == .interface_ && type_sym.language != .js {
 		c.error('cannot instantiate interface `$type_sym.name`', node.pos)
 	}
 	if type_sym.info is ast.Alias {
@@ -2092,6 +2101,7 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 	}
 	if has_method {
 		node.is_noreturn = method.is_noreturn
+		node.is_ctor_new = method.is_ctor_new
 		if !method.is_pub && !c.pref.is_test && method.mod != c.mod {
 			// If a private method is called outside of the module
 			// its receiver type is defined in, show an error.
@@ -2167,12 +2177,14 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 					arg.pos)
 			}
 			mut final_arg_sym := exp_arg_sym
+			mut final_arg_typ := exp_arg_typ
 			if method.is_variadic && exp_arg_sym.info is ast.Array {
-				final_arg_sym = c.table.get_type_symbol(exp_arg_sym.array_info().elem_type)
+				final_arg_typ = exp_arg_sym.array_info().elem_type
+				final_arg_sym = c.table.get_type_symbol(final_arg_typ)
 			}
 			// Handle expected interface
 			if final_arg_sym.kind == .interface_ {
-				if c.type_implements(got_arg_typ, exp_arg_typ, arg.expr.position()) {
+				if c.type_implements(got_arg_typ, final_arg_typ, arg.expr.position()) {
 					if !got_arg_typ.is_ptr() && !got_arg_typ.is_pointer() && !c.inside_unsafe {
 						got_arg_typ_sym := c.table.get_type_symbol(got_arg_typ)
 						if got_arg_typ_sym.kind != .interface_ {
@@ -2185,7 +2197,8 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 			if exp_arg_typ.has_flag(.generic) {
 				continue
 			}
-			c.check_expected_call_arg(got_arg_typ, c.unwrap_generic(exp_arg_typ), node.language) or {
+			c.check_expected_call_arg(got_arg_typ, c.unwrap_generic(exp_arg_typ), node.language,
+				arg) or {
 				// str method, allow type with str method if fn arg is string
 				// Passing an int or a string array produces a c error here
 				// Deleting this condition results in propper V error messages
@@ -2326,7 +2339,8 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 
 				if i < info.func.params.len {
 					exp_arg_typ := info.func.params[i].typ
-					c.check_expected_call_arg(targ, c.unwrap_generic(exp_arg_typ), node.language) or {
+					c.check_expected_call_arg(targ, c.unwrap_generic(exp_arg_typ), node.language,
+						arg) or {
 						if targ != ast.void_type {
 							c.error('$err.msg in argument ${i + 1} to `${left_sym.name}.$method_name`',
 								arg.pos)
@@ -2372,7 +2386,7 @@ fn (mut c Checker) map_builtin_method_call(mut node ast.CallExpr, left_type ast.
 			}
 			info := left_sym.info as ast.Map
 			arg_type := c.expr(node.args[0].expr)
-			c.check_expected_call_arg(arg_type, info.key_type, node.language) or {
+			c.check_expected_call_arg(arg_type, info.key_type, node.language, node.args[0]) or {
 				c.error('$err.msg in argument 1 to `Map.delete`', node.args[0].pos)
 			}
 		}
@@ -2694,6 +2708,7 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 	}
 
 	node.is_noreturn = func.is_noreturn
+	node.is_ctor_new = func.is_ctor_new
 	if !found_in_args {
 		if node.scope.known_var(fn_name) {
 			c.error('ambiguous call to: `$fn_name`, may refer to fn `$fn_name` or variable `$fn_name`',
@@ -2840,8 +2855,10 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 			}
 		}
 		mut final_param_sym := param_typ_sym
+		mut final_param_typ := param.typ
 		if func.is_variadic && param_typ_sym.info is ast.Array {
-			final_param_sym = c.table.get_type_symbol(param_typ_sym.array_info().elem_type)
+			final_param_typ = param_typ_sym.array_info().elem_type
+			final_param_sym = c.table.get_type_symbol(final_param_typ)
 		}
 		// NB: Casting to voidptr is used as an escape mechanism, so:
 		// 1. allow passing *explicit* voidptr (native or through cast) to functions
@@ -2858,7 +2875,7 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 		}
 		// Handle expected interface
 		if final_param_sym.kind == .interface_ {
-			if c.type_implements(typ, param.typ, call_arg.expr.position()) {
+			if c.type_implements(typ, final_param_typ, call_arg.expr.position()) {
 				if !typ.is_ptr() && !typ.is_pointer() && !c.inside_unsafe
 					&& typ_sym.kind != .interface_ {
 					c.mark_as_referenced(mut &call_arg.expr, true)
@@ -2866,7 +2883,7 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 			}
 			continue
 		}
-		c.check_expected_call_arg(typ, c.unwrap_generic(param.typ), node.language) or {
+		c.check_expected_call_arg(typ, c.unwrap_generic(param.typ), node.language, call_arg) or {
 			// str method, allow type with str method if fn arg is string
 			// Passing an int or a string array produces a c error here
 			// Deleting this condition results in propper V error messages
@@ -2898,6 +2915,15 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 					typ_is_number = typ.deref().is_number()
 				}
 				if param_is_number && typ_is_number {
+					continue
+				}
+				// Allow voidptrs for everything
+				if param.typ == ast.voidptr_type_idx || typ == ast.voidptr_type_idx {
+					continue
+				}
+				// Allow `[32]i8` as `&i8` etc
+				if (typ_sym.kind == .array_fixed && param_is_number)
+					|| (param_typ_sym.kind == .array_fixed && typ_is_number) {
 					continue
 				}
 			}
@@ -2942,7 +2968,7 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 						}
 						continue
 					}
-					c.check_expected_call_arg(utyp, unwrap_typ, node.language) or {
+					c.check_expected_call_arg(utyp, unwrap_typ, node.language, call_arg) or {
 						c.error('$err.msg in argument ${i + 1} to `$fn_name`', call_arg.pos)
 					}
 				}
@@ -3136,8 +3162,8 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 		// `none` "implements" the Error interface
 		return true
 	}
-	if typ_sym.kind == .interface_ && inter_sym.kind == .interface_ && styp != 'JS.Any'
-		&& inter_sym.name != 'JS.Any' {
+	if typ_sym.kind == .interface_ && inter_sym.kind == .interface_ && !styp.starts_with('JS.')
+		&& !inter_sym.name.starts_with('JS.') {
 		c.error('cannot implement interface `$inter_sym.name` with a different interface `$styp`',
 			pos)
 	}
@@ -4595,7 +4621,7 @@ fn (mut c Checker) stmt(node ast.Stmt) {
 		ast.BranchStmt {
 			c.branch_stmt(node)
 		}
-		ast.CompFor {
+		ast.ComptimeFor {
 			c.comptime_for(node)
 		}
 		ast.ConstDecl {
@@ -4772,7 +4798,7 @@ fn (mut c Checker) for_c_stmt(node ast.ForCStmt) {
 	c.in_for_count--
 }
 
-fn (mut c Checker) comptime_for(node ast.CompFor) {
+fn (mut c Checker) comptime_for(node ast.ComptimeFor) {
 	typ := c.unwrap_generic(node.typ)
 	sym := c.table.get_type_symbol(typ)
 	if sym.kind == .placeholder || typ.has_flag(.generic) {
@@ -5291,6 +5317,7 @@ pub fn (mut c Checker) expr(node ast.Expr) ast.Type {
 	defer {
 		c.expr_level--
 	}
+
 	// c.expr_level set to 150 so that stack overflow does not occur on windows
 	if c.expr_level > 150 {
 		c.error('checker: too many expr levels: $c.expr_level ', node.position())
@@ -6385,6 +6412,7 @@ fn (mut c Checker) match_exprs(mut node ast.MatchExpr, cond_type_sym ast.TypeSym
 				} else {
 					expr_type = expr_types[0].typ
 				}
+
 				c.smartcast(node.cond, node.cond_type, expr_type, mut branch.scope)
 			}
 		}
@@ -7587,8 +7615,14 @@ pub fn (mut c Checker) map_init(mut node ast.MapInit) ast.Type {
 			node.value_type = info.value_type
 			return node.typ
 		} else {
-			c.error('invalid empty map initilization syntax, use e.g. map[string]int{} instead',
-				node.pos)
+			if sym.kind == .struct_ {
+				c.error('`{}` can not be used for initialising empty structs any more. Use `${c.table.type_to_str(c.expected_type)}{}` instead.',
+					node.pos)
+			} else {
+				c.error('invalid empty map initialisation syntax, use e.g. map[string]int{} instead',
+					node.pos)
+			}
+			return ast.void_type
 		}
 	}
 	// `x := map[string]string` - set in parser
@@ -8212,6 +8246,10 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 		// Make sure all types are valid
 		for mut param in node.params {
 			c.ensure_type_exists(param.typ, param.type_pos) or { return }
+			if param.name in checker.reserved_type_names {
+				c.error('invalid use of reserved type `$param.name` as a parameter name',
+					param.pos)
+			}
 			if !param.typ.is_ptr() { // value parameter, i.e. on stack - check for `[heap]`
 				arg_typ_sym := c.table.get_type_symbol(param.typ)
 				if arg_typ_sym.kind == .struct_ {
@@ -8219,6 +8257,25 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 					if info.is_heap { // set auto_heap to promote value parameter
 						mut v := node.scope.find_var(param.name) or { continue }
 						v.is_auto_heap = true
+					}
+					if info.generic_types.len > 0 && !param.typ.has_flag(.generic)
+						&& info.concrete_types.len == 0 {
+						c.error('generic struct in fn declaration must specify the generic type names, e.g. Foo<T>',
+							param.type_pos)
+					}
+				} else if arg_typ_sym.kind == .interface_ {
+					info := arg_typ_sym.info as ast.Interface
+					if info.generic_types.len > 0 && !param.typ.has_flag(.generic)
+						&& info.concrete_types.len == 0 {
+						c.error('generic interface in fn declaration must specify the generic type names, e.g. Foo<T>',
+							param.type_pos)
+					}
+				} else if arg_typ_sym.kind == .sum_type {
+					info := arg_typ_sym.info as ast.SumType
+					if info.generic_types.len > 0 && !param.typ.has_flag(.generic)
+						&& info.concrete_types.len == 0 {
+						c.error('generic sumtype in fn declaration must specify the generic type names, e.g. Foo<T>',
+							param.type_pos)
 					}
 				}
 			}
@@ -8281,7 +8338,7 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 		}
 	}
 	// TODO c.pref.is_vet
-	if node.language == .v && !node.is_method && node.params.len == 0 && node.is_test {
+	if node.language == .v && !node.is_method && node.is_test {
 		if !c.pref.is_test {
 			// simple heuristic
 			for st in node.stmts {
@@ -8291,6 +8348,10 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 					break
 				}
 			}
+		}
+
+		if node.params.len != 0 {
+			c.error('test functions should take 0 parameters', node.pos)
 		}
 		if node.return_type != ast.void_type_idx
 			&& node.return_type.clear_flag(.optional) != ast.void_type_idx {
@@ -8322,15 +8383,6 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 			c.error('missing return at the end of an anonymous function', node.pos)
 		} else if !node.attrs.contains('_naked') {
 			c.error('missing return at end of function `$node.name`', node.pos)
-		}
-	}
-	if node.is_method {
-		sym := c.table.get_type_symbol(node.receiver.typ)
-		if sym.kind == .struct_ {
-			info := sym.info as ast.Struct
-			if info.is_generic && c.table.cur_fn.generic_names.len == 0 {
-				c.error('receiver must specify the generic type names, e.g. Foo<T>', node.method_type_pos)
-			}
 		}
 	}
 	node.source_file = c.file

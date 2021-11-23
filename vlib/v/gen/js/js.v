@@ -177,10 +177,14 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		iface := g.table.find_type(iface_name) or { panic('unreachable: interface must exist') }
 		for ty in iface_types {
 			sym := g.table.get_type_symbol(ty)
-
 			for method in iface.methods {
 				p_sym := g.table.get_type_symbol(ty)
-				mname := g.js_name(p_sym.name) + '_' + method.name
+
+				mname := if p_sym.has_method(method.name) {
+					g.js_name(p_sym.name) + '_' + method.name
+				} else {
+					g.js_name(iface_name) + '_' + method.name
+				}
 				g.write('${g.js_name(sym.name)}.prototype.$method.name = function(')
 				for i, param in method.params {
 					if i == 0 {
@@ -637,7 +641,7 @@ fn (mut g JsGen) stmt_no_semi(node ast.Stmt) {
 			g.write_v_source_line_info(node.pos)
 			g.gen_branch_stmt(node)
 		}
-		ast.CompFor {}
+		ast.ComptimeFor {}
 		ast.ConstDecl {
 			g.write_v_source_line_info(node.pos)
 			g.gen_const_decl(node)
@@ -740,7 +744,7 @@ fn (mut g JsGen) stmt(node ast.Stmt) {
 			g.write_v_source_line_info(node.pos)
 			g.gen_branch_stmt(node)
 		}
-		ast.CompFor {}
+		ast.ComptimeFor {}
 		ast.ConstDecl {
 			g.write_v_source_line_info(node.pos)
 			g.gen_const_decl(node)
@@ -2339,20 +2343,53 @@ fn (mut g JsGen) match_expr_sumtype(node ast.MatchExpr, is_expr bool, cond_var M
 				} else {
 					g.write('if (')
 				}
+				if sym.kind == .sum_type || sym.kind == .interface_ {
+					x := branch.exprs[sumtype_index]
+
+					if x is ast.TypeNode {
+						typ := g.unwrap_generic(x.typ)
+
+						tsym := g.table.get_type_symbol(typ)
+						if tsym.language == .js && (tsym.name == 'JS.Number'
+							|| tsym.name == 'JS.Boolean' || tsym.name == 'JS.String') {
+							g.write('typeof ')
+						}
+					}
+				}
 				g.match_cond(cond_var)
 				if sym.kind == .sum_type {
-					g.write(' instanceof ')
-					g.expr(branch.exprs[sumtype_index])
+					x := branch.exprs[sumtype_index]
+					if x is ast.TypeNode {
+						typ := g.unwrap_generic(x.typ)
+						tsym := g.table.get_type_symbol(typ)
+						if tsym.language == .js && (tsym.name == 'JS.Number'
+							|| tsym.name == 'JS.Boolean' || tsym.name == 'JS.String') {
+							g.write(' === "${tsym.name[3..].to_lower()}"')
+						} else {
+							g.write(' instanceof ')
+							g.expr(branch.exprs[sumtype_index])
+						}
+					} else {
+						g.write(' instanceof ')
+						g.expr(branch.exprs[sumtype_index])
+					}
 				} else if sym.kind == .interface_ {
 					if !sym.name.starts_with('JS.') {
 						g.write('.val')
 					}
-					if branch.exprs[sumtype_index] is ast.TypeNode {
-						g.write(' instanceof ')
-						g.expr(branch.exprs[sumtype_index])
+					x := branch.exprs[sumtype_index]
+					if x is ast.TypeNode {
+						typ := g.unwrap_generic(x.typ)
+						tsym := g.table.get_type_symbol(typ)
+						if tsym.language == .js && (tsym.name == 'Number'
+							|| tsym.name == 'Boolean' || tsym.name == 'String') {
+							g.write(' === $tsym.name.to_lower()')
+						} else {
+							g.write(' instanceof ')
+							g.expr(branch.exprs[sumtype_index])
+						}
 					} else {
 						g.write(' instanceof ')
-
 						g.write('None__')
 					}
 				}
@@ -3087,9 +3124,12 @@ fn (mut g JsGen) gen_selector_expr(it ast.SelectorExpr) {
 	}
 	g.expr(it.expr)
 	mut ltyp := it.expr_type
-	for ltyp.is_ptr() {
-		g.write('.val')
-		ltyp = ltyp.deref()
+	lsym := g.table.get_type_symbol(ltyp)
+	if lsym.kind != .interface_ && lsym.language != .js {
+		for ltyp.is_ptr() {
+			g.write('.val')
+			ltyp = ltyp.deref()
+		}
 	}
 	g.write('.$it.field_name')
 }
@@ -3154,10 +3194,33 @@ fn (mut g JsGen) gen_string_literal(it ast.StringLiteral) {
 fn (mut g JsGen) gen_struct_init(it ast.StructInit) {
 	type_sym := g.table.get_type_symbol(it.typ)
 	name := type_sym.name
-	if it.fields.len == 0 {
-		g.write('new ${g.js_name(name)}({})')
+	if it.fields.len == 0 && type_sym.kind != .interface_ {
+		if type_sym.kind == .struct_ && type_sym.language == .js {
+			g.write('{}')
+		} else {
+			g.write('new ${g.js_name(name)}({})')
+		}
+	} else if it.fields.len == 0 && type_sym.kind == .interface_ {
+		g.write('new ${g.js_name(name)}()') // JS interfaces can be instantiated with default ctor
+	} else if type_sym.kind == .interface_ && it.fields.len != 0 {
+		g.writeln('(function () {')
+		g.inc_indent()
+		g.writeln('let tmp = new ${g.js_name(name)}()')
+
+		for field in it.fields {
+			g.write('tmp.$field.name = ')
+			g.expr(field.expr)
+			g.writeln(';')
+		}
+		g.writeln('return tmp')
+		g.dec_indent()
+		g.writeln('})()')
 	} else {
-		g.writeln('new ${g.js_name(name)}({')
+		if type_sym.kind == .struct_ && type_sym.language == .js {
+			g.writeln('{')
+		} else {
+			g.writeln('new ${g.js_name(name)}({')
+		}
 		g.inc_indent()
 		for i, field in it.fields {
 			g.write('$field.name: ')
@@ -3168,7 +3231,11 @@ fn (mut g JsGen) gen_struct_init(it ast.StructInit) {
 			g.writeln('')
 		}
 		g.dec_indent()
-		g.write('})')
+		if type_sym.kind == .struct_ && type_sym.language == .js {
+			g.writeln('}')
+		} else {
+			g.writeln('})')
+		}
 	}
 }
 

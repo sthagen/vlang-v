@@ -65,7 +65,7 @@ pub type Stmt = AsmStmt
 	| AssignStmt
 	| Block
 	| BranchStmt
-	| CompFor
+	| ComptimeFor
 	| ConstDecl
 	| DeferStmt
 	| EmptyStmt
@@ -360,6 +360,7 @@ pub:
 	pos           token.Position
 	pre_comments  []Comment
 	generic_types []Type
+	attrs         []Attr
 pub mut:
 	methods []FnDecl
 	fields  []StructField
@@ -514,6 +515,7 @@ pub mut:
 	is_field           bool // temp hack, remove ASAP when re-impl CallExpr / Selector (joe)
 	is_keep_alive      bool // GC must not free arguments before fn returns
 	is_noreturn        bool // whether the function/method is marked as [noreturn]
+	is_ctor_new        bool // if JS ctor calls requires `new` before call, marked as `[use_new]` in V
 	args               []CallArg
 	expected_arg_types []Type
 	language           Language
@@ -636,6 +638,7 @@ pub:
 	mod      string
 	pos      token.Position
 	is_block bool // __global() block
+	attrs    []Attr
 pub mut:
 	fields       []GlobalField
 	end_comments []Comment
@@ -898,17 +901,17 @@ pub:
 	post_comments []Comment
 }
 
-pub enum CompForKind {
+pub enum ComptimeForKind {
 	methods
 	fields
 	attributes
 }
 
-pub struct CompFor {
+pub struct ComptimeFor {
 pub:
 	val_var string
 	stmts   []Stmt
-	kind    CompForKind
+	kind    ComptimeForKind
 	pos     token.Position
 	typ_pos token.Position
 pub mut:
@@ -1904,7 +1907,7 @@ pub fn (node Node) children() []Node {
 		}
 	} else if node is Stmt {
 		match node {
-			Block, DeferStmt, ForCStmt, ForInStmt, ForStmt, CompFor {
+			Block, DeferStmt, ForCStmt, ForInStmt, ForStmt, ComptimeFor {
 				return node.stmts.map(Node(it))
 			}
 			ExprStmt, AssertStmt {

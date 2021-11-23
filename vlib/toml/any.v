@@ -3,11 +3,11 @@
 // that can be found in the LICENSE file.
 module toml
 
-import time
-import toml.util
-
-// Pretty much all the same builtin types as the `json2.Any` type plus `time.Time`
-pub type Any = Null
+// Pretty much all the same builtin types as the `json2.Any` type plus `DateTime`,`Date`,`Time`
+pub type Any = Date
+	| DateTime
+	| Null
+	| Time
 	| []Any
 	| bool
 	| f32
@@ -16,7 +16,6 @@ pub type Any = Null
 	| int
 	| map[string]Any
 	| string
-	| time.Time
 	| u64
 
 // string returns `Any` as a string.
@@ -27,8 +26,10 @@ pub fn (a Any) string() string {
 		// ... certain call-patterns to this function will cause a memory corruption.
 		// See `tests/toml_memory_corruption_test.v` for a matching regression test.
 		string { return (a as string).clone() }
-		time.Time { return a.format_ss_micro() }
-		else { return a.str() }
+		DateTime { return a.str().clone() }
+		Date { return a.str().clone() }
+		Time { return a.str().clone() }
+		else { return a.str().clone() }
 	}
 }
 
@@ -121,48 +122,56 @@ pub fn (a Any) bool() bool {
 	}
 }
 
-// date returns `Any` as a date encoded in a `time.Time` struct.
-pub fn (a Any) date() time.Time {
-	mut time := time.Time{}
+// date returns `Any` as a `toml.Date` struct.
+pub fn (a Any) date() Date {
 	match a {
 		// string {  } // TODO
-		time.Time { return a }
-		else { return time }
+		// NOTE `.clone()` is to avoid memory corruption see `pub fn (a Any) string() string`
+		Date { return Date{a.str().clone()} }
+		else { return Date{''} }
 	}
 }
 
-// date returns `Any` as a time encoded in a `time.Time` struct.
-pub fn (a Any) time() time.Time {
-	mut time := time.Time{}
+// time returns `Any` as a `toml.Time` struct.
+pub fn (a Any) time() Time {
 	match a {
 		// string {  } // TODO
-		time.Time { return a }
-		else { return time }
+		// NOTE `.clone()` is to avoid memory corruption see `pub fn (a Any) string() string`
+		Time { return Time{a.str().clone()} }
+		else { return Time{''} }
 	}
 }
 
-// date returns `Any` as a date+time encoded in a `time.Time` struct.
-pub fn (a Any) datetime() time.Time {
-	mut time := time.Time{}
+// datetime returns `Any` as a `toml.DateTime` struct.
+pub fn (a Any) datetime() DateTime {
 	match a {
 		// string {  } // TODO
-		time.Time { return a }
-		else { return time }
+		// NOTE `.clone()` is to avoid memory corruption see `pub fn (a Any) string() string`
+		DateTime { return DateTime{a.str().clone()} }
+		else { return DateTime{''} }
+	}
+}
+
+// default_to returns `value` if `a Any` is `Null`.
+// This can be used to set default values when retrieving
+// values. E.g.: `toml_doc.value('wrong.key').default_to(123).int()`
+pub fn (a Any) default_to(value Any) Any {
+	match a {
+		Null { return value }
+		else { return a }
 	}
 }
 
 // value queries a value from the map.
 // `key` should be in "dotted" form (`a.b.c`).
 // `key` supports quoted keys like `a."b.c"`.
-pub fn (m map[string]Any) value(key string) ?Any {
-	key_split := util.parse_dotted_key(key) ?
+pub fn (m map[string]Any) value(key string) Any {
+	key_split := parse_dotted_key(key) or { return Any(Null{}) }
 	return m.value_(key_split)
 }
 
-fn (m map[string]Any) value_(key []string) ?Any {
-	value := m[key[0]] or {
-		return error(@MOD + '.' + @STRUCT + '.' + @FN + ' key "${key[0]}" does not exist')
-	}
+fn (m map[string]Any) value_(key []string) Any {
+	value := m[key[0]] or { return Any(Null{}) }
 	// `match` isn't currently very suitable for these types of sum type constructs...
 	if value is map[string]Any {
 		if key.len <= 1 {
@@ -180,40 +189,4 @@ pub fn (a []Any) as_strings() []string {
 		sa << any.string()
 	}
 	return sa
-}
-
-// to_json returns `Any` as a JSON encoded string.
-pub fn (a Any) to_json() string {
-	match a {
-		Null {
-			return 'null'
-		}
-		string {
-			return '"$a.str()"'
-		}
-		bool, f32, f64, i64, int, u64 {
-			return a.str()
-		}
-		map[string]Any {
-			mut str := '{'
-			for key, val in a {
-				str += ' "$key": $val.to_json(),'
-			}
-			str = str.trim_right(',')
-			str += ' }'
-			return str
-		}
-		[]Any {
-			mut str := '['
-			for val in a {
-				str += ' $val.to_json(),'
-			}
-			str = str.trim_right(',')
-			str += ' ]'
-			return str
-		}
-		time.Time {
-			return '"$a.format_ss_micro()"'
-		}
-	}
 }

@@ -118,11 +118,11 @@ REM By default, use tcc, since we have it prebuilt:
 :tcc_strap
 :tcc32_strap
 echo  ^> Attempting to build v_win.c with TCC
-"!tcc_exe!" -Ithirdparty/stdatomic/win -bt10 -w -o v.exe vc\v_win.c -ladvapi32
+"!tcc_exe!" -Ithirdparty/stdatomic/win -bt10 -g -w -o v.exe vc\v_win.c -ladvapi32
 if %ERRORLEVEL% NEQ 0 goto :compile_error
 
 echo  ^> Compiling with .\v.exe self
-v.exe -cc "!tcc_exe!" self
+v.exe -keepc -g -showcc -cc "!tcc_exe!" self
 if %ERRORLEVEL% NEQ 0 goto :clang_strap
 goto :success
 
@@ -137,15 +137,15 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo  ^> Attempting to build v_win.c with Clang
-clang -std=c99 -Ithirdparty/stdatomic/win -municode -w -o v.exe .\vc\v_win.c
+clang -std=c99 -Ithirdparty/stdatomic/win -municode -g -w -o v.exe .\vc\v_win.c -ladvapi32
 if %ERRORLEVEL% NEQ 0 (
-	REM In most cases, compile errors happen because the version of Clang installed is too old
+	echo In most cases, compile errors happen because the version of Clang installed is too old
 	clang --version
 	goto :compile_error
 )
 
 echo  ^> Compiling with .\v.exe self
-v.exe -cc clang self
+v.exe -keepc -g -showcc -cc clang self
 if %ERRORLEVEL% NEQ 0 goto :compile_error
 goto :success
 
@@ -158,15 +158,15 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo  ^> Attempting to build v_win.c with GCC
-gcc -std=c99 -municode -Ithirdparty/stdatomic/win -w -o v.exe .\vc\v_win.c
+gcc -std=c99 -municode -Ithirdparty/stdatomic/win -g -w -o v.exe .\vc\v_win.c -ladvapi32
 if %ERRORLEVEL% NEQ 0 (
-	REM In most cases, compile errors happen because the version of GCC installed is too old
+	echo In most cases, compile errors happen because the version of GCC installed is too old
 	gcc --version
 	goto :compile_error
 )
 
 echo  ^> Compiling with .\v.exe self
-v.exe -cc gcc self
+v.exe -keepc -g -showcc -cc gcc self
 if %ERRORLEVEL% NEQ 0 goto :compile_error
 goto :success
 
@@ -200,13 +200,13 @@ set ObjFile=.v.c.obj
 echo  ^> Attempting to build v_win.c with MSVC
 cl.exe /volatile:ms /I thirdparty\stdatomic\win /Fo%ObjFile% /O2 /MD /D_VBOOTSTRAP vc\v_win.c user32.lib kernel32.lib advapi32.lib shell32.lib /link /nologo /out:v.exe /incremental:no
 if %ERRORLEVEL% NEQ 0 (
-    REM In some cases, compile errors happen because of the MSVC compiler version
+    echo In some cases, compile errors happen because of the MSVC compiler version
     cl.exe
     goto :compile_error
 )
 
 echo  ^> Compiling with .\v.exe self
-v.exe -cc msvc self
+v.exe -keepc -g -showcc -cc msvc self
 del %ObjFile%
 if %ERRORLEVEL% NEQ 0 goto :compile_error
 goto :success
@@ -309,8 +309,9 @@ exit /b 0
 :bootstrap_tcc
 echo Bootstraping TCC...
 echo  ^> TCC not found
-if "!tcc_branch!" == "thirdparty-windows-i386" ( echo  ^> Downloading TCC32 from !tcc_url! ) else ( echo  ^> Downloading TCC64 from !tcc_url! )
+if "!tcc_branch!" == "thirdparty-windows-i386" ( echo  ^> Downloading TCC32 from !tcc_url! , branch !tcc_branch! ) else ( echo  ^> Downloading TCC64 from !tcc_url! , branch !tcc_branch! )
 git clone --depth 1 --quiet --single-branch --branch !tcc_branch! !tcc_url! "%tcc_dir%"
+git -C "%tcc_dir%" log -n3
 exit /b 0
 
 :cloning_vc

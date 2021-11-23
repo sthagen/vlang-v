@@ -1568,7 +1568,7 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 			g.const_decl(node)
 			// }
 		}
-		ast.CompFor {
+		ast.ComptimeFor {
 			g.comptime_for(node)
 		}
 		ast.DeferStmt {
@@ -1762,7 +1762,7 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 		}
 		ast.Module {
 			// g.is_builtin_mod = node.name == 'builtin'
-			g.is_builtin_mod = node.name in ['builtin', 'os', 'strconv', 'strings', 'gg']
+			g.is_builtin_mod = node.name in ['builtin', 'strconv', 'strings']
 			// g.cur_mod = node.name
 			g.cur_mod = node
 		}
@@ -2120,7 +2120,11 @@ fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
 			} else {
 				val_styp := g.typ(node.val_type)
 				if node.val_type.is_ptr() {
-					g.write('$val_styp ${c_name(node.val_var)} = &(*($val_styp)')
+					if node.val_is_mut {
+						g.write('$val_styp ${c_name(node.val_var)} = &(*($val_styp)')
+					} else {
+						g.write('$val_styp ${c_name(node.val_var)} = (*($val_styp*)')
+					}
 				} else {
 					g.write('$val_styp ${c_name(node.val_var)} = (*($val_styp*)')
 				}
@@ -4440,6 +4444,7 @@ fn (mut g Gen) match_expr(node ast.MatchExpr) {
 	} else {
 		g.match_expr_classic(node, is_expr, cond_var, tmp_var)
 	}
+	g.set_current_pos_as_last_stmt_pos()
 	g.write(cur_line)
 	if need_tmp_var {
 		g.write('$tmp_var')
@@ -5057,6 +5062,15 @@ fn (mut g Gen) ident(node ast.Ident) {
 			}
 		}
 	} else if node_info is ast.IdentFn {
+		if g.pref.translated {
+			// `p_mobjthinker` => `P_MobjThinker`
+			if f := g.table.find_fn(node.name) {
+				// TODO PERF fn lookup for each fn call in translated mode
+				if f.attrs.contains('c') {
+					name = f.attrs[0].arg
+				}
+			}
+		}
 		if g.pref.obfuscate && g.cur_mod.name == 'main' && name.starts_with('main__') {
 			key := node.name
 			g.write('/* obf identfn: $key */')
@@ -5110,6 +5124,15 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 		g.expr(node.expr)
 	} else {
 		styp := g.typ(node.typ)
+		if g.pref.translated && sym.kind == .function {
+			// TODO handle the type in fn casts, not just exprs
+			/*
+			info := sym.info as ast.FnType
+			if info.func.attrs.contains('c') {
+				// name = f.attrs[0].arg
+			}
+			*/
+		}
 		mut cast_label := ''
 		// `ast.string_type` is done for MSVC's bug
 		if sym.kind != .alias
@@ -5810,7 +5833,9 @@ fn (mut g Gen) const_decl_init_later(mod string, name string, expr ast.Expr, typ
 		}
 	} else {
 		if unwrap_option {
+			g.init.writeln('{')
 			g.init.writeln(g.expr_string_surround('\t$cname = *($styp*)', expr, '.data;'))
+			g.init.writeln('}')
 		} else {
 			g.init.writeln(g.expr_string_surround('\t$cname = ', expr, ';'))
 		}
@@ -5818,7 +5843,11 @@ fn (mut g Gen) const_decl_init_later(mod string, name string, expr ast.Expr, typ
 	if g.is_autofree {
 		sym := g.table.get_type_symbol(typ)
 		if styp.starts_with('Array_') {
-			g.cleanup.writeln('\tarray_free(&$cname);')
+			if sym.has_method_with_generic_parent('free') {
+				g.cleanup.writeln('\t${styp}_free(&$cname);')
+			} else {
+				g.cleanup.writeln('\tarray_free(&$cname);')
+			}
 		} else if styp == 'string' {
 			g.cleanup.writeln('\tstring_free(&$cname);')
 		} else if sym.kind == .map {
@@ -5831,6 +5860,10 @@ fn (mut g Gen) const_decl_init_later(mod string, name string, expr ast.Expr, typ
 
 fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 	mod := if g.pref.build_mode == .build_module && g.is_builtin_mod { 'static ' } else { '' }
+	mut attributes := ''
+	if node.attrs.contains('weak') {
+		attributes += 'VWEAK '
+	}
 	for field in node.fields {
 		if g.pref.skip_unused {
 			if field.name !in g.table.used_globals {
@@ -5842,7 +5875,7 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 		}
 		styp := g.typ(field.typ)
 		if field.has_expr {
-			g.definitions.write_string('$mod$styp $field.name')
+			g.definitions.write_string('$mod$styp $attributes $field.name')
 			if field.expr.is_literal() {
 				g.definitions.writeln(' = ${g.expr_string(field.expr)}; // global')
 			} else {
@@ -5852,9 +5885,9 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 		} else {
 			default_initializer := g.type_default(field.typ)
 			if default_initializer == '{0}' {
-				g.definitions.writeln('$mod$styp $field.name = {0}; // global')
+				g.definitions.writeln('$mod$styp $attributes $field.name = {0}; // global')
 			} else {
-				g.definitions.writeln('$mod$styp $field.name; // global')
+				g.definitions.writeln('$mod$styp $attributes $field.name; // global')
 				if field.name !in ['as_cast_type_indexes', 'g_memory_block'] {
 					g.global_init.writeln('\t$field.name = *($styp*)&(($styp[]){${g.type_default(field.typ)}}[0]); // global')
 				}
@@ -6223,7 +6256,7 @@ fn (mut g Gen) write_init_function() {
 	g.writeln('\tvinit_string_literals();')
 	//
 	for mod_name in g.table.modules {
-		g.writeln('\t// Initializations for module $mod_name :')
+		g.writeln('\t{ // Initializations for module $mod_name :')
 		g.write(g.inits[mod_name].str())
 		g.write(g.global_inits[mod_name].str())
 		init_fn_name := '${mod_name}.init'
@@ -6234,6 +6267,7 @@ fn (mut g Gen) write_init_function() {
 				g.writeln('\t${init_fn_c_name}();')
 			}
 		}
+		g.writeln('\t}')
 	}
 	g.writeln('}')
 	if g.pref.printfn_list.len > 0 && '_vinit' in g.pref.printfn_list {

@@ -110,8 +110,9 @@ pub fn (mut p Preferences) fill_with_defaults() {
 	}
 	// Prepare the cache manager. All options that can affect the generated cached .c files
 	// should go into res.cache_manager.vopts, which is used as a salt for the cache hash.
+	vhash := @VHASH
 	p.cache_manager = vcache.new_cache_manager([
-		@VHASH,
+		vhash,
 		// ensure that different v versions use separate build artefacts
 		'$p.backend | $p.os | $p.ccompiler | $p.is_prod | $p.sanitize',
 		p.cflags.trim_space(),
@@ -216,7 +217,19 @@ pub fn vexe_path() string {
 	if vexe != '' {
 		return vexe
 	}
-	real_vexe_path := os.real_path(os.executable())
+	myexe := os.executable()
+	mut real_vexe_path := myexe
+	for {
+		$if tinyc {
+			$if x32 {
+				// TODO: investigate why exactly tcc32 segfaults on os.real_path here,
+				// and remove this cludge.
+				break
+			}
+		}
+		real_vexe_path = os.real_path(real_vexe_path)
+		break
+	}
 	os.setenv('VEXE', real_vexe_path, true)
 	return real_vexe_path
 }

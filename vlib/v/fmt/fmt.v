@@ -430,7 +430,7 @@ pub fn (mut f Fmt) stmt(node ast.Stmt) {
 		ast.BranchStmt {
 			f.branch_stmt(node)
 		}
-		ast.CompFor {
+		ast.ComptimeFor {
 			f.comptime_for(node)
 		}
 		ast.ConstDecl {
@@ -711,15 +711,11 @@ fn expr_is_single_line(expr ast.Expr) bool {
 
 pub fn (mut f Fmt) assert_stmt(node ast.AssertStmt) {
 	f.write('assert ')
-	if node.expr is ast.ParExpr {
-		if node.expr.expr is ast.InfixExpr {
-			infix := node.expr.expr
-			f.expr(infix)
-			f.writeln('')
-			return
-		}
+	mut expr := node.expr
+	for expr is ast.ParExpr {
+		expr = (expr as ast.ParExpr).expr
 	}
-	f.expr(node.expr)
+	f.expr(expr)
 	f.writeln('')
 }
 
@@ -762,7 +758,7 @@ pub fn (mut f Fmt) branch_stmt(node ast.BranchStmt) {
 	f.writeln(node.str())
 }
 
-pub fn (mut f Fmt) comptime_for(node ast.CompFor) {
+pub fn (mut f Fmt) comptime_for(node ast.ComptimeFor) {
 	typ := f.no_cur_mod(f.table.type_to_str_using_aliases(node.typ, f.mod2alias))
 	f.write('\$for $node.val_var in ${typ}.$node.kind.str() {')
 	f.mark_types_import_as_used(node.typ)
@@ -1002,6 +998,7 @@ pub fn (mut f Fmt) for_stmt(node ast.ForStmt) {
 }
 
 pub fn (mut f Fmt) global_decl(node ast.GlobalDecl) {
+	f.attrs(node.attrs)
 	if node.fields.len == 0 && node.pos.line_nr == node.pos.last_line {
 		f.writeln('__global ()')
 		return
@@ -1063,6 +1060,7 @@ pub fn (mut f Fmt) hash_stmt(node ast.HashStmt) {
 }
 
 pub fn (mut f Fmt) interface_decl(node ast.InterfaceDecl) {
+	f.attrs(node.attrs)
 	if node.is_pub {
 		f.write('pub ')
 	}

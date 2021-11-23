@@ -187,7 +187,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 	}
 
 	g.write_v_source_line_info(node.pos)
-	msvc_attrs := g.write_fn_attrs(node.attrs)
+	fn_attrs := g.write_fn_attrs(node.attrs)
 	// Live
 	is_livefn := node.attrs.contains('live')
 	is_livemain := g.pref.is_livemain && is_livefn
@@ -218,6 +218,22 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 	mut type_name := g.typ(node.return_type)
 
 	name = g.generic_fn_name(g.cur_concrete_types, name, true)
+
+	if g.pref.translated && node.attrs.contains('c') {
+		// This fixes unknown symbols errors when building separate .c => .v files
+		// into .o files
+		//
+		// example:
+		// [c: 'P_TryMove']
+		// fn p_trymove(thing &Mobj_t, x int, y int) bool
+		//
+		// =>
+		//
+		// bool P_TryMove(main__Mobj_t* thing, int x, int y);
+		//
+		// In fn_call every time `p_trymove` is called, `P_TryMove` will be generated instead.
+		name = node.attrs[0].arg
+	}
 
 	if g.pref.obfuscate && g.cur_mod.name == 'main' && name.starts_with('main__') && !node.is_main
 		&& node.name != 'str' {
@@ -275,11 +291,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 				g.definitions.write_string('VV_LOCAL_SYMBOL ')
 			}
 		}
-		fn_header := if msvc_attrs.len > 0 {
-			'$type_name $msvc_attrs ${name}('
-		} else {
-			'$type_name ${name}('
-		}
+		fn_header := '$type_name $fn_attrs${name}('
 		g.definitions.write_string(fn_header)
 		g.write(fn_header)
 	}
@@ -410,8 +422,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 	for attr in node.attrs {
 		if attr.name == 'export' {
 			g.writeln('// export alias: $attr.arg -> $name')
-			calling_conv := if msvc_attrs.len > 0 { '$msvc_attrs ' } else { '' }
-			export_alias := '$type_name $calling_conv${attr.arg}($arg_str)'
+			export_alias := '$type_name $fn_attrs${attr.arg}($arg_str)'
 			g.definitions.writeln('VV_EXPORTED_SYMBOL $export_alias; // exported fn $node.name')
 			g.writeln('$export_alias {')
 			g.write('\treturn ${name}(')
@@ -1097,6 +1108,16 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 	} else {
 		name = c_name(name)
 	}
+	if g.pref.translated {
+		// For `[c: 'P_TryMove'] fn p_trymove( ... `
+		// every time `p_trymove` is called, `P_TryMove` must be generated instead.
+		if f := g.table.find_fn(node.name) {
+			// TODO PERF fn lookup for each fn call in translated mode
+			if f.attrs.contains('c') {
+				name = f.attrs[0].arg
+			}
+		}
+	}
 	// Obfuscate only functions in the main module for now
 	if g.pref.obfuscate && g.cur_mod.name == 'main' && name.starts_with('main__') {
 		key := node.name
@@ -1539,7 +1560,7 @@ fn (g &Gen) fileis(s string) bool {
 }
 
 fn (mut g Gen) write_fn_attrs(attrs []ast.Attr) string {
-	mut msvc_attrs := ''
+	mut fn_attrs := ''
 	for attr in attrs {
 		match attr.name {
 			'inline' {
@@ -1548,6 +1569,12 @@ fn (mut g Gen) write_fn_attrs(attrs []ast.Attr) string {
 			'noinline' {
 				// since these are supported by GCC, clang and MSVC, we can consider them officially supported.
 				g.write('__NOINLINE ')
+			}
+			'weak' {
+				// a `[weak]` tag tells the C compiler, that the next declaration will be weak, i.e. when linking,
+				// if there is another declaration of a symbol with the same name (a 'strong' one), it should be
+				// used instead, *without linker errors about duplicate symbols*.
+				g.write('VWEAK ')
 			}
 			'noreturn' {
 				// a `[noreturn]` tag tells the compiler, that a function
@@ -1615,7 +1642,7 @@ fn (mut g Gen) write_fn_attrs(attrs []ast.Attr) string {
 			'windows_stdcall' {
 				// windows attributes (msvc/mingw)
 				// prefixed by windows to indicate they're for advanced users only and not really supported by V.
-				msvc_attrs += '__stdcall '
+				fn_attrs += '__stdcall '
 			}
 			'console' {
 				g.force_main_console = true
@@ -1625,5 +1652,5 @@ fn (mut g Gen) write_fn_attrs(attrs []ast.Attr) string {
 			}
 		}
 	}
-	return msvc_attrs
+	return fn_attrs
 }

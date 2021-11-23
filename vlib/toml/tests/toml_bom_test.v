@@ -1,5 +1,6 @@
 import os
 import toml
+import toml.to
 import toml.ast
 
 const empty_toml_document = toml.Doc{
@@ -17,14 +18,14 @@ const (
 
 fn test_toml_with_bom() {
 	toml_doc := toml.parse(toml_text_with_utf8_bom) or { panic(err) }
-	toml_json := toml_doc.to_json()
+	toml_json := to.json(toml_doc)
 
 	title := toml_doc.value('title')
 	assert title == toml.Any('TOML Example')
 	assert title as string == 'TOML Example'
 
 	owner := toml_doc.value('owner') as map[string]toml.Any
-	any_name := owner.value('name') or { panic(err) }
+	any_name := owner.value('name')
 	assert any_name.string() == 'Tom Preston-Werner'
 
 	database := toml_doc.value('database') as map[string]toml.Any

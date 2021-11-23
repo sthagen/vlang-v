@@ -243,12 +243,9 @@ pub fn loginname() string {
 }
 
 fn init_os_args(argc int, argv &&byte) []string {
-	mut args_ := []string{}
-	// mut args := []string(make(0, argc, sizeof(string)))
-	// mut args := []string{len:argc}
+	mut args_ := []string{len: argc}
 	for i in 0 .. argc {
-		// args [i] = argv[i].vstring()
-		unsafe { args_ << (&byte(argv[i])).vstring_literal() }
+		args_[i] = unsafe { tos_clone(argv[i]) }
 	}
 	return args_
 }
@@ -483,7 +480,7 @@ pub fn is_writable_folder(folder string) ?bool {
 	if !is_dir(folder) {
 		return error('`folder` is not a folder')
 	}
-	tmp_perm_check := join_path(folder, 'XXXXXX')
+	tmp_perm_check := join_path_single(folder, 'XXXXXX')
 	defer {
 		unsafe { tmp_perm_check.free() }
 	}

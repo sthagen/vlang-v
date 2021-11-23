@@ -3,17 +3,19 @@
 // that can be found in the LICENSE file.
 module os
 
-pub const (
-	max_path_len  = 4096
-	wd_at_startup = getwd()
-)
+import strings
 
-const (
-	f_ok = 0
-	x_ok = 1
-	w_ok = 2
-	r_ok = 4
-)
+pub const max_path_len = 4096
+
+pub const wd_at_startup = getwd()
+
+const f_ok = 0
+
+const x_ok = 1
+
+const w_ok = 2
+
+const r_ok = 4
 
 pub struct Result {
 pub:
@@ -37,8 +39,9 @@ pub fn cp_all(src string, dst string, overwrite bool) ? {
 	}
 	// single file copy
 	if !is_dir(source_path) {
+		fname := file_name(source_path)
 		adjusted_path := if is_dir(dest_path) {
-			join_path(dest_path, file_name(source_path))
+			join_path_single(dest_path, fname)
 		} else {
 			dest_path
 		}
@@ -60,8 +63,8 @@ pub fn cp_all(src string, dst string, overwrite bool) ? {
 	}
 	files := ls(source_path) ?
 	for file in files {
-		sp := join_path(source_path, file)
-		dp := join_path(dest_path, file)
+		sp := join_path_single(source_path, file)
+		dp := join_path_single(dest_path, file)
 		if is_dir(sp) {
 			if !exists(dp) {
 				mkdir(dp) ?
@@ -134,8 +137,8 @@ pub fn rmdir_all(path string) ? {
 	mut ret_err := ''
 	items := ls(path) ?
 	for item in items {
-		fullpath := join_path(path, item)
-		if is_dir(fullpath) {
+		fullpath := join_path_single(path, item)
+		if is_dir(fullpath) && !is_link(fullpath) {
 			rmdir_all(fullpath) or { ret_err = err.msg }
 		} else {
 			rm(fullpath) or { ret_err = err.msg }
@@ -377,7 +380,7 @@ fn executable_fallback() string {
 	if !is_abs_path(exepath) {
 		rexepath := exepath.replace_each(['/', path_separator, r'\', path_separator])
 		if rexepath.contains(path_separator) {
-			exepath = join_path(os.wd_at_startup, exepath)
+			exepath = join_path_single(os.wd_at_startup, exepath)
 		} else {
 			// no choice but to try to walk the PATH folders :-| ...
 			foundpath := find_abs_path_of_executable(exepath) or { '' }
@@ -390,6 +393,15 @@ fn executable_fallback() string {
 	return exepath
 }
 
+pub struct ErrExecutableNotFound {
+	msg  string = 'os: failed to find executable'
+	code int
+}
+
+fn error_failed_to_find_executable() IError {
+	return IError(&ErrExecutableNotFound{})
+}
+
 // find_exe_path walks the environment PATH, just like most shell do, it returns
 // the absolute path of the executable if found
 pub fn find_abs_path_of_executable(exepath string) ?string {
@@ -400,9 +412,10 @@ pub fn find_abs_path_of_executable(exepath string) ?string {
 		return real_path(exepath)
 	}
 	mut res := ''
-	paths := getenv('PATH').split(path_delimiter)
+	path := getenv('PATH')
+	paths := path.split(path_delimiter)
 	for p in paths {
-		found_abs_path := join_path(p, exepath)
+		found_abs_path := join_path_single(p, exepath)
 		if exists(found_abs_path) && is_executable(found_abs_path) {
 			res = found_abs_path
 			break
@@ -411,7 +424,7 @@ pub fn find_abs_path_of_executable(exepath string) ?string {
 	if res.len > 0 {
 		return real_path(res)
 	}
-	return error('failed to find executable')
+	return error_failed_to_find_executable()
 }
 
 // exists_in_system_path returns `true` if `prog` exists in the system's PATH
@@ -440,14 +453,42 @@ pub fn is_abs_path(path string) bool {
 // join_path returns a path as string from input string parameter(s).
 [manualfree]
 pub fn join_path(base string, dirs ...string) string {
-	mut result := []string{cap: 256}
-	result << base.trim_right('\\/')
-	for d in dirs {
-		result << d
+	// TODO: fix freeing of `dirs` when the passed arguments are variadic,
+	// but do not free the arr, when `os.join_path(base, ...arr)` is called.
+	mut sb := strings.new_builder(base.len + dirs.len * 50)
+	defer {
+		unsafe { sb.free() }
 	}
-	res := result.join(path_separator)
-	unsafe { result.free() }
-	return res
+	sbase := base.trim_right('\\/')
+	defer {
+		unsafe { sbase.free() }
+	}
+	sb.write_string(sbase)
+	for d in dirs {
+		sb.write_string(path_separator)
+		sb.write_string(d)
+	}
+	return sb.str()
+}
+
+// join_path_single appends the `elem` after `base`, using a platform specific
+// path_separator.
+[manualfree]
+pub fn join_path_single(base string, elem string) string {
+	// TODO: deprecate this and make it `return os.join_path(base, elem)`,
+	// when freeing variadic args vs ...arr is solved in the compiler
+	mut sb := strings.new_builder(base.len + elem.len + 1)
+	defer {
+		unsafe { sb.free() }
+	}
+	sbase := base.trim_right('\\/')
+	defer {
+		unsafe { sbase.free() }
+	}
+	sb.write_string(sbase)
+	sb.write_string(path_separator)
+	sb.write_string(elem)
+	return sb.str()
 }
 
 // walk_ext returns a recursive list of all files in `path` ending with `ext`.
@@ -566,7 +607,7 @@ pub fn cache_dir() string {
 			return xdg_cache_home
 		}
 	}
-	cdir := join_path(home_dir(), '.cache')
+	cdir := join_path_single(home_dir(), '.cache')
 	if !is_dir(cdir) && !is_link(cdir) {
 		mkdir(cdir) or { panic(err) }
 	}
@@ -607,7 +648,9 @@ pub fn temp_dir() string {
 }
 
 fn default_vmodules_path() string {
-	return join_path(home_dir(), '.vmodules')
+	hdir := home_dir()
+	res := join_path_single(hdir, '.vmodules')
+	return res
 }
 
 // vmodules_dir returns the path to a folder, where v stores its global modules.
@@ -621,12 +664,28 @@ pub fn vmodules_dir() string {
 
 // vmodules_paths returns a list of paths, where v looks up for modules.
 // You can customize it through setting the environment variable VMODULES
+// [manualfree]
 pub fn vmodules_paths() []string {
 	mut path := getenv('VMODULES')
 	if path == '' {
+		// unsafe { path.free() }
 		path = default_vmodules_path()
 	}
-	list := path.split(path_delimiter).map(it.trim_right(path_separator))
+	defer {
+		// unsafe { path.free() }
+	}
+	splitted := path.split(path_delimiter)
+	defer {
+		// unsafe { splitted.free() }
+	}
+	mut list := []string{cap: splitted.len}
+	for i in 0 .. splitted.len {
+		si := splitted[i]
+		trimmed := si.trim_right(path_separator)
+		list << trimmed
+		// unsafe { trimmed.free() }
+		// unsafe { si.free() }
+	}
 	return list
 }
 
@@ -645,7 +704,7 @@ pub fn resource_abs_path(path string) string {
 		unsafe { base_path.free() }
 		base_path = vresource
 	}
-	fp := join_path(base_path, path)
+	fp := join_path_single(base_path, path)
 	res := real_path(fp)
 	unsafe {
 		fp.free()

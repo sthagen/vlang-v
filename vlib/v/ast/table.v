@@ -78,6 +78,7 @@ pub:
 	is_variadic     bool
 	language        Language
 	is_pub          bool
+	is_ctor_new     bool // `[use_new] fn JS.Array.prototype.constructor()`
 	is_deprecated   bool // `[deprecated] fn abc(){}`
 	is_noreturn     bool // `[noreturn] fn abc(){}`
 	is_unsafe       bool // `[unsafe] fn abc(){}`
@@ -266,7 +267,12 @@ pub fn (t &Table) is_same_method(f &Fn, func &Fn) string {
 	for i in 0 .. f.params.len {
 		// don't check receiver for `.typ`
 		has_unexpected_type := i > 0 && f.params[i].typ != func.params[i].typ
-
+		// temporary hack for JS ifaces
+		lsym := t.get_type_symbol(f.params[i].typ)
+		rsym := t.get_type_symbol(func.params[i].typ)
+		if lsym.language == .js && rsym.language == .js {
+			return ''
+		}
 		has_unexpected_mutability := !f.params[i].is_mut && func.params[i].is_mut
 
 		if has_unexpected_type || has_unexpected_mutability {
@@ -1221,6 +1227,9 @@ pub fn (mut t Table) complete_interface_check() {
 			if idecl.fields.len > info.fields.len {
 				continue
 			}
+			if idecl.typ == 0 {
+				continue
+			}
 			// empty interface only generate type cast functions of the current module
 			if idecl.methods.len == 0 && idecl.fields.len == 0
 				&& tsym.mod != t.get_type_symbol(idecl.typ).mod {
@@ -1295,6 +1304,12 @@ pub fn (t Table) does_type_implement_interface(typ Type, inter_typ Type) bool {
 		return false
 	}
 	if mut inter_sym.info is Interface {
+		attrs := t.interfaces[inter_typ].attrs
+		for attr in attrs {
+			if attr.name == 'single_impl' {
+				return false
+			}
+		}
 		// do not check the same type more than once
 		for tt in inter_sym.info.types {
 			if tt.idx() == typ.idx() {

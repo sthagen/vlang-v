@@ -4,14 +4,39 @@
 module toml
 
 import toml.ast
-import toml.util
 import toml.input
 import toml.scanner
 import toml.parser
-import time
 
 // Null is used in sumtype checks as a "default" value when nothing else is possible.
 pub struct Null {
+}
+
+// DateTime is the representation of an RFC 3339 datetime string.
+pub struct DateTime {
+	datetime string
+}
+
+pub fn (dt DateTime) str() string {
+	return dt.datetime
+}
+
+// Date is the representation of an RFC 3339 date-only string.
+pub struct Date {
+	date string
+}
+
+pub fn (d Date) str() string {
+	return d.date
+}
+
+// Time is the representation of an RFC 3339 time-only string.
+pub struct Time {
+	time string
+}
+
+pub fn (t Time) str() string {
+	return t.time
 }
 
 // Config is used to configure the toml parser.
@@ -84,92 +109,123 @@ pub fn parse(toml string) ?Doc {
 	}
 }
 
-// to_json returns a compact json string of the complete document.
-pub fn (d Doc) to_json() string {
-	return d.ast.to_json()
+// parse_dotted_key converts `key` string to an array of strings.
+// parse_dotted_key preserves strings delimited by both `"` and `'`.
+pub fn parse_dotted_key(key string) ?[]string {
+	mut out := []string{}
+	mut buf := ''
+	mut in_string := false
+	mut delim := byte(` `)
+	for ch in key {
+		if ch in [`"`, `'`] {
+			if !in_string {
+				delim = ch
+			}
+			in_string = !in_string && ch == delim
+			if !in_string {
+				if buf != '' && buf != ' ' {
+					out << buf
+				}
+				buf = ''
+				delim = ` `
+			}
+			continue
+		}
+		buf += ch.ascii_str()
+		if !in_string && ch == `.` {
+			if buf != '' && buf != ' ' {
+				out << buf[..buf.len - 1]
+			}
+			buf = ''
+			continue
+		}
+	}
+	if buf != '' && buf != ' ' {
+		out << buf
+	}
+	if in_string {
+		return error(@FN +
+			': could not parse key, missing closing string delimiter `$delim.ascii_str()`')
+	}
+	return out
 }
 
 // to_any converts the `Doc` to toml.Any type.
 pub fn (d Doc) to_any() Any {
-	values := d.ast.table as map[string]ast.Value
-	return d.ast_to_any(values)
+	return d.ast_to_any(d.ast.table)
 }
 
 // value queries a value from the TOML document.
-// `key` should be in "dotted" form (`a.b.c`).
-// `key` supports quoted keys like `a."b.c"`.
+// `key` supports a small query syntax scheme:
+// Maps can be queried in "dotted" form e.g. `a.b.c`.
+// quoted keys are supported as `a."b.c"` or `a.'b.c'`.
+// Arrays can be queried  with `a[0].b[1].[2]`.
 pub fn (d Doc) value(key string) Any {
-	values := d.ast.table as map[string]ast.Value
-	key_split := util.parse_dotted_key(key) or { return Any(Null{}) }
-	return d.value_(values, key_split)
+	key_split := parse_dotted_key(key) or { return Any(Null{}) }
+	return d.value_(d.ast.table, key_split)
 }
 
 // value_ returns the value found at `key` in the map `values` as `Any` type.
-fn (d Doc) value_(values map[string]ast.Value, key []string) Any {
-	util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, ' getting "${key[0]}"')
-	value := values[key[0]] or {
-		return Any(Null{})
-		// TODO decide this
-		// panic(@MOD + '.' + @STRUCT + '.' + @FN + ' key "$key[0]" does not exist')
+fn (d Doc) value_(value ast.Value, key []string) Any {
+	assert key.len > 0
+	mut ast_value := ast.Value(ast.Null{})
+	mut index := -1
+	mut k := key[0]
+	if k.contains('[') {
+		index = k.all_after('[').all_before(']').int()
+		if k.starts_with('[') {
+			k = '' // k.all_after(']')
+		} else {
+			k = k.all_before('[')
+		}
+	}
+	if k == '' {
+		a := value as []ast.Value
+		ast_value = a[index] or { return Any(Null{}) }
+	}
+
+	if value is map[string]ast.Value {
+		ast_value = value[k] or { return Any(Null{}) }
+		if index > -1 {
+			a := ast_value as []ast.Value
+			ast_value = a[index] or { return Any(Null{}) }
+		}
+	}
+
+	if key.len <= 1 {
+		return d.ast_to_any(ast_value)
 	}
 	// `match` isn't currently very suitable for these types of sum type constructs...
-	if value is map[string]ast.Value {
-		if key.len <= 1 {
-			return d.ast_to_any(value)
-		}
-		m := (value as map[string]ast.Value)
-		return d.value_(m, key[1..])
+	if ast_value is map[string]ast.Value || ast_value is []ast.Value {
+		return d.value_(ast_value, key[1..])
 	}
 	return d.ast_to_any(value)
 }
 
-// ast_to_any_value converts `from` ast.Value to toml.Any value.
-fn (d Doc) ast_to_any(value ast.Value) Any {
-	// `match` isn't currently very suitable for further unwrapping sumtypes in the if's...
-	if value is ast.Date || value is ast.Time || value is ast.DateTime {
-		mut tim := time.Time{}
-		if value is ast.Date {
-			date_str := (value as ast.Date).text
-
-			tim = time.parse_rfc3339(date_str) or {
-				return Any(Null{})
-				// TODO decide this
-				// panic(@MOD + '.' + @STRUCT + '.' + @FN +
-				//	' failed converting "$date_str" to rfc3339: $err')
-			}
-		} else if value is ast.Time {
-			time_str := (value as ast.Time).text
-
-			tim = time.parse_rfc3339(time_str) or {
-				return Any(Null{})
-				// TODO decide this
-				// panic(@MOD + '.' + @STRUCT + '.' + @FN +
-				//	' failed converting "$time_str" to rfc3339: $err')
-			}
-		} else {
-			// value is ast.DateTime
-			datetime_str := (value as ast.DateTime).text
-
-			tim = time.parse_rfc3339(datetime_str) or {
-				return Any(Null{})
-				// TODO decide this
-				// panic(@MOD + '.' + @STRUCT + '.' + @FN +
-				//	' failed converting "$datetime_str" to rfc3339: $err')
-			}
-		}
-		return Any(tim)
-	}
-
+// ast_to_any converts `from` ast.Value to toml.Any value.
+pub fn (d Doc) ast_to_any(value ast.Value) Any {
 	match value {
+		ast.Date {
+			return Any(Date{value.text})
+		}
+		ast.Time {
+			return Any(Time{value.text})
+		}
+		ast.DateTime {
+			return Any(DateTime{value.text})
+		}
 		ast.Quoted {
-			return Any((value as ast.Quoted).text)
+			return Any(value.text)
 		}
 		ast.Number {
-			str := (value as ast.Number).text
-			if str.contains('.') {
-				return Any(str.f64())
+			// if value.text.contains('inf') || value.text.contains('nan') {
+			// return Any() // TODO
+			//}
+			if !value.text.starts_with('0x')
+				&& (value.text.contains('.') || value.text.to_lower().contains('e')) {
+				return Any(value.f64())
 			}
-			return Any(str.i64())
+			return Any(value.i64())
 		}
 		ast.Bool {
 			str := (value as ast.Bool).text

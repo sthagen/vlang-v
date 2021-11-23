@@ -9,9 +9,10 @@ import toml.input
 import toml.token
 import toml.util
 
-pub const digit_extras = [`_`, `.`, `x`, `o`, `b`, `e`, `E`]
-
-const end_of_text = -1
+pub const (
+	digit_extras = [`_`, `.`, `x`, `o`, `b`, `e`, `E`]
+	end_of_text  = -1
+)
 
 // Scanner contains the necessary fields for the state of the scan process.
 // the task the scanner does is also refered to as "lexing" or "tokenizing".
@@ -25,6 +26,8 @@ mut:
 	line_nr    int = 1 // current line number (y coordinate)
 	pos        int // current flat/index position in the `text` field
 	header_len int // Length, how many bytes of header was found
+	// Quirks
+	is_left_of_assign bool = true // indicates if the scanner is on the *left* side of an assignment
 }
 
 // State is a read-only copy of the scanner's internal state.
@@ -165,6 +168,7 @@ pub fn (mut s Scanner) scan() ?token.Token {
 				return s.new_token(.plus, ascii, ascii.len)
 			}
 			`=` {
+				s.is_left_of_assign = false
 				util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'identified assignment "$ascii" ($ascii.len)')
 				return s.new_token(.assign, ascii, ascii.len)
 			}
@@ -345,6 +349,7 @@ fn (mut s Scanner) ignore_line() ?string {
 fn (mut s Scanner) inc_line_number() {
 	s.col = 0
 	s.line_nr++
+	s.is_left_of_assign = true
 }
 
 // extract_key parses and returns a TOML key as a string.
@@ -516,7 +521,7 @@ fn (mut s Scanner) handle_escapes(quote byte, is_multiline bool) (string, int) {
 			&& byte(s.peek(4)).is_hex_digit() && byte(s.peek(5)).is_hex_digit() {
 			lit += s.text[s.pos + 1..s.pos + 6] //.ascii_str()
 			util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'gulp escaped unicode `$lit`')
-			return lit, 4
+			return lit, 5
 		} else if s.peek(1) == quote {
 			if (!is_multiline && s.peek(2) == `\n`)
 				|| (is_multiline && s.peek(2) == quote && s.peek(3) == quote && s.peek(4) == `\n`) {
@@ -568,7 +573,8 @@ fn (mut s Scanner) extract_number() ?string {
 			s.col += 2
 		}
 		c = s.at()
-		if !(byte(c).is_hex_digit() || c in scanner.digit_extras) {
+		if !(byte(c).is_hex_digit() || c in scanner.digit_extras)
+			|| (c == `.` && s.is_left_of_assign) {
 			break
 		}
 		s.pos++

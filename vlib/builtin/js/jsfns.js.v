@@ -9,14 +9,17 @@ module builtin
 
 pub interface JS.Object {}
 
+[single_impl]
 pub interface JS.BigInt {
 	JS.Any
 }
 
+[single_impl]
 pub interface JS.Number {
 	JS.Any
 }
 
+[single_impl]
 pub interface JS.String {
 	JS.Any
 	length JS.Number
@@ -34,8 +37,10 @@ pub interface JS.String {
 	lastIndexOf(needle JS.String) JS.Number
 }
 
+[single_impl]
 pub interface JS.Boolean {
 	JS.Any
+	length JS.Number
 }
 
 pub interface JS.Map {
@@ -51,6 +56,34 @@ pub interface JS.Map {
 #function Any(val) { return val; }
 
 pub interface JS.Any {}
+
+pub fn js_is_null(x JS.Any) bool {
+	res := false
+	#res.val = x === null
+
+	return res
+}
+
+pub fn js_is_undefined(x JS.Any) bool {
+	res := false
+	#res.val = x === undefined
+
+	return res
+}
+
+pub fn js_null() JS.Any {
+	mut obj := JS.Any{}
+	#obj = null;
+
+	return obj
+}
+
+pub fn js_undefined() JS.Any {
+	mut obj := JS.Any{}
+	#obj = undefined;
+
+	return obj
+}
 
 pub interface JS.Array {
 	JS.Any // map(fn (JS.Any) JS.Any) JS.Array
