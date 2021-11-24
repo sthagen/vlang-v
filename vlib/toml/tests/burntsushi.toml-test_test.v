@@ -1,9 +1,7 @@
 import os
 import toml
 import toml.ast
-import toml.scanner
 import x.json2
-import strconv
 
 // Instructions for developers:
 // The actual tests and data can be obtained by doing:
@@ -17,24 +15,10 @@ const (
 	invalid_exceptions     = []string{}
 
 	valid_value_exceptions = [
-		// String
-		'string/escapes.toml',
-		'string/multiline.toml',
 		// Integer
-		'integer/long.toml',
-		// Float
-		'float/inf-and-nan.toml',
-		// Comment
-		'comment/tricky.toml',
-		// Table
-		'table/array-implicit.toml',
-		'table/names.toml',
+		'integer/long.toml', // TODO awaits BUG fix with strconv.parse_int('-9223372036854775808')
 		// Date-time
 		'datetime/milliseconds.toml',
-		// Inline-table
-		'inline-table/multiline.toml',
-		// Key
-		'key/escapes.toml',
 	]
 
 	jq                     = os.find_abs_path_of_executable('jq') or { '' }
