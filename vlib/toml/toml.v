@@ -134,7 +134,10 @@ pub fn parse_dotted_key(key string) ?[]string {
 		buf += ch.ascii_str()
 		if !in_string && ch == `.` {
 			if buf != '' && buf != ' ' {
-				out << buf[..buf.len - 1]
+				buf = buf[..buf.len - 1]
+				if buf != '' && buf != ' ' {
+					out << buf
+				}
 			}
 			buf = ''
 			continue
@@ -150,16 +153,31 @@ pub fn parse_dotted_key(key string) ?[]string {
 	return out
 }
 
+// parse_array_key converts `key` string to a key and index part.
+fn parse_array_key(key string) (string, int) {
+	mut index := -1
+	mut k := key
+	if k.contains('[') {
+		index = k.all_after('[').all_before(']').int()
+		if k.starts_with('[') {
+			k = '' // k.all_after(']')
+		} else {
+			k = k.all_before('[')
+		}
+	}
+	return k, index
+}
+
 // to_any converts the `Doc` to toml.Any type.
 pub fn (d Doc) to_any() Any {
-	return d.ast_to_any(d.ast.table)
+	return ast_to_any(d.ast.table)
 }
 
 // value queries a value from the TOML document.
 // `key` supports a small query syntax scheme:
 // Maps can be queried in "dotted" form e.g. `a.b.c`.
 // quoted keys are supported as `a."b.c"` or `a.'b.c'`.
-// Arrays can be queried  with `a[0].b[1].[2]`.
+// Arrays can be queried with `a[0].b[1].[2]`.
 pub fn (d Doc) value(key string) Any {
 	key_split := parse_dotted_key(key) or { return Any(Null{}) }
 	return d.value_(d.ast.table, key_split)
@@ -169,16 +187,8 @@ pub fn (d Doc) value(key string) Any {
 fn (d Doc) value_(value ast.Value, key []string) Any {
 	assert key.len > 0
 	mut ast_value := ast.Value(ast.Null{})
-	mut index := -1
-	mut k := key[0]
-	if k.contains('[') {
-		index = k.all_after('[').all_before(']').int()
-		if k.starts_with('[') {
-			k = '' // k.all_after(']')
-		} else {
-			k = k.all_before('[')
-		}
-	}
+	k, index := parse_array_key(key[0])
+
 	if k == '' {
 		a := value as []ast.Value
 		ast_value = a[index] or { return Any(Null{}) }
@@ -193,17 +203,20 @@ fn (d Doc) value_(value ast.Value, key []string) Any {
 	}
 
 	if key.len <= 1 {
-		return d.ast_to_any(ast_value)
+		return ast_to_any(ast_value)
 	}
-	// `match` isn't currently very suitable for these types of sum type constructs...
-	if ast_value is map[string]ast.Value || ast_value is []ast.Value {
-		return d.value_(ast_value, key[1..])
+	match ast_value {
+		map[string]ast.Value, []ast.Value {
+			return d.value_(ast_value, key[1..])
+		}
+		else {
+			return ast_to_any(value)
+		}
 	}
-	return d.ast_to_any(value)
 }
 
 // ast_to_any converts `from` ast.Value to toml.Any value.
-pub fn (d Doc) ast_to_any(value ast.Value) Any {
+pub fn ast_to_any(value ast.Value) Any {
 	match value {
 		ast.Date {
 			return Any(Date{value.text})
@@ -218,11 +231,22 @@ pub fn (d Doc) ast_to_any(value ast.Value) Any {
 			return Any(value.text)
 		}
 		ast.Number {
-			// if value.text.contains('inf') || value.text.contains('nan') {
-			// return Any() // TODO
-			//}
-			if !value.text.starts_with('0x')
-				&& (value.text.contains('.') || value.text.to_lower().contains('e')) {
+			val_text := value.text
+			if val_text == 'inf' || val_text == '+inf' || val_text == '-inf' {
+				// NOTE values taken from strconv
+				if !val_text.starts_with('-') {
+					// strconv.double_plus_infinity
+					return Any(u64(0x7FF0000000000000))
+				} else {
+					// strconv.double_minus_infinity
+					return Any(u64(0xFFF0000000000000))
+				}
+			}
+			if val_text == 'nan' || val_text == '+nan' || val_text == '-nan' {
+				return Any('nan')
+			}
+			if !val_text.starts_with('0x')
+				&& (val_text.contains('.') || val_text.to_lower().contains('e')) {
 				return Any(value.f64())
 			}
 			return Any(value.i64())
@@ -238,7 +262,7 @@ pub fn (d Doc) ast_to_any(value ast.Value) Any {
 			m := (value as map[string]ast.Value)
 			mut am := map[string]Any{}
 			for k, v in m {
-				am[k] = d.ast_to_any(v)
+				am[k] = ast_to_any(v)
 			}
 			return am
 			// return d.get_map_value(m, key_split[1..].join('.'))
@@ -247,7 +271,7 @@ pub fn (d Doc) ast_to_any(value ast.Value) Any {
 			a := (value as []ast.Value)
 			mut aa := []Any{}
 			for val in a {
-				aa << d.ast_to_any(val)
+				aa << ast_to_any(val)
 			}
 			return aa
 		}

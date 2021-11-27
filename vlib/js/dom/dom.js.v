@@ -1,4 +1,4 @@
-module jsdom
+module dom
 
 pub struct CanvasRenderingContext2DSettings {
 pub mut:
@@ -180,89 +180,6 @@ pub interface JS.EventTarget {
 	removeEventListener(event JS.String, cb EventCallback, options JS.EventListenerOptions)
 }
 
-// Event is an event which takes place in the DOM.
-pub interface JS.Event {
-	JS.EventTarget
-	bubbles JS.Boolean
-	cancelable JS.Boolean
-	composed JS.Boolean
-	currentTarget JS.EventTarget
-	defaultPrevented JS.Boolean
-	eventPhase JS.Number
-	isTrusted JS.Boolean
-	srcElement JS.EventTarget
-	timeStamp JS.DOMHighResTimeStamp // composedPath returns the invocation target objects of event's path.
-	composedPath() JS.Array
-	initEvent(typ JS.String, bubbles JS.Boolean, cancelable JS.Boolean)
-	preventDefault()
-	stopImmediatePropagation()
-	stopPropagation()
-mut:
-	returnValue JS.Boolean
-}
-
-pub fn event_type(ev JS.Event) string {
-	res := ''
-	#res.str = ev.type;
-
-	return res
-}
-
-pub fn create_event(typ string, bubbles bool, cancelable bool, composed bool) JS.Event {
-	mut ev := JS.Event(voidptr(0))
-	#ev = new Event(typ.str,bubbles.val,cancelable.val,composed.val);
-
-	return ev
-}
-
-pub interface JS.UIEvent {
-	JS.Event
-	detail JS.Number
-	view JS.Any
-}
-
-[use_new]
-pub fn JS.UIEvent.prototype.constructor(typ JS.String, dict JS.UIEventDict) JS.UIEvent
-
-pub struct JS.EventInit {
-	bubbles    JS.Boolean
-	cancelable JS.Boolean
-	composed   JS.Boolean
-}
-
-pub struct JS.UIEventInitDict {
-	bubbles    JS.Boolean
-	cancelable JS.Boolean
-	composed   JS.Boolean
-	detail     JS.Number
-	view       JS.Any
-	which      JS.Number
-}
-
-pub interface JS.MouseEvent {
-	JS.UIEvent
-	altKey JS.Boolean
-	button JS.Number
-	buttons JS.Number
-	clientX JS.Number
-	clientY JS.Number
-	ctrlKey JS.Number
-	metaKey JS.Number
-	movementX JS.Number
-	movementY JS.Number
-	offsetX JS.Number
-	offsetY JS.Number
-	pageX JS.Number
-	pageY JS.Number
-	relatedTarget JS.Any
-	screenX JS.Number
-	screenY JS.Number
-	shiftKey JS.Boolean
-	x JS.Number
-	y JS.Number
-	getModifierState(keyArg JS.String) JS.Boolean
-}
-
 pub interface JS.Node {
 	JS.EventTarget
 	baseURI JS.String
@@ -309,6 +226,8 @@ pub interface JS.ParentNode {
 	children JS.HTMLCollection
 }
 
+pub type WindowProxy = JS.Window
+
 pub interface JS.Document {
 	JS.Node
 	all JS.HTMLAllCollection
@@ -331,6 +250,27 @@ pub interface JS.Document {
 	embeds JS.HTMLCollection
 	forms JS.HTMLCollection
 	getElementById(id JS.String) ?JS.HTMLElement
+	adoptNode(node JS.Node) JS.Node
+	close()
+	createAttribute(name JS.String) JS.Attr
+	createAttributeNS(namespace JS.String, qualifiedName JS.String) JS.Attr
+	createCDATASection(data JS.String) JS.CDATASection
+	createComment(data JS.String) JS.Comment
+	createDocumentFragment() JS.DocumentFragment
+	createElement(tagName JS.String) JS.HTMLElement
+	createElementNS(namespaceURI JS.String, qualifiedName JS.String) JS.Element
+	createEvent(event JS.String) JS.Event
+	createTextNode(data JS.String) JS.Text
+	elementFromPoint(x JS.Number, y JS.Number) ?JS.Element
+	elementsFromPoint(x JS.Number, y JS.Number) JS.Array
+	execCommand(commandId JS.String, showUI JS.Boolean, value JS.String) JS.Boolean
+	hasFocus() JS.Boolean
+	open(url JS.String, name JS.String, features JS.String) ?WindowProxy
+	queryCommandEnabled(commandId JS.String) JS.Boolean
+	queryCommandIndeterm(commandId JS.String) JS.Boolean
+	queryCommandState(commandId JS.String) JS.String
+	write(text ...JS.Any)
+	writeln(text ...JS.Any)
 mut:
 	bgColor JS.String
 	fgColor JS.String
@@ -339,6 +279,7 @@ mut:
 	domain JS.String
 	designMode JS.String
 	dir JS.String
+	vlinkColor JS.String
 }
 
 pub fn document_url(doc JS.Document) JS.String {
@@ -346,22 +287,6 @@ pub fn document_url(doc JS.Document) JS.String {
 	#url = doc.URL;
 
 	return url
-}
-
-pub interface JS.PointerEvent {
-	JS.MouseEvent
-	height JS.Number
-	isPrimary JS.Boolean
-	pointerId JS.Number
-	pointerType JS.String
-	pressure JS.Number
-	tangentialPressure JS.Number
-	tiltX JS.Number
-	tiltY JS.Number
-	twist JS.Number
-	width JS.Number
-	getCoalescedEvents() JS.Array
-	getPredictedEvents() JS.Array
 }
 
 pub interface JS.Element {
@@ -420,7 +345,7 @@ pub fn window() JS.Window {
 }
 
 fn init() {
-	#jsdom__document = document;
+	#js__dom__document = document;
 }
 
 pub type EventCallback = fn (JS.Event)
@@ -748,6 +673,37 @@ pub interface JS.WebGLRenderingContext {
 	getProgramInfoLog(program JS.WebGLProgram) JS.String
 	getShaderInfoLog(shader JS.WebGLShader) JS.String
 	viewport(x JS.Number, y JS.Number, width JS.Number, height JS.Number)
+	scissor(x JS.Number, y JS.Number, width JS.Number, height JS.Number)
+	stencilFunc(func JS.Number, ref JS.Number, mask JS.Number)
+	stencilFuncSeparate(face JS.Number, func JS.Number, ref JS.Number, mask JS.Number)
+	stencilMask(mask JS.Number)
+	stencilMaskSeparate(face JS.Number, mask JS.Number)
+	stencilOp(fail JS.Number, zfail JS.Number, zpass JS.Number)
+	stencilOpSeparate(face JS.Number, fail JS.Number, zfail JS.Number, zpass JS.Number)
+	texParameterf(target JS.Number, pname JS.Number, param JS.Number)
+	texParameteri(target JS.Number, pname JS.Number, param JS.Number)
+	uniform1f(location JS.WebGLUniformLocation, x JS.Number)
+	uniform1i(location JS.WebGLUniformLocation, x JS.Number)
+	uniform2f(location JS.WebGLUniformLocation, x JS.Number, y JS.Number)
+	uniform2i(location JS.WebGLUniformLocation, x JS.Number, y JS.Number)
+	uniform3f(location JS.WebGLUniformLocation, x JS.Number, y JS.Number, z JS.Number)
+	uniform3i(location JS.WebGLUniformLocation, x JS.Number, y JS.Number, z JS.Number)
+	uniform4f(location JS.WebGLUniformLocation, x JS.Number, y JS.Number, z JS.Number, w JS.Number)
+	uniform4i(location JS.WebGLUniformLocation, x JS.Number, y JS.Number, z JS.Number, w JS.Number)
+	validateProgram(program JS.WebGLProgram)
+	vertexAttrib1f(index JS.Number, x JS.Number)
+	vertexAttrib1fv(index JS.Number, values JS.Array)
+	vertexAttrib2f(index JS.Number, x JS.Number, y JS.Number)
+	vertexAttrib2fv(index JS.Number, x JS.Number, y JS.Number, values JS.Array)
+	vertexAttrib3f(index JS.Number, x JS.Number, y JS.Number, z JS.Number)
+	vertexAttrib3fv(index JS.Number, x JS.Number, y JS.Number, z JS.Number, values JS.Array)
+	vertexAttrib4f(index JS.Number, x JS.Number, y JS.Number, z JS.Number, w JS.Number)
+	vertexAttrib4fv(index JS.Number, x JS.Number, y JS.Number, z JS.Number, w JS.Number, values JS.Array)
+	bufferSubData(target JS.Number, offset JS.Number, data JS.TypedArray)
+	compressedTexImage2D(target JS.Number, level JS.Number, internalformat JS.Number, width JS.Number, height JS.Number, border JS.Number, data JS.TypedArray)
+	compressedTexSubImage2D(target JS.Number, level JS.Number, xoffset JS.Number, yoffset JS.Number, width JS.Number, height JS.Number, format JS.Number, data JS.TypedArray)
+	readPixels(x JS.Number, y JS.Number, width JS.Number, height JS.Number, format JS.Number, typ JS.Number, border JS.Number, pixels JS.TypedArray)
+	texImage2D(target JS.Number, level JS.Number, internalformat JS.Number, format JS.Number, source JS.Node)
 }
 
 pub interface JS.WebGL2RenderingContext {
@@ -843,4 +799,181 @@ pub fn gl_depth_test() JS.Number {
 	#num = WebGLRenderingContext.DEPTH_TEST;
 
 	return num
+}
+
+// Event is an event which takes place in the DOM.
+pub interface JS.Event {
+	JS.EventTarget
+	bubbles JS.Boolean
+	cancelable JS.Boolean
+	composed JS.Boolean
+	currentTarget JS.EventTarget
+	defaultPrevented JS.Boolean
+	eventPhase JS.Number
+	isTrusted JS.Boolean
+	srcElement JS.EventTarget
+	timeStamp JS.DOMHighResTimeStamp // composedPath returns the invocation target objects of event's path.
+	composedPath() JS.Array
+	initEvent(typ JS.String, bubbles JS.Boolean, cancelable JS.Boolean)
+	preventDefault()
+	stopImmediatePropagation()
+	stopPropagation()
+mut:
+	returnValue JS.Boolean
+}
+
+pub fn event_type(ev JS.Event) string {
+	res := ''
+	#res.str = ev.type;
+
+	return res
+}
+
+pub fn create_event(typ string, bubbles bool, cancelable bool, composed bool) JS.Event {
+	mut ev := JS.Event(voidptr(0))
+	#ev = new Event(typ.str,bubbles.val,cancelable.val,composed.val);
+
+	return ev
+}
+
+pub interface JS.ErrorEvent {
+	JS.Event
+	colno JS.Number
+	error JS.Number
+	filename JS.Number
+	lineno JS.Number
+	message JS.String
+}
+
+[use_new]
+pub fn JS.ErrorEvent.prototype.constructor(typ JS.String) JS.ErrorEvent
+
+pub interface JS.UIEvent {
+	JS.Event
+	detail JS.Number
+	view JS.Any
+}
+
+[use_new]
+pub fn JS.UIEvent.prototype.constructor(typ JS.String, dict JS.UIEventDict) JS.UIEvent
+
+pub struct JS.EventInit {
+	bubbles    JS.Boolean
+	cancelable JS.Boolean
+	composed   JS.Boolean
+}
+
+pub struct JS.UIEventInitDict {
+	bubbles    JS.Boolean
+	cancelable JS.Boolean
+	composed   JS.Boolean
+	detail     JS.Number
+	view       JS.Any
+	which      JS.Number
+}
+
+pub interface JS.MouseEvent {
+	JS.UIEvent
+	altKey JS.Boolean
+	button JS.Number
+	buttons JS.Number
+	clientX JS.Number
+	clientY JS.Number
+	ctrlKey JS.Number
+	metaKey JS.Number
+	movementX JS.Number
+	movementY JS.Number
+	offsetX JS.Number
+	offsetY JS.Number
+	pageX JS.Number
+	pageY JS.Number
+	relatedTarget JS.Any
+	screenX JS.Number
+	screenY JS.Number
+	shiftKey JS.Boolean
+	x JS.Number
+	y JS.Number
+	getModifierState(keyArg JS.String) JS.Boolean
+}
+
+pub interface JS.PointerEvent {
+	JS.MouseEvent
+	height JS.Number
+	isPrimary JS.Boolean
+	pointerId JS.Number
+	pointerType JS.String
+	pressure JS.Number
+	tangentialPressure JS.Number
+	tiltX JS.Number
+	tiltY JS.Number
+	twist JS.Number
+	width JS.Number
+	getCoalescedEvents() JS.Array
+	getPredictedEvents() JS.Array
+}
+
+pub interface JS.Gamepad {
+	axes JS.Array // Array<number>
+	buttons JS.Array // Array<GamepadButton>
+	connected JS.Boolean
+	hapticActuators JS.Array // Array<GamepadHapticActuator>
+	id JS.String
+	index JS.Number
+	mapping JS.String
+	timestamp JS.Number
+}
+
+[single_impl]
+pub interface JS.GamepadButton {
+	pressed JS.Boolean
+	touched JS.Boolean
+	value JS.Number
+}
+
+[single_impl]
+pub interface JS.GamepadHapticActuator {
+}
+
+pub interface JS.GamepadEvent {
+	JS.Event
+	gamepad JS.Gamepad
+}
+
+pub interface JS.HashChangeEvent {
+	JS.Event
+	newURL JS.String
+	oldURL JS.String
+}
+
+pub interface JS.MessageEvent {
+	JS.Event
+	data JS.Any
+	lastEventId JS.String
+	origin JS.String
+	ports JS.Array
+	source JS.Any
+}
+
+pub interface JS.MessagePort {
+	JS.EventTarget
+	close()
+	portMessage(message JS.Any, transfer JS.Array)
+	start()
+}
+
+pub interface JS.PageTransitionEvent {
+	JS.Event
+	persisted JS.Boolean
+}
+
+pub interface JS.PopStateEvent {
+	JS.Event
+	state JS.Any
+}
+
+pub interface JS.ProgressEvent {
+	lenghtComputable JS.Boolean
+	loaded JS.Number
+	target JS.Any
+	total JS.Number
 }
