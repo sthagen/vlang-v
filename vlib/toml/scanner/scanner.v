@@ -93,22 +93,29 @@ pub fn (mut s Scanner) scan() ?token.Token {
 		ascii := byte_c.ascii_str()
 		util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'current char "$ascii"')
 
-		is_sign := byte_c in [`+`, `-`]
-		is_signed_number := is_sign && byte(s.at()).is_digit() && !byte(s.peek(-1)).is_digit()
+		if byte_c == byte(0x0) {
+			s.reset()
+			return error(@MOD + '.' + @STRUCT + '.' + @FN +
+				' NULL control character `$c.hex()` is not allowed at ($s.line_nr,$s.col) "$ascii" near ...${s.excerpt(s.pos, 5)}...')
+		}
+
+		is_sign := c == `+` || c == `-`
 
 		// (+/-)nan & (+/-)inf
-		is_nan := byte_c == `n` && s.at() == `a` && s.peek(1) == `n` && s.peek(2) == `\n`
-		is_inf := byte_c == `i` && s.at() == `n` && s.peek(1) == `f` && s.peek(2) == `\n`
-		is_signed_nan := is_sign && s.at() == `n` && s.peek(1) == `a` && s.peek(2) == `n`
-			&& s.peek(3) == `\n`
-		is_signed_inf := is_sign && s.at() == `i` && s.peek(1) == `n` && s.peek(2) == `f`
-			&& s.peek(3) == `\n`
-		if is_nan || is_inf || is_signed_nan || is_signed_inf {
+		peek_1 := s.peek(1)
+		peek_2 := s.peek(2)
+		is_nan := c == `n` && s.at() == `a` && peek_1 == `n`
+		is_inf := !is_nan && c == `i` && s.at() == `n` && peek_1 == `f`
+		is_signed_nan := is_sign && s.at() == `n` && peek_1 == `a` && peek_2 == `n`
+		is_signed_inf := !is_signed_nan && is_sign && s.at() == `i` && peek_1 == `n`
+			&& peek_2 == `f`
+		if !s.is_left_of_assign && (is_nan || is_inf || is_signed_nan || is_signed_inf) {
 			num := s.extract_nan_or_inf_number() ?
 			util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'identified a special number "$num" ($num.len)')
 			return s.new_token(.number, num, num.len)
 		}
 
+		is_signed_number := is_sign && byte(s.at()).is_digit() && !byte(s.peek(-1)).is_digit()
 		is_digit := byte_c.is_digit()
 		if is_digit || is_signed_number {
 			num := s.extract_number() ?
@@ -118,7 +125,7 @@ pub fn (mut s Scanner) scan() ?token.Token {
 
 		if util.is_key_char(byte_c) {
 			key := s.extract_key()
-			if key.to_lower() in ['true', 'false'] {
+			if !s.is_left_of_assign && (key == 'true' || key == 'false') {
 				util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'identified a boolean "$key" ($key.len)')
 				return s.new_token(.boolean, key, key.len)
 			}
@@ -338,7 +345,7 @@ fn (mut s Scanner) ignore_line() ?string {
 		util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'skipping "${byte(c).ascii_str()} / $c"')
 		if s.at_crlf() {
 			util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'letting `\\r\\n` slip through')
-			return s.text[start..s.pos]
+			return s.text[start..s.pos + 1]
 		}
 	}
 	return s.text[start..s.pos]

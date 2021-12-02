@@ -48,9 +48,7 @@ fn (c Checker) visit(value &ast.Value) ? {
 		ast.Time {
 			c.check_time(value) ?
 		}
-		else {
-			// TODO add more checks to make BurntSushi/toml-test invalid TOML pass
-		}
+		else {}
 	}
 }
 
@@ -118,8 +116,7 @@ fn (c Checker) check_number(num ast.Number) ? {
 			return error(@MOD + '.' + @STRUCT + '.' + @FN +
 				' numbers like "$lit" (hex, octal and binary) can not start with `$ascii` in ...${c.excerpt(num.pos)}...')
 		}
-		// is_first_digit = byte(lit_sans_sign[0]).is_digit()
-		if lit.len > 1 && lit_sans_sign.starts_with('0') {
+		if lit.len > 1 && lit_sans_sign.starts_with('0') && !lit_sans_sign.starts_with('0.') {
 			ascii = byte(lit_sans_sign[0]).ascii_str()
 			return error(@MOD + '.' + @STRUCT + '.' + @FN +
 				' numbers like "$lit" can not start with `$ascii` in ...${c.excerpt(num.pos)}...')
@@ -212,6 +209,14 @@ fn (c Checker) check_number(num ast.Number) ? {
 		if lit_lower_case.contains('e.') || lit.contains('.e') {
 			return error(@MOD + '.' + @STRUCT + '.' + @FN +
 				' numbers like "$lit" (float) can not have decimal points on either side of the exponent notation in ...${c.excerpt(num.pos)}...')
+		}
+		// Check if it contains other chars than the allowed
+		for r in lit {
+			if r !in [`0`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `.`, `e`, `E`, `-`, `+`,
+				`_`] {
+				return error(@MOD + '.' + @STRUCT + '.' + @FN +
+					' numbers like "$lit" (float) can not contain `${byte(r).ascii_str()}` in ...${c.excerpt(num.pos)}...')
+			}
 		}
 	} else {
 		if lit.len > 1 && lit.starts_with('0') && lit[1] !in [`b`, `o`, `x`] {
@@ -357,7 +362,23 @@ fn (c Checker) check_date(date ast.Date) ? {
 fn (c Checker) check_time(t ast.Time) ? {
 	lit := t.text
 	// Split any offsets from the time
-	parts := lit.split('-')
+	mut offset_splitter := if lit.contains('+') { '+' } else { '-' }
+	parts := lit.split(offset_splitter)
+	mut hhmmss := parts[0].all_before('.')
+	// Check for 2 digits in all fields
+	mut check_length := 8
+	if hhmmss.to_upper().ends_with('Z') {
+		check_length++
+	}
+	if hhmmss.len != check_length {
+		starts_with_zero := hhmmss.starts_with('0')
+		if !starts_with_zero {
+			return error(@MOD + '.' + @STRUCT + '.' + @FN +
+				' "$lit" must be zero prefixed in ...${c.excerpt(t.pos)}...')
+		}
+		return error(@MOD + '.' + @STRUCT + '.' + @FN +
+			' "$lit" is not a valid RFC 3339 Time format string in ...${c.excerpt(t.pos)}...')
+	}
 	// Use V's builtin functionality to validate the time string
 	time.parse_rfc3339(parts[0]) or {
 		return error(@MOD + '.' + @STRUCT + '.' + @FN +
@@ -398,6 +419,7 @@ fn (c Checker) check_quoted_escapes(q ast.Quoted) ? {
 
 	// See https://toml.io/en/v1.0.0#string for more info on string types.
 	is_basic := q.quote == `\"`
+	contains_newlines := q.text.contains('\n')
 	for {
 		ch := s.next()
 		if ch == scanner.end_of_text {
@@ -415,10 +437,24 @@ fn (c Checker) check_quoted_escapes(q ast.Quoted) ? {
 			escape := ch_byte.ascii_str() + next_ch.ascii_str()
 			if is_basic {
 				if q.is_multiline {
-					if next_ch == byte(32) && s.peek(1) == byte(92) {
-						st := s.state()
-						return error(@MOD + '.' + @STRUCT + '.' + @FN +
-							' can not escape whitespaces before escapes in multi-line strings (`\\ \\`) at `$escape` ($st.line_nr,$st.col) in ...${c.excerpt(q.pos)}...')
+					if next_ch == ` ` {
+						if !contains_newlines {
+							st := s.state()
+							return error(@MOD + '.' + @STRUCT + '.' + @FN +
+								' can not escape whitespaces in multi-line strings (`\\ `) at `$escape` ($st.line_nr,$st.col) in ...${c.excerpt(q.pos)}...')
+						}
+						// Rest of line must only be space chars from this point on
+						for {
+							ch_ := s.next()
+							if ch_ == scanner.end_of_text || ch_ == `\n` {
+								break
+							}
+							if !(ch_ == ` ` || ch_ == `\t`) {
+								st := s.state()
+								return error(@MOD + '.' + @STRUCT + '.' + @FN +
+									' invalid character `${byte(ch_).ascii_str()}` after `$escape` at ($st.line_nr,$st.col) in ...${c.excerpt(q.pos)}...')
+							}
+						}
 					}
 					if next_ch in [`\t`, `\n`, ` `] {
 						s.next()
@@ -519,10 +555,16 @@ pub fn (c Checker) check_comment(comment ast.Comment) ? {
 	mut s := scanner.new_simple(lit) ?
 	for {
 		ch := s.next()
-		if ch == -1 {
+		if ch == scanner.end_of_text {
 			break
 		}
 		ch_byte := byte(ch)
+		// Check for carrige return
+		if ch_byte == 0x0D {
+			st := s.state()
+			return error(@MOD + '.' + @STRUCT + '.' + @FN +
+				' carrige return character `$ch_byte.hex()` is not allowed ($st.line_nr,$st.col) "${byte(s.at()).ascii_str()}" near ...${s.excerpt(st.pos, 10)}...')
+		}
 		// Check for control characters (allow TAB)
 		if util.is_illegal_ascii_control_character(ch_byte) {
 			st := s.state()
