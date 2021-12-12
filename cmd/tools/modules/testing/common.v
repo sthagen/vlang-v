@@ -19,6 +19,10 @@ pub const hide_oks = os.getenv('VTEST_HIDE_OK') == '1'
 
 pub const fail_fast = os.getenv('VTEST_FAIL_FAST') == '1'
 
+pub const is_node_present = os.execute('node --version').exit_code == 0
+
+pub const all_processes = os.execute('ps ax').output.split_any('\r\n')
+
 pub struct TestSession {
 pub mut:
 	files         []string
@@ -413,10 +417,6 @@ pub fn vlib_should_be_present(parent_dir string) {
 	}
 }
 
-pub fn v_build_failing(zargs string, folder string) bool {
-	return v_build_failing_skipped(zargs, folder, [])
-}
-
 pub fn prepare_test_session(zargs string, folder string, oskipped []string, main_label string) TestSession {
 	vexe := pref.vexe_path()
 	parent_dir := os.dir(vexe)
@@ -466,10 +466,13 @@ pub fn prepare_test_session(zargs string, folder string, oskipped []string, main
 	return session
 }
 
-pub fn v_build_failing_skipped(zargs string, folder string, oskipped []string) bool {
+pub type FnTestSetupCb = fn (mut session TestSession)
+
+pub fn v_build_failing_skipped(zargs string, folder string, oskipped []string, cb FnTestSetupCb) bool {
 	main_label := 'Building $folder ...'
 	finish_label := 'building $folder'
 	mut session := prepare_test_session(zargs, folder, oskipped, main_label)
+	cb(mut session)
 	session.test()
 	eprintln(session.benchmark.total_message(finish_label))
 	return session.failed
@@ -550,4 +553,13 @@ pub fn get_test_details(file string) TestDetails {
 		}
 	}
 	return res
+}
+
+pub fn find_started_process(pname string) ?string {
+	for line in testing.all_processes {
+		if line.contains(pname) {
+			return line
+		}
+	}
+	return error('could not find process matching $pname')
 }

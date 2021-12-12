@@ -223,13 +223,13 @@ pub:
 	mut_pos    token.Position
 	next_token token.Kind
 pub mut:
-	expr            Expr // expr.field_name
-	expr_type       Type // type of `Foo` in `Foo.bar`
-	typ             Type // type of the entire thing (`Foo.bar`)
-	name_type       Type // T in `T.name` or typeof in `typeof(expr).name`
-	gkind_field     GenericKindField // `T.name` => ast.GenericKindField.name, `T.typ` => ast.GenericKindField.typ, or .unknown
-	scope           &Scope
-	from_embed_type Type // holds the type of the embed that the method is called from
+	expr             Expr // expr.field_name
+	expr_type        Type // type of `Foo` in `Foo.bar`
+	typ              Type // type of the entire thing (`Foo.bar`)
+	name_type        Type // T in `T.name` or typeof in `typeof(expr).name`
+	gkind_field      GenericKindField // `T.name` => ast.GenericKindField.name, `T.typ` => ast.GenericKindField.typ, or .unknown
+	scope            &Scope
+	from_embed_types []Type // holds the type of the embed that the method is called from
 }
 
 // root_ident returns the origin ident where the selector started.
@@ -485,8 +485,9 @@ pub mut:
 	return_type_pos   token.Position // `string` in `fn (u User) name() string` position
 	has_return        bool
 	should_be_skipped bool
+	has_await         bool           // 'true' if this function uses JS.await
 	//
-	comments      []Comment      // comments *after* the header, but *before* `{`; used for InterfaceDecl
+	comments      []Comment // comments *after* the header, but *before* `{`; used for InterfaceDecl
 	next_comments []Comment // coments that are one line after the decl; used for InterfaceDecl
 	//
 	source_file &File = 0
@@ -529,7 +530,7 @@ pub mut:
 	concrete_list_pos  token.Position
 	free_receiver      bool // true if the receiver expression needs to be freed
 	scope              &Scope
-	from_embed_type    Type // holds the type of the embed that the method is called from
+	from_embed_types   []Type // holds the type of the embed that the method is called from
 	comments           []Comment
 }
 
@@ -646,8 +647,14 @@ pub mut:
 
 pub struct EmbeddedFile {
 pub:
-	rpath string // used in the source code, as an ID/key to the embed
-	apath string // absolute path during compilation to the resource
+	rpath            string // used in the source code, as an ID/key to the embed
+	apath            string // absolute path during compilation to the resource
+	compression_type string
+pub mut:
+	// these are set by gen_embed_file_init in v/gen/c/embed
+	is_compressed bool
+	bytes         []byte
+	len           int
 }
 
 // Each V source file is represented by one File structure.
@@ -661,6 +668,7 @@ pub:
 	mod          Module // the module of the source file (from `module xyz` at the top)
 	global_scope &Scope
 	is_test      bool // true for _test.v files
+	is_generated bool // true for `[generated] module xyz` files; turn off notices
 pub mut:
 	path             string // absolute path of the source file - '/projects/v/file.v'
 	path_base        string // file name - 'file.v' (useful for tracing)
@@ -809,6 +817,7 @@ pub mut:
 	is_array  bool
 	is_farray bool
 	is_option bool // IfGuard
+	is_direct bool // Set if the underlying memory can be safely accessed
 }
 
 pub struct IfExpr {
@@ -950,6 +959,7 @@ pub mut:
 	key_type  Type
 	val_type  Type
 	cond_type Type
+	high_type Type
 	kind      Kind   // array/map/string
 	label     string // `label: for {`
 	scope     &Scope
@@ -1039,8 +1049,9 @@ pub:
 	pos           token.Position
 	comments      []Comment // comment after Enumfield in the same line
 	next_comments []Comment // comments between current EnumField and next EnumField
-	expr          Expr      // the value of current EnumField; 123 in `ename = 123`
 	has_expr      bool      // true, when .expr has a value
+pub mut:
+	expr Expr // the value of current EnumField; 123 in `ename = 123`
 }
 
 // enum declaration
@@ -1541,18 +1552,18 @@ pub:
 	is_vweb   bool
 	vweb_tmpl File
 	//
-	is_embed   bool
-	embed_file EmbeddedFile
+	is_embed bool
 	//
 	is_env  bool
 	env_pos token.Position
 	//
 	is_pkgconfig bool
 pub mut:
-	sym         TypeSymbol
+	left_type   Type
 	result_type Type
 	env_value   string
 	args        []CallArg
+	embed_file  EmbeddedFile
 }
 
 pub struct None {

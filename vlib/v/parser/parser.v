@@ -51,6 +51,7 @@ mut:
 	mod                 string     // current module name
 	is_manualfree       bool       // true when `[manualfree] module abc`, makes *all* fns in the current .v file, opt out of autofree
 	has_globals         bool       // `[has_globals] module abc` - allow globals declarations, even without -enable-globals, in that single .v file __only__
+	is_generated        bool       // `[generated] module abc` - turn off compiler notices for that single .v file __only__.
 	attrs               []ast.Attr // attributes before next decl stmt
 	expr_mod            string     // for constructing full type names in parse_type()
 	scope               &ast.Scope
@@ -310,6 +311,7 @@ pub fn (mut p Parser) parse() &ast.File {
 		path: p.file_name
 		path_base: p.file_base
 		is_test: p.inside_test_file
+		is_generated: p.is_generated
 		nr_lines: p.scanner.line_nr
 		nr_bytes: p.scanner.text.len
 		mod: module_decl
@@ -360,7 +362,7 @@ fn (mut q Queue) run() {
 }
 */
 pub fn parse_files(paths []string, table &ast.Table, pref &pref.Preferences) []&ast.File {
-	mut timers := util.new_timers(false)
+	mut timers := util.new_timers(should_print: false, label: 'parse_files: $paths')
 	$if time_parsing ? {
 		timers.should_print = true
 	}
@@ -509,11 +511,13 @@ fn (mut p Parser) check_name() string {
 	return name
 }
 
+[if trace_parser ?]
+fn (p &Parser) trace_parser(label string) {
+	eprintln('parsing: ${p.file_name:-30}|tok.pos: ${p.tok.position().line_str():-39}|tok.kind: ${p.tok.kind:-10}|tok.lit: ${p.tok.lit:-10}|$label')
+}
+
 pub fn (mut p Parser) top_stmt() ast.Stmt {
-	$if trace_parser ? {
-		tok_pos := p.tok.position()
-		eprintln('parsing file: ${p.file_name:-30} | tok.kind: ${p.tok.kind:-10} | tok.lit: ${p.tok.lit:-10} | tok_pos: ${tok_pos.str():-45} | top_stmt')
-	}
+	p.trace_parser('top_stmt')
 	for {
 		match p.tok.kind {
 			.key_pub {
@@ -686,10 +690,7 @@ pub fn (mut p Parser) eat_comments(cfg EatCommentsConfig) []ast.Comment {
 }
 
 pub fn (mut p Parser) stmt(is_top_level bool) ast.Stmt {
-	$if trace_parser ? {
-		tok_pos := p.tok.position()
-		eprintln('parsing file: ${p.file_name:-30} | tok.kind: ${p.tok.kind:-10} | tok.lit: ${p.tok.lit:-10} | tok_pos: ${tok_pos.str():-45} | stmt($is_top_level)')
-	}
+	p.trace_parser('stmt($is_top_level)')
 	p.is_stmt_ident = p.tok.kind == .name
 	match p.tok.kind {
 		.lcbr {
@@ -1588,20 +1589,29 @@ fn (mut p Parser) parse_attr() ast.Attr {
 		p.next()
 	} else {
 		name = p.check_name()
+		// support dot prefix `module.name: arg`
+		if p.tok.kind == .dot {
+			p.next()
+			name += '.'
+			name += p.check_name()
+		}
 		if p.tok.kind == .colon {
 			has_arg = true
 			p.next()
-			// `name: arg`
-			if p.tok.kind == .name {
+			if p.tok.kind == .name { // `name: arg`
 				kind = .plain
 				arg = p.check_name()
-			} else if p.tok.kind == .number {
+			} else if p.tok.kind == .number { // `name: 123`
 				kind = .number
 				arg = p.tok.lit
 				p.next()
 			} else if p.tok.kind == .string { // `name: 'arg'`
 				kind = .string
 				arg = p.tok.lit
+				p.next()
+			} else if p.tok.kind == .key_true || p.tok.kind == .key_false { // `name: true`
+				kind = .bool
+				arg = p.tok.kind.str()
 				p.next()
 			} else {
 				p.error('unexpected $p.tok, an argument is expected after `:`')
@@ -1750,6 +1760,9 @@ pub fn (mut p Parser) warn_with_pos(s string, pos token.Position) {
 
 pub fn (mut p Parser) note_with_pos(s string, pos token.Position) {
 	if p.pref.skip_warnings {
+		return
+	}
+	if p.is_generated {
 		return
 	}
 	if p.pref.output_mode == .stdout && !p.pref.check_only {
@@ -2835,6 +2848,9 @@ fn (mut p Parser) module_decl() ast.Module {
 			match ma.name {
 				'manualfree' {
 					p.is_manualfree = true
+				}
+				'generated' {
+					p.is_generated = true
 				}
 				'has_globals' {
 					if p.inside_vlib_file {

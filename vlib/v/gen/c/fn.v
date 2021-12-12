@@ -832,11 +832,20 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 					return
 				}
 			}
-		} else if node.left is ast.Ident && g.comptime_var_type_map.len > 0 {
+		} else if node.left is ast.Ident {
 			if node.left.obj is ast.Var {
-				rec_type = node.left.obj.typ
-				g.gen_expr_to_string(node.left, rec_type)
-				return
+				if g.comptime_var_type_map.len > 0 {
+					rec_type = node.left.obj.typ
+					g.gen_expr_to_string(node.left, rec_type)
+					return
+				} else if node.left.obj.smartcasts.len > 0 {
+					cast_sym := g.table.get_type_symbol(node.left.obj.smartcasts.last())
+					if cast_sym.info is ast.Aggregate {
+						rec_type = cast_sym.info.types[g.aggregate_type_idx]
+						g.gen_expr_to_string(node.left, rec_type)
+						return
+					}
+				}
 			}
 		}
 		g.get_str_fn(rec_type)
@@ -937,7 +946,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	}
 	if node.receiver_type.is_ptr()
 		&& (!node.left_type.is_ptr() || node.left_type.has_flag(.variadic)
-		|| node.from_embed_type != 0
+		|| node.from_embed_types.len != 0
 		|| (node.left_type.has_flag(.shared_f) && node.name != 'str')) {
 		// The receiver is a reference, but the caller provided a value
 		// Add `&` automatically.
@@ -951,11 +960,11 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			}
 		}
 	} else if !node.receiver_type.is_ptr() && node.left_type.is_ptr() && node.name != 'str'
-		&& node.from_embed_type == 0 {
+		&& node.from_embed_types.len == 0 {
 		if !node.left_type.has_flag(.shared_f) {
 			g.write('/*rec*/*')
 		}
-	} else if !is_range_slice && node.from_embed_type == 0 && node.name != 'str' {
+	} else if !is_range_slice && node.from_embed_types.len == 0 && node.name != 'str' {
 		diff := node.left_type.nr_muls() - node.receiver_type.nr_muls()
 		if diff < 0 {
 			// TODO
@@ -987,8 +996,9 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		} else {
 			g.expr(node.left)
 		}
-		if node.from_embed_type != 0 {
-			embed_name := typ_sym.embed_name()
+		for embed in node.from_embed_types {
+			embed_sym := g.table.get_type_symbol(embed)
+			embed_name := embed_sym.embed_name()
 			if node.left_type.is_ptr() {
 				g.write('->')
 			} else {
@@ -1136,12 +1146,12 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 	// g.generate_tmp_autofree_arg_vars(node, name)
 	// Handle `print(x)`
 	mut print_auto_str := false
-	if is_print && node.args[0].typ != ast.string_type { // && !free_tmp_arg_vars {
+	if is_print && (node.args[0].typ != ast.string_type || g.comptime_for_method.len > 0) { // && !free_tmp_arg_vars {
 		mut typ := node.args[0].typ
 		if typ == 0 {
 			g.checker_bug('print arg.typ is 0', node.pos)
 		}
-		if typ != ast.string_type {
+		if typ != ast.string_type || g.comptime_for_method.len > 0 {
 			expr := node.args[0].expr
 			typ_sym := g.table.get_type_symbol(typ)
 			if typ_sym.kind == .interface_ && (typ_sym.info as ast.Interface).defines_method('str') {
@@ -1175,6 +1185,12 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 				} else if expr is ast.Ident {
 					if expr.obj is ast.Var {
 						typ = expr.obj.typ
+						if expr.obj.smartcasts.len > 0 {
+							cast_sym := g.table.get_type_symbol(expr.obj.smartcasts.last())
+							if cast_sym.info is ast.Aggregate {
+								typ = cast_sym.info.types[g.aggregate_type_idx]
+							}
+						}
 					}
 				}
 				g.gen_expr_to_string(expr, typ)
@@ -1596,7 +1612,7 @@ fn (mut g Gen) is_gui_app() bool {
 			return false
 		}
 		for cf in g.table.cflags {
-			if cf.value == 'gdi32' {
+			if cf.value.to_lower() == 'gdi32' {
 				return true
 			}
 		}

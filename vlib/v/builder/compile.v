@@ -8,18 +8,11 @@ import os
 import rand
 import v.pref
 import v.util
+import v.checker
 
-fn (mut b Builder) get_vtmp_filename(base_file_name string, postfix string) string {
-	vtmp := util.get_vtmp_folder()
-	mut uniq := ''
-	if !b.pref.reuse_tmpc {
-		uniq = '.$rand.u64()'
-	}
-	fname := os.file_name(os.real_path(base_file_name)) + '$uniq$postfix'
-	return os.real_path(os.join_path(vtmp, fname))
-}
+pub type FnBackend = fn (mut b Builder)
 
-pub fn compile(command string, pref &pref.Preferences) {
+pub fn compile(command string, pref &pref.Preferences, backend_cb FnBackend) {
 	odir := os.dir(pref.out_name)
 	// When pref.out_name is just the name of an executable, i.e. `./v -o executable main.v`
 	// without a folder component, just use the current folder instead:
@@ -38,11 +31,7 @@ pub fn compile(command string, pref &pref.Preferences) {
 		// println(pref)
 	}
 	mut sw := time.new_stopwatch()
-	match pref.backend {
-		.c { b.compile_c() }
-		.js_node, .js_freestanding, .js_browser { b.compile_js() }
-		.native { b.compile_native() }
-	}
+	backend_cb(mut b)
 	mut timers := util.get_timers()
 	timers.show_remaining()
 	if pref.is_stats {
@@ -75,6 +64,16 @@ pub fn compile(command string, pref &pref.Preferences) {
 	if pref.is_test || pref.is_run {
 		b.run_compiled_executable_and_exit()
 	}
+}
+
+pub fn (mut b Builder) get_vtmp_filename(base_file_name string, postfix string) string {
+	vtmp := util.get_vtmp_folder()
+	mut uniq := ''
+	if !b.pref.reuse_tmpc {
+		uniq = '.$rand.u64()'
+	}
+	fname := os.file_name(os.real_path(base_file_name)) + '$uniq$postfix'
+	return os.real_path(os.join_path(vtmp, fname))
 }
 
 // Temporary, will be done by -autofree
@@ -116,7 +115,6 @@ fn (mut b Builder) run_compiled_executable_and_exit() {
 		panic('Running iOS apps is not supported yet.')
 	}
 	if b.pref.is_verbose {
-		println('============ running $b.pref.out_name ============')
 	}
 	if b.pref.is_test || b.pref.is_run {
 		compiled_file := os.real_path(b.pref.out_name)
@@ -180,7 +178,7 @@ fn (mut v Builder) cleanup_run_executable_after_exit(exefile string) {
 // 'strings' => 'VROOT/vlib/strings'
 // 'installed_mod' => '~/.vmodules/installed_mod'
 // 'local_mod' => '/path/to/current/dir/local_mod'
-fn (mut v Builder) set_module_lookup_paths() {
+pub fn (mut v Builder) set_module_lookup_paths() {
 	// Module search order:
 	// 0) V test files are very commonly located right inside the folder of the
 	// module, which they test. Adding the parent folder of the module folder
