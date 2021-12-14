@@ -871,6 +871,12 @@ fn (mut g Gen) expr_string(expr ast.Expr) string {
 	return g.out.cut_to(pos).trim_space()
 }
 
+fn (mut g Gen) expr_string_with_cast(expr ast.Expr, typ ast.Type, exp ast.Type) string {
+	pos := g.out.len
+	g.expr_with_cast(expr, typ, exp)
+	return g.out.cut_to(pos).trim_space()
+}
+
 // Surround a potentially multi-statement expression safely with `prepend` and `append`.
 // (and create a statement)
 fn (mut g Gen) expr_string_surround(prepend string, expr ast.Expr, append string) string {
@@ -5905,29 +5911,29 @@ const (
 	skip_struct_init = ['struct stat', 'struct addrinfo']
 )
 
-fn (mut g Gen) struct_init(struct_init ast.StructInit) {
-	styp := g.typ(struct_init.typ)
+fn (mut g Gen) struct_init(node ast.StructInit) {
+	styp := g.typ(node.typ)
 	mut shared_styp := '' // only needed for shared x := St{...
 	if styp in c.skip_struct_init {
 		// needed for c++ compilers
 		g.go_back_out(3)
 		return
 	}
-	mut sym := g.table.get_final_type_symbol(g.unwrap_generic(struct_init.typ))
+	mut sym := g.table.get_final_type_symbol(g.unwrap_generic(node.typ))
 	is_amp := g.is_amp
-	is_multiline := struct_init.fields.len > 5
+	is_multiline := node.fields.len > 5
 	g.is_amp = false // reset the flag immediately so that other struct inits in this expr are handled correctly
 	if is_amp {
 		g.out.go_back(1) // delete the `&` already generated in `prefix_expr()
 	}
 	if g.is_shared && !g.inside_opt_data && !g.is_arraymap_set {
-		mut shared_typ := struct_init.typ.set_flag(.shared_f)
+		mut shared_typ := node.typ.set_flag(.shared_f)
 		shared_styp = g.typ(shared_typ)
 		g.writeln('($shared_styp*)__dup${shared_styp}(&($shared_styp){.mtx = {0}, .val =($styp){')
 	} else if is_amp || g.inside_cast_in_heap > 0 {
 		g.write('($styp*)memdup(&($styp){')
-	} else if struct_init.typ.is_ptr() {
-		basetyp := g.typ(struct_init.typ.set_nr_muls(0))
+	} else if node.typ.is_ptr() {
+		basetyp := g.typ(node.typ.set_nr_muls(0))
 		if is_multiline {
 			g.writeln('&($basetyp){')
 		} else {
@@ -5943,13 +5949,13 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 	// mut fields := []string{}
 	mut inited_fields := map[string]int{} // TODO this is done in checker, move to ast node
 	/*
-	if struct_init.fields.len == 0 && struct_init.exprs.len > 0 {
+	if node.fields.len == 0 && node.exprs.len > 0 {
 		// Get fields for {a,b} short syntax. Fields array wasn't set in the parser.
 		for f in info.fields {
 			fields << f.name
 		}
 	} else {
-		fields = struct_init.fields
+		fields = node.fields
 	}
 	*/
 	if is_multiline {
@@ -5958,7 +5964,7 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 	// User set fields
 	mut initialized := false
 	mut old_is_shared := g.is_shared
-	for i, field in struct_init.fields {
+	for i, field in node.fields {
 		if !field.typ.has_flag(.shared_f) {
 			g.is_shared = false
 		}
@@ -5984,7 +5990,7 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 				}
 				g.expr_with_cast(field.expr, field.typ, field.expected_type)
 			}
-			if i != struct_init.fields.len - 1 {
+			if i != node.fields.len - 1 {
 				if is_multiline {
 					g.writeln(',')
 				} else {
@@ -6002,7 +6008,7 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 	if sym.kind == .struct_ {
 		mut info := sym.info as ast.Struct
 		nr_fields = info.fields.len
-		if info.is_union && struct_init.fields.len > 1 {
+		if info.is_union && node.fields.len > 1 {
 			verror('union must not have more than 1 initializer')
 		}
 		if !info.is_union {
@@ -6010,7 +6016,7 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 			mut used_embed_fields := []string{}
 			init_field_names := info.fields.map(it.name)
 			// fields that are initialized but belong to the embedding
-			init_fields_to_embed := struct_init.fields.filter(it.name !in init_field_names)
+			init_fields_to_embed := node.fields.filter(it.name !in init_field_names)
 			for embed in info.embeds {
 				embed_sym := g.table.get_type_symbol(embed)
 				embed_name := embed_sym.embed_name()
@@ -6021,7 +6027,7 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 						&& it.name in embed_field_names)
 					used_embed_fields << fields_to_embed.map(it.name)
 					default_init := ast.StructInit{
-						...struct_init
+						...node
 						typ: embed
 						fields: init_fields_to_embed
 					}
@@ -6056,7 +6062,7 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 				}
 			}
 			if field.name in inited_fields {
-				sfield := struct_init.fields[inited_fields[field.name]]
+				sfield := node.fields[inited_fields[field.name]]
 				field_name := if sym.language == .v { c_name(field.name) } else { field.name }
 				if sfield.typ == 0 {
 					continue
@@ -6112,9 +6118,9 @@ fn (mut g Gen) struct_init(struct_init ast.StructInit) {
 			if field.typ in info.embeds {
 				continue
 			}
-			if struct_init.has_update_expr {
-				g.expr(struct_init.update_expr)
-				if struct_init.update_expr_type.is_ptr() {
+			if node.has_update_expr {
+				g.expr(node.update_expr)
+				if node.update_expr_type.is_ptr() {
 					g.write('->')
 				} else {
 					g.write('.')
@@ -6801,7 +6807,8 @@ fn (mut g Gen) type_default(typ_ ast.Type) string {
 						|| field_sym.kind in [.array, .map, .string, .bool, .alias, .i8, .i16, .int, .i64, .byte, .u16, .u32, .u64, .char, .voidptr, .byteptr, .charptr, .struct_] {
 						field_name := c_name(field.name)
 						if field.has_default_expr {
-							expr_str := g.expr_string(field.default_expr)
+							expr_str := g.expr_string_with_cast(field.default_expr, field.default_expr_typ,
+								field.typ)
 							init_str += '.$field_name = $expr_str,'
 						} else {
 							init_str += '.$field_name = ${g.type_default(field.typ)},'
@@ -7180,9 +7187,6 @@ fn (mut g Gen) interface_table() string {
 	mut conversion_functions := strings.new_builder(100)
 	for isym in g.table.type_symbols {
 		if isym.kind != .interface_ {
-			continue
-		}
-		if isym.info !is ast.Interface {
 			continue
 		}
 		inter_info := isym.info as ast.Interface
