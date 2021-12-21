@@ -13,9 +13,7 @@ import v.errors
 import os
 import hash.fnv1a
 
-pub const (
-	builtin_functions = ['print', 'println', 'eprint', 'eprintln', 'isnil', 'panic', 'exit']
-)
+pub const builtin_functions = ['print', 'println', 'eprint', 'eprintln', 'isnil', 'panic', 'exit']
 
 pub struct Parser {
 	pref &pref.Preferences
@@ -1629,24 +1627,46 @@ fn (mut p Parser) parse_attr() ast.Attr {
 	}
 }
 
+pub fn (mut p Parser) language_not_allowed_error(language ast.Language, pos token.Position) {
+	upcase_language := language.str().to_upper()
+	p.error_with_pos('$upcase_language code is not allowed in .${p.file_backend_mode}.v files, please move it to a .${language}.v file',
+		pos)
+}
+
+pub fn (mut p Parser) language_not_allowed_warning(language ast.Language, pos token.Position) {
+	upcase_language := language.str().to_upper()
+	p.warn_with_pos('$upcase_language code will not be allowed in pure .v files, please move it to a .${language}.v file instead',
+		pos)
+}
+
 pub fn (mut p Parser) check_for_impure_v(language ast.Language, pos token.Position) {
 	if language == .v {
 		// pure V code is always allowed everywhere
 		return
+	} else {
+		match p.file_backend_mode {
+			.c {
+				if language != .c {
+					p.language_not_allowed_error(language, pos)
+					return
+				}
+			}
+			.js {
+				if language != .js {
+					p.language_not_allowed_error(language, pos)
+					return
+				}
+			}
+			else {}
+		}
 	}
 	if !p.pref.warn_impure_v {
 		// the stricter mode is not ON yet => allow everything for now
 		return
 	}
 	if p.file_backend_mode != language {
-		upcase_language := language.str().to_upper()
 		if p.file_backend_mode == .v {
-			p.warn_with_pos('$upcase_language code will not be allowed in pure .v files, please move it to a .${language}.v file instead',
-				pos)
-			return
-		} else {
-			p.warn_with_pos('$upcase_language code is not allowed in .${p.file_backend_mode}.v files, please move it to a .${language}.v file',
-				pos)
+			p.language_not_allowed_warning(language, pos)
 			return
 		}
 	}
@@ -2213,7 +2233,7 @@ pub fn (mut p Parser) name_expr() ast.Expr {
 			p.check(.rpar)
 			node = ast.CastExpr{
 				typ: to_typ
-				typname: p.table.get_type_symbol(to_typ).name
+				typname: p.table.sym(to_typ).name
 				expr: expr
 				arg: arg
 				has_arg: has_arg
@@ -3009,6 +3029,18 @@ fn (mut p Parser) import_syms(mut parent ast.Import) {
 
 fn (mut p Parser) const_decl() ast.ConstDecl {
 	p.top_level_statement_start()
+	mut attrs := []ast.Attr{}
+	if p.attrs.len > 0 {
+		attrs = p.attrs
+		p.attrs = []
+	}
+	mut is_markused := false
+	for ga in attrs {
+		match ga.name {
+			'markused' { is_markused = true }
+			else {}
+		}
+	}
 	start_pos := p.tok.position()
 	is_pub := p.tok.kind == .key_pub
 	if is_pub {
@@ -3055,6 +3087,7 @@ fn (mut p Parser) const_decl() ast.ConstDecl {
 			expr: expr
 			pos: pos.extend(expr.position())
 			comments: comments
+			is_markused: is_markused
 		}
 		fields << field
 		p.table.global_scope.register(field)
@@ -3073,6 +3106,7 @@ fn (mut p Parser) const_decl() ast.ConstDecl {
 		is_pub: is_pub
 		end_comments: comments
 		is_block: is_block
+		attrs: attrs
 	}
 }
 
@@ -3105,6 +3139,15 @@ fn (mut p Parser) global_decl() ast.GlobalDecl {
 		attrs = p.attrs
 		p.attrs = []
 	}
+
+	mut is_markused := false
+	for ga in attrs {
+		match ga.name {
+			'markused' { is_markused = true }
+			else {}
+		}
+	}
+
 	if !p.has_globals && !p.pref.enable_globals && !p.pref.is_fmt && !p.pref.translated
 		&& !p.pref.is_livemain && !p.pref.building_v && !p.builtin_mod {
 		p.error('use `v -enable-globals ...` to enable globals')
@@ -3180,6 +3223,7 @@ fn (mut p Parser) global_decl() ast.GlobalDecl {
 			typ_pos: typ_pos
 			typ: typ
 			comments: comments
+			is_markused: is_markused
 		}
 		fields << field
 		p.table.global_scope.register(field)
@@ -3340,7 +3384,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 		// function type: `type mycallback = fn(string, int)`
 		fn_name := p.prepend_mod(name)
 		fn_type := p.parse_fn_type(fn_name)
-		p.table.get_type_symbol(fn_type).is_public = is_pub
+		p.table.sym(fn_type).is_public = is_pub
 		type_pos = type_pos.extend(p.tok.position())
 		comments = p.eat_comments(same_line: true)
 		return ast.FnTypeDecl{
@@ -3415,7 +3459,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 		return ast.AliasTypeDecl{}
 	}
 	parent_type := first_type
-	parent_sym := p.table.get_type_symbol(parent_type)
+	parent_sym := p.table.sym(parent_type)
 	pidx := parent_type.idx()
 	p.check_for_impure_v(parent_sym.language, decl_pos)
 	prepend_mod_name := p.prepend_mod(name)

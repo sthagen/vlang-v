@@ -26,13 +26,11 @@ fn (mut g Gen) gen_assert_stmt(original_assert_statement ast.AssertStmt) {
 		g.write(')')
 		g.decrement_inside_ternary()
 		g.writeln(' {')
-		g.writeln('\tg_test_oks++;')
 		metaname_ok := g.gen_assert_metainfo(node)
-		g.writeln('\tmain__cb_assertion_ok(&$metaname_ok);')
+		g.writeln('\tmain__TestRunner_name_table[test_runner._typ]._method_assert_pass(test_runner._object, &$metaname_ok);')
 		g.writeln('} else {')
-		g.writeln('\tg_test_fails++;')
 		metaname_fail := g.gen_assert_metainfo(node)
-		g.writeln('\tmain__cb_assertion_failed(&$metaname_fail);')
+		g.writeln('\tmain__TestRunner_name_table[test_runner._typ]._method_assert_fail(test_runner._object, &$metaname_fail);')
 		g.gen_assert_postfailure_mode(node)
 		g.writeln('\tlongjmp(g_jump_buffer, 1);')
 		g.writeln('\t// TODO')
@@ -71,7 +69,7 @@ fn (mut g Gen) assert_subexpression_to_ctemp(expr ast.Expr, expr_type ast.Type) 
 		}
 		ast.SelectorExpr {
 			if expr.expr is ast.CallExpr {
-				sym := g.table.get_final_type_symbol(g.unwrap_generic(expr.expr.return_type))
+				sym := g.table.final_sym(g.unwrap_generic(expr.expr.return_type))
 				if sym.kind == .struct_ {
 					if (sym.info as ast.Struct).is_union {
 						return c.unsupported_ctemp_assert_transform
@@ -151,7 +149,7 @@ fn (mut g Gen) gen_assert_single_expr(expr ast.Expr, typ ast.Type) {
 			}
 		}
 		ast.TypeNode {
-			sym := g.table.get_type_symbol(g.unwrap_generic(typ))
+			sym := g.table.sym(g.unwrap_generic(typ))
 			g.write(ctoslit('$sym.name'))
 		}
 		else {

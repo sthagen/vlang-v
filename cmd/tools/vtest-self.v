@@ -70,6 +70,7 @@ const (
 	]
 	skip_on_musl                  = [
 		'vlib/v/tests/profile/profile_test.v',
+		'vlib/gg/draw_fns_api_test.v',
 	]
 	skip_on_ubuntu_musl           = [
 		//'vlib/v/gen/js/jsgen_test.v',
@@ -108,6 +109,7 @@ const (
 		'vlib/orm/orm_test.v',
 		'vlib/v/tests/orm_sub_struct_test.v',
 		'vlib/v/tests/closure_test.v',
+		'vlib/v/tests/closure_generator_test.v',
 		'vlib/net/websocket/ws_test.v',
 		'vlib/net/unix/unix_test.v',
 		'vlib/net/websocket/websocket_test.v',
@@ -130,8 +132,20 @@ const (
 	skip_on_amd64                 = [
 		'do_not_remove',
 	]
-	skip_on_non_amd64             = [
-		'vlib/v/tests/closure_test.v' /* not implemented yet */,
+	skip_on_arm64                 = [
+		'vlib/v/tests/closure_generator_test.v',
+		'do_not_remove',
+	]
+	skip_on_non_amd64_or_arm64    = [
+		// closures aren't implemented yet:
+		'vlib/v/tests/closure_test.v',
+		'vlib/context/cancel_test.v',
+		'vlib/context/deadline_test.v',
+		'vlib/context/empty_test.v',
+		'vlib/context/value_test.v',
+		'vlib/context/onecontext/onecontext_test.v',
+		'vlib/sync/once_test.v',
+		'vlib/sync/many_times_test.v',
 		'do_not_remove',
 	]
 )
@@ -224,11 +238,14 @@ fn main() {
 	if os.getenv('V_CI_UBUNTU_MUSL').len > 0 {
 		tsession.skip_files << skip_on_ubuntu_musl
 	}
-	$if !amd64 {
+	$if !amd64 && !arm64 {
 		tsession.skip_files << skip_on_non_amd64
 	}
 	$if amd64 {
 		tsession.skip_files << skip_on_amd64
+	}
+	$if arm64 {
+		tsession.skip_files << skip_on_arm64
 	}
 	$if !linux {
 		tsession.skip_files << skip_on_non_linux

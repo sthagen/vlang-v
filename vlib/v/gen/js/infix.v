@@ -5,13 +5,14 @@ import v.ast
 
 fn (mut g JsGen) gen_plain_infix_expr(node ast.InfixExpr) {
 	it := node
-	l_sym := g.table.get_final_type_symbol(it.left_type)
-	r_sym := g.table.get_final_type_symbol(it.right_type)
+	l_sym := g.table.final_sym(it.left_type)
+	r_sym := g.table.final_sym(it.right_type)
 	greater_typ := g.greater_typ(it.left_type, it.right_type)
 	cast_ty := if greater_typ == it.left_type { l_sym.cname } else { r_sym.cname }
 	g.write('new ${g.js_name(cast_ty)}( ')
 	g.cast_stack << greater_typ
-	if (l_sym.kind == .i64 || l_sym.kind == .u64) || (r_sym.kind == .i64 || r_sym.kind == .u64) {
+	if !g.pref.output_es5 && ((l_sym.kind == .i64 || l_sym.kind == .u64)
+		|| (r_sym.kind == .i64 || r_sym.kind == .u64)) {
 		g.write('BigInt(')
 		g.expr(node.left)
 		g.gen_deref_ptr(node.left_type)
@@ -297,7 +298,7 @@ fn (mut g JsGen) infix_in_not_in_op(node ast.InfixExpr) {
 	} else if r_sym.unaliased_sym.kind == .map {
 		g.expr(node.right)
 		g.gen_deref_ptr(node.right_type)
-		g.write('.map.has(')
+		g.write('.has(')
 		g.expr(node.left)
 		/*
 		if l_sym.sym.kind == .string {
@@ -337,7 +338,7 @@ fn (mut g JsGen) infix_in_not_in_op(node ast.InfixExpr) {
 
 fn (mut g JsGen) infix_is_not_is_op(node ast.InfixExpr) {
 	g.expr(node.left)
-	rsym := g.table.get_type_symbol(g.unwrap(node.right_type).typ)
+	rsym := g.table.sym(g.unwrap(node.right_type).typ)
 
 	g.gen_deref_ptr(node.left_type)
 	g.write(' instanceof ')

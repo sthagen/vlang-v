@@ -107,6 +107,7 @@ pub mut:
 	is_shared         bool   // an ordinary shared library, -shared, no matter if it is live or not
 	is_o              bool   // building an .o file
 	is_prof           bool   // benchmark every function
+	test_runner       string // can be 'simple' (fastest, but much less detailed), 'tap', 'normal'
 	profile_file      string // the profile results will be stored inside profile_file
 	profile_no_inline bool   // when true, [inline] functions would not be profiled
 	translated        bool   // `v translate doom.v` are we running V code translated from C? allow globals, ++ expressions, etc
@@ -154,12 +155,15 @@ pub mut:
 	custom_prelude   string // Contents of custom V prelude that will be prepended before code in resulting .c files
 	lookup_path      []string
 	output_cross_c   bool // true, when the user passed `-os cross`
+	output_es5       bool
 	prealloc         bool
 	vroot            string
 	out_name_c       string // full os.real_path to the generated .tmp.c file; set by builder.
 	out_name         string
 	path             string // Path to file/folder to compile
 	// -d vfmt and -d another=0 for `$if vfmt { will execute }` and `$if another ? { will NOT get here }`
+	run_only []string // VTEST_ONLY_FN and -run-only accept comma separated glob patterns.
+	// Only test_ functions that match these patterns will be run. -run-only is valid only for _test.v files.
 	compile_defines     []string    // just ['vfmt']
 	compile_defines_all []string    // contains both: ['vfmt','another']
 	run_args            []string    // `v run x.v 1 2 3` => `1 2 3`
@@ -205,6 +209,7 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 	$if x64 {
 		res.m64 = true // follow V model by default
 	}
+	res.run_only = os.getenv('VTEST_ONLY_FN').split_any(',')
 	mut command := ''
 	mut command_pos := 0
 	// for i, arg in args {
@@ -464,6 +469,14 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 			'-show-depgraph' {
 				res.show_depgraph = true
 			}
+			'-run-only' {
+				res.run_only = cmdline.option(current_args, arg, os.getenv('VTEST_ONLY_FN')).split_any(',')
+				i++
+			}
+			'-test-runner' {
+				res.test_runner = cmdline.option(current_args, arg, res.test_runner)
+				i++
+			}
 			'-dump-c-flags' {
 				res.dump_c_flags = cmdline.option(current_args, arg, '-')
 				i++
@@ -579,6 +592,9 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 				}
 				res.backend = b
 				i++
+			}
+			'-es5' {
+				res.output_es5 = true
 			}
 			'-path' {
 				path := cmdline.option(current_args, '-path', '')

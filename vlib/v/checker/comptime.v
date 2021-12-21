@@ -9,7 +9,6 @@ import v.util
 import v.pkgconfig
 
 fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
-	sym := c.table.get_type_symbol(c.unwrap_generic(c.expr(node.left)))
 	node.left_type = c.expr(node.left)
 	if node.is_env {
 		env_value := util.resolve_env_value("\$env('$node.args_var')", false) or {
@@ -30,6 +29,7 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 	}
 	if node.is_vweb {
 		// TODO assoc parser bug
+		save_cur_fn := c.table.cur_fn
 		pref_ := *c.pref
 		pref2 := &pref.Preferences{
 			...pref_
@@ -56,6 +56,8 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 		c.nr_warnings += c2.nr_warnings
 		c.nr_errors += c2.nr_errors
 		c.nr_notices += c2.nr_notices
+
+		c.table.cur_fn = save_cur_fn
 	}
 	if node.method_name == 'html' {
 		rtyp := c.table.find_type_idx('vweb.Result')
@@ -91,11 +93,11 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 	} else {
 		c.error('todo: not a string literal', node.method_pos)
 	}
-	f := sym.find_method(method_name) or {
+	left_sym := c.table.sym(c.unwrap_generic(node.left_type))
+	f := left_sym.find_method(method_name) or {
 		c.error('could not find method `$method_name`', node.method_pos)
 		return ast.void_type
 	}
-	// println(f.name + ' ' + c.table.type_to_str(f.return_type))
 	node.result_type = f.return_type
 	return f.return_type
 }
@@ -311,7 +313,7 @@ fn (mut c Checker) verify_vweb_params_for_method(node ast.Fn) (bool, int, int) {
 	}
 	if node.params.len > 1 {
 		for param in node.params[1..] {
-			param_sym := c.table.get_final_type_symbol(param.typ)
+			param_sym := c.table.final_sym(param.typ)
 			if !(param_sym.is_string() || param_sym.is_number() || param_sym.is_float()
 				|| param_sym.kind == .bool) {
 				c.error('invalid type `$param_sym.name` for parameter `$param.name` in vweb app method `$node.name`',
@@ -336,7 +338,7 @@ fn (mut c Checker) verify_all_vweb_routes() {
 	typ_vweb_result := c.table.find_type_idx('vweb.Result')
 	old_file := c.file
 	for vgt in c.vweb_gen_types {
-		sym_app := c.table.get_type_symbol(vgt)
+		sym_app := c.table.sym(vgt)
 		for m in sym_app.methods {
 			if m.return_type == typ_vweb_result {
 				is_ok, nroute_attributes, nargs := c.verify_vweb_params_for_method(m)
@@ -438,7 +440,7 @@ fn (mut c Checker) comptime_if_branch(cond ast.Expr, pos token.Position) bool {
 				.key_is, .not_is {
 					if cond.left is ast.TypeNode && cond.right is ast.TypeNode {
 						// `$if Foo is Interface {`
-						sym := c.table.get_type_symbol(cond.right.typ)
+						sym := c.table.sym(cond.right.typ)
 						if sym.kind != .interface_ {
 							c.expr(cond.left)
 							// c.error('`$sym.name` is not an interface', cond.right.position())
@@ -575,7 +577,7 @@ fn (mut c Checker) check_map_and_filter(is_map bool, elem_typ ast.Type, node ast
 		// Finish early so that it doesn't fail later
 		return
 	}
-	elem_sym := c.table.get_type_symbol(elem_typ)
+	elem_sym := c.table.sym(elem_typ)
 	arg_expr := node.args[0].expr
 	match arg_expr {
 		ast.AnonFn {
@@ -731,13 +733,13 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 					'`.sort()` requires a `<` or `>` comparison as the first and only argument' +
 					'\ne.g. `users.sort(a.id < b.id)`', node.pos)
 			}
-		} else if !(c.table.get_type_symbol(elem_typ).has_method('<')
+		} else if !(c.table.sym(elem_typ).has_method('<')
 			|| c.table.unalias_num_type(elem_typ) in [ast.int_type, ast.int_type.ref(), ast.string_type, ast.string_type.ref(), ast.i8_type, ast.i16_type, ast.i64_type, ast.byte_type, ast.rune_type, ast.u16_type, ast.u32_type, ast.u64_type, ast.f32_type, ast.f64_type, ast.char_type, ast.bool_type, ast.float_literal_type, ast.int_literal_type]) {
 			c.error('custom sorting condition must be supplied for type `${c.table.type_to_str(elem_typ)}`',
 				node.pos)
 		}
 	} else if method_name == 'wait' {
-		elem_sym := c.table.get_type_symbol(elem_typ)
+		elem_sym := c.table.sym(elem_typ)
 		if elem_sym.kind == .thread {
 			if node.args.len != 0 {
 				c.error('`.wait()` does not have any arguments', node.args[0].pos)
@@ -761,7 +763,7 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 	if method_name == 'map' {
 		// check fn
 		c.check_map_and_filter(true, elem_typ, node)
-		arg_sym := c.table.get_type_symbol(arg_type)
+		arg_sym := c.table.sym(arg_type)
 		ret_type := match arg_sym.info {
 			ast.FnType { arg_sym.info.func.return_type }
 			else { arg_type }
