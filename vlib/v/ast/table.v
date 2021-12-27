@@ -671,7 +671,7 @@ pub fn (t &Table) unalias_num_type(typ Type) Type {
 	sym := t.sym(typ)
 	if sym.kind == .alias {
 		pt := (sym.info as Alias).parent_type
-		if pt <= f64_type && pt >= void_type {
+		if pt <= char_type && pt >= void_type {
 			return pt
 		}
 	}
@@ -1056,8 +1056,9 @@ pub fn (mut t Table) find_or_register_multi_return(mr_typs []Type) int {
 	mut cname := 'multi_return'
 	for i, mr_typ in mr_typs {
 		mr_type_sym := t.sym(mr_typ)
-		name += mr_type_sym.name
-		cname += '_$mr_type_sym.cname'
+		ref, cref := if mr_typ.is_ptr() { '&', 'ref_' } else { '', '' }
+		name += '$ref$mr_type_sym.name'
+		cname += '_$cref$mr_type_sym.cname'
 		if i < mr_typs.len - 1 {
 			name += ', '
 		}

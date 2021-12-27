@@ -399,6 +399,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 			generic_names: generic_names
 			is_pub: is_pub
 			is_deprecated: is_deprecated
+			is_noreturn: is_noreturn
 			is_unsafe: is_unsafe
 			is_main: is_main
 			is_test: is_test
@@ -538,6 +539,10 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 }
 
 fn (mut p Parser) fn_receiver(mut params []ast.Param, mut rec ReceiverParsingInfo) ? {
+	p.inside_receiver_param = true
+	defer {
+		p.inside_receiver_param = false
+	}
 	lpar_pos := p.tok.position()
 	p.next() // (
 	is_shared := p.tok.kind == .key_shared

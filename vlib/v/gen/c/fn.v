@@ -32,6 +32,12 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 	if node.should_be_skipped {
 		return
 	}
+	if node.ninstances == 0 && node.generic_names.len > 0 {
+		$if trace_generics ? {
+			eprintln('skipping generic fn with no concrete instances: $node.mod $node.name')
+		}
+		return
+	}
 	if !g.is_used_by_main(node) {
 		return
 	}
@@ -82,7 +88,8 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 	if node.is_main {
 		g.has_main = true
 	}
-	is_backtrace := node.name.starts_with('backtrace') // TODO PERF remove this from here
+	// TODO PERF remove this from here
+	is_backtrace := node.name.starts_with('backtrace')
 		&& node.name in ['backtrace_symbols', 'backtrace', 'backtrace_symbols_fd']
 	if is_backtrace {
 		g.write('\n#ifndef __cplusplus\n')
@@ -457,6 +464,9 @@ fn (mut g Gen) gen_anon_fn(mut node ast.AnonFn) {
 	for param in node.decl.params {
 		size_sb.write_string('_REG_WIDTH(${g.typ(param.typ)}) + ')
 	}
+	if g.pref.arch == .amd64 && node.decl.return_type != ast.void_type {
+		size_sb.write_string('(_REG_WIDTH(${g.typ(node.decl.return_type)}) > 2) + ')
+	}
 	size_sb.write_string('1')
 	args_size := size_sb.str()
 	g.writeln('')
@@ -715,9 +725,17 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		$if debug_interface_method_call ? {
 			eprintln('>>> interface typ_sym.name: $typ_sym.name | receiver_type_name: $receiver_type_name | pos: $node.pos')
 		}
+
+		left_is_shared := node.left_type.has_flag(.shared_f)
 		g.write('${c_name(receiver_type_name)}_name_table[')
 		g.expr(node.left)
-		dot := if node.left_type.is_ptr() { '->' } else { '.' }
+		dot := if left_is_shared {
+			'->val.'
+		} else if node.left_type.is_ptr() {
+			'->'
+		} else {
+			'.'
+		}
 		mname := c_name(node.name)
 		g.write('${dot}_typ]._method_${mname}(')
 		g.expr(node.left)
