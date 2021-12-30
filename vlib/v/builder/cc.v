@@ -341,7 +341,12 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 		ccoptions.post_args << '-municode'
 	}
 	cflags := v.get_os_cflags()
-	ccoptions.o_args << cflags.c_options_only_object_files()
+
+	if v.pref.build_mode != .build_module {
+		only_o_files := cflags.c_options_only_object_files()
+		ccoptions.o_args << only_o_files
+	}
+
 	defines, others, libs := cflags.defines_others_libs()
 	ccoptions.pre_args << defines
 	ccoptions.pre_args << others
@@ -390,7 +395,11 @@ fn (v &Builder) all_args(ccoptions CcompilerOptions) []string {
 	all << ccoptions.pre_args
 	all << ccoptions.source_args
 	all << ccoptions.post_args
-	all << ccoptions.linker_flags
+	// in `build-mode`, we do not need -lxyz flags, since we are
+	// building an (.o) object file, that will be linked later.
+	if v.pref.build_mode != .build_module {
+		all << ccoptions.linker_flags
+	}
 	all << ccoptions.env_ldflags
 	return all
 }

@@ -5,6 +5,7 @@ module c
 
 import os
 import strings
+import hash.fnv1a
 import v.ast
 import v.pref
 import v.token
@@ -72,6 +73,7 @@ mut:
 	json_forward_decls     strings.Builder // json type forward decls
 	sql_buf                strings.Builder // for writing exprs to args via `sqlite3_bind_int()` etc
 	file                   &ast.File
+	unique_file_path_hash  u64 // a hash of file.path, used for making auxilary fn generation unique (like `compare_xyz`)
 	fn_decl                &ast.FnDecl // pointer to the FnDecl we are currently inside otherwise 0
 	last_fn_c_name         string
 	tmp_count              int  // counter for unique tmp vars (_tmp1, _tmp2 etc); resets at the start of each fn.
@@ -475,6 +477,12 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	b.writeln('\n// THE END.')
 	g.timers.show('cgen common')
 	res := b.str()
+	$if trace_all_generic_fn_keys ? {
+		gkeys := g.table.fn_generic_types.keys()
+		for gkey in gkeys {
+			eprintln('>> g.table.fn_generic_types key: $gkey')
+		}
+	}
 	unsafe { b.free() }
 	unsafe { g.free_builders() }
 	return res
@@ -573,7 +581,7 @@ pub fn (mut g Gen) free_builders() {
 
 pub fn (mut g Gen) gen_file() {
 	g.timers.start('cgen_file $g.file.path')
-
+	g.unique_file_path_hash = fnv1a.sum64_string(g.file.path)
 	if g.pref.is_vlines {
 		g.vlines_path = util.vlines_escape_path(g.file.path, g.pref.ccompiler)
 		g.is_vlines_enabled = true
@@ -5002,7 +5010,18 @@ fn (mut g Gen) const_decl(node ast.ConstDecl) {
 				}
 			}
 			else {
-				if g.pref.build_mode != .build_module {
+				// NB: -usecache uses prebuilt modules, each compiled with:
+				// `v build-module vlib/module`
+				// combined with a top level program, that is compiled with:
+				// `v -usecache toplevel`
+				// For it to work, the consts optimisations should be identical, because
+				// only the top level program will have the const initialisation code for
+				// all the modules.
+				// TODO: encapsulate const initialisation for each module in a separate function,
+				// that is just called by the top level program in _vinit, instead of generating
+				// all the code inside _vinit for each module.
+				use_cache_mode := g.pref.build_mode == .build_module || g.pref.use_cache
+				if !use_cache_mode {
 					if ct_value := field.comptime_expr_value() {
 						if g.const_decl_precomputed(field.mod, name, ct_value, field.typ) {
 							continue
