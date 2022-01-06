@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2021 Alexander Medvednikov. All rights reserved.
+// Copyright (c) 2019-2022 Alexander Medvednikov. All rights reserved.
 // Use of this source code is governed by an MIT license
 // that can be found in the LICENSE file.
 //
@@ -495,6 +495,14 @@ pub fn merge_types(params ...[]Type) []Type {
 		res << types
 	}
 	return res
+}
+
+pub fn mktyp(typ Type) Type {
+	match typ {
+		ast.float_literal_type { return ast.f64_type }
+		ast.int_literal_type { return ast.int_type }
+		else { return typ }
+	}
 }
 
 pub struct MultiReturn {

@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2021 Alexander Medvednikov. All rights reserved.
+// Copyright (c) 2019-2022 Alexander Medvednikov. All rights reserved.
 // Use of this source code is governed by an MIT license
 // that can be found in the LICENSE file.
 module builder
@@ -941,12 +941,12 @@ fn missing_compiler_info() string {
 
 fn error_context_lines(text string, keyword string, before int, after int) []string {
 	khighlight := if term.can_show_color_on_stdout() { term.red(keyword) } else { keyword }
-	mut eline_idx := 0
+	mut eline_idx := -1
 	mut lines := text.split_into_lines()
 	for idx, eline in lines {
 		if eline.contains(keyword) {
 			lines[idx] = lines[idx].replace(keyword, khighlight)
-			if eline_idx == 0 {
+			if eline_idx == -1 {
 				eline_idx = idx
 			}
 		}

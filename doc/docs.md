@@ -41,6 +41,10 @@ easy to install (V will download a prebuilt binary automatically).
 It is recommended to add this folder to the PATH of your environment variables.
 This can be done with the command `v.exe symlink`.
 
+NB: Some antivirus software (like Symantec) are paranoid about executables with 
+names with only 1 letter (like `v.exe`). A possible workaround in that situation
+is renaming `v.exe` to `vlang.exe`.
+
 ### Android
 Running V graphical apps on Android is also possible via [vab](https://github.com/vlang/vab).
 
@@ -1060,10 +1064,10 @@ the `it` built-in variable to achieve a classic `map/filter` functional paradigm
 ```v
 // using filter, map and negatives array slices
 a := ['pippo.jpg', '01.bmp', '_v.txt', 'img_02.jpg', 'img_01.JPG']
-res := a.filter(it#[-4..].to_lower() == '.jpg').map(fn (w string) (string, int) {
-	return w.to_upper(), w.len
+res := a.filter(it#[-4..].to_lower() == '.jpg').map(fn (w string) string {
+	return w.to_upper()
 })
-// [('PIPPO.JPG', 9), ('IMG_02.JPG', 10), ('IMG_01.JPG', 10)]
+// ['PIPPO.JPG', 'IMG_02.JPG', 'IMG_01.JPG']
 ```
 
 ### Fixed size arrays

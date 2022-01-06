@@ -1,9 +1,8 @@
-// Copyright (c) 2019-2021 Alexander Medvednikov. All rights reserved.
+// Copyright (c) 2019-2022 Alexander Medvednikov. All rights reserved.
 // Use of this source code is governed by an MIT license
 // that can be found in the LICENSE file.
 module scanner
 
-import math.mathutil
 import os
 import strconv
 import v.token
@@ -12,6 +11,7 @@ import v.util
 import v.vet
 import v.errors
 import v.ast
+import v.mathutil
 
 const (
 	single_quote = `'`

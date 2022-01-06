@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2021 Alexander Medvednikov. All rights reserved.
+// Copyright (c) 2019-2022 Alexander Medvednikov. All rights reserved.
 // Use of this source code is governed by an MIT license
 // that can be found in the LICENSE file.
 [has_globals]
@@ -200,8 +200,13 @@ pub fn (t &Table) fn_type_signature(f &Fn) string {
 		// TODO: for now ignore mut/pts in sig for now
 		typ := arg.typ.set_nr_muls(0)
 		arg_type_sym := t.sym(typ)
-		sig += arg_type_sym.str().to_lower().replace_each(['.', '__', '&', '', '[', 'arr_', 'chan ',
-			'chan_', 'map[', 'map_of_', ']', '_to_', '<', '_T_', ',', '_', ' ', '', '>', ''])
+		if arg_type_sym.kind == .alias {
+			sig += arg_type_sym.cname
+		} else {
+			sig += arg_type_sym.str().to_lower().replace_each(['.', '__', '&', '', '[', 'arr_',
+				'chan ', 'chan_', 'map[', 'map_of_', ']', '_to_', '<', '_T_', ',', '_', ' ', '',
+				'>', ''])
+		}
 		if i < f.params.len - 1 {
 			sig += '_'
 		}
@@ -209,7 +214,11 @@ pub fn (t &Table) fn_type_signature(f &Fn) string {
 	if f.return_type != 0 && f.return_type != void_type {
 		sym := t.sym(f.return_type)
 		opt := if f.return_type.has_flag(.optional) { 'option_' } else { '' }
-		sig += '__$opt$sym.kind'
+		if sym.kind == .alias {
+			sig += '__$opt$sym.cname'
+		} else {
+			sig += '__$opt$sym.kind'
+		}
 	}
 	return sig
 }
@@ -610,12 +619,21 @@ pub fn (t &Table) find_type_idx(name string) int {
 }
 
 [inline]
-pub fn (t &Table) find_type(name string) ?&TypeSymbol {
+pub fn (t &Table) find_sym(name string) ?&TypeSymbol {
 	idx := t.type_idxs[name]
 	if idx > 0 {
 		return t.type_symbols[idx]
 	}
 	return none
+}
+
+[inline]
+pub fn (t &Table) find_sym_and_type_idx(name string) (&TypeSymbol, int) {
+	idx := t.type_idxs[name]
+	if idx > 0 {
+		return t.type_symbols[idx], idx
+	}
+	return ast.invalid_type_symbol, idx
 }
 
 pub const invalid_type_symbol = &TypeSymbol{
@@ -731,7 +749,7 @@ pub fn (mut t Table) register_type_symbol(sym TypeSymbol) int {
 		}
 	}
 	if sym.mod == 'main' {
-		existing_idx = t.type_idxs[sym.name.trim_prefix('main.')]
+		existing_idx = t.type_idxs[sym.name.trim_string_left('main.')]
 		if existing_idx > 0 {
 			idx = t.rewrite_already_registered_symbol(sym, existing_idx)
 			if idx != -2 {
@@ -826,7 +844,7 @@ pub fn (t &Table) array_fixed_cname(elem_type Type, size int) string {
 	if elem_type.is_ptr() {
 		res = '_ptr$elem_type.nr_muls()'
 	}
-	return 'Array_fixed_${elem_type_sym.cname}_$size' + res
+	return 'Array_fixed_$elem_type_sym.cname${res}_$size'
 }
 
 [inline]
@@ -1166,15 +1184,6 @@ pub fn (t &Table) value_type(typ Type) Type {
 		return typ.deref()
 	}
 	return void_type
-}
-
-[inline]
-pub fn (t &Table) mktyp(typ Type) Type {
-	match typ {
-		float_literal_type { return f64_type }
-		int_literal_type { return int_type }
-		else { return typ }
-	}
 }
 
 pub fn (mut t Table) register_fn_generic_types(fn_name string) {

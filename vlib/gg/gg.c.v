@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2021 Alexander Medvednikov. All rights reserved.
+// Copyright (c) 2019-2022 Alexander Medvednikov. All rights reserved.
 // Use of this source code is governed by an MIT license that can be found in the LICENSE file.
 
 module gg
@@ -109,9 +109,9 @@ pub mut:
 	// will get set to 2.0 for retina, will remain 1.0 for normal
 	width       int
 	height      int
-	clear_pass  C.sg_pass_action
+	clear_pass  gfx.PassAction
 	window      sapp.Desc
-	timage_pip  C.sgl_pipeline
+	timage_pip  sgl.Pipeline
 	config      Config
 	user_data   voidptr
 	ft          &FT
@@ -139,7 +139,7 @@ fn gg_init_sokol_window(user_data voidptr) {
 	mut g := unsafe { &Context(user_data) }
 	desc := sapp.create_desc()
 	/*
-	desc := C.sg_desc{
+	desc := gfx.Desc{
 		mtl_device: sapp.metal_get_device()
 		mtl_renderpass_descriptor_cb: sapp.metal_get_renderpass_descriptor
 		mtl_drawable_cb: sapp.metal_get_drawable
@@ -150,7 +150,7 @@ fn gg_init_sokol_window(user_data voidptr) {
 	}
 	*/
 	gfx.setup(&desc)
-	sgl_desc := C.sgl_desc_t{}
+	sgl_desc := sgl.Desc{}
 	sgl.setup(&sgl_desc)
 	g.scale = dpi_scale()
 	// is_high_dpi := sapp.high_dpi()
@@ -196,16 +196,16 @@ fn gg_init_sokol_window(user_data voidptr) {
 		}
 	}
 	//
-	mut pipdesc := C.sg_pipeline_desc{
+	mut pipdesc := gfx.PipelineDesc{
 		label: c'alpha_image'
 	}
 	unsafe { vmemset(&pipdesc, 0, int(sizeof(pipdesc))) }
 
-	color_state := C.sg_color_state{
-		blend: C.sg_blend_state{
+	color_state := gfx.ColorState{
+		blend: gfx.BlendState{
 			enabled: true
-			src_factor_rgb: gfx.BlendFactor(C.SG_BLENDFACTOR_SRC_ALPHA)
-			dst_factor_rgb: gfx.BlendFactor(C.SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA)
+			src_factor_rgb: .src_alpha
+			dst_factor_rgb: .one_minus_src_alpha
 		}
 	}
 	pipdesc.colors[0] = color_state
@@ -768,7 +768,6 @@ pub fn (ctx &Context) draw_slice_empty(x f32, y f32, r f32, start_angle f32, arc
 pub fn (mut ctx Context) resize(width int, height int) {
 	ctx.width = width
 	ctx.height = height
-	// C.sapp_resize_window(width, height)
 }
 
 // Draws a line between the points provided
