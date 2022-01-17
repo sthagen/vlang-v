@@ -2421,9 +2421,9 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 	got_styp := g.typ(got_type)
 	if expected_type != ast.void_type {
 		unwrapped_expected_type := g.unwrap_generic(expected_type)
-		unwrapped_got_type := g.unwrap_generic(got_type)
 		unwrapped_exp_sym := g.table.sym(unwrapped_expected_type)
-		unwrapped_got_sym := g.table.sym(unwrapped_got_type)
+		mut unwrapped_got_type := g.unwrap_generic(got_type)
+		mut unwrapped_got_sym := g.table.sym(unwrapped_got_type)
 
 		expected_deref_type := if expected_is_ptr {
 			unwrapped_expected_type.deref()
@@ -2445,11 +2445,15 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 					is_already_sum_type = true
 				}
 			}
-			if is_already_sum_type {
+			if is_already_sum_type && !g.inside_return {
 				// Don't create a new sum type wrapper if there is already one
 				g.prevent_sum_type_unwrapping_once = true
 				g.expr(expr)
 			} else {
+				if mut unwrapped_got_sym.info is ast.Aggregate {
+					unwrapped_got_type = unwrapped_got_sym.info.types[g.aggregate_type_idx]
+					unwrapped_got_sym = g.table.sym(unwrapped_got_type)
+				}
 				g.get_sumtype_casting_fn(unwrapped_got_type, unwrapped_expected_type)
 				fname := '${unwrapped_got_sym.cname}_to_sumtype_$unwrapped_exp_sym.cname'
 				g.call_cfn_for_casting_expr(fname, expr, expected_is_ptr, unwrapped_exp_sym.cname,
@@ -2510,6 +2514,29 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 	g.expr(expr)
 }
 
+fn write_octal_escape(mut b strings.Builder, c byte) {
+	b << 92 // \
+	b << 48 + (c >> 6) // oct digit 2
+	b << 48 + (c >> 3) & 7 // oct digit 1
+	b << 48 + c & 7 // oct digit 0
+}
+
+fn cescape_nonascii(original string) string {
+	mut b := strings.new_builder(original.len)
+	for c in original {
+		if c < 32 || c > 126 {
+			// Encode with a 3 digit octal escape code, which has the
+			// advantage to be limited/non dependant on what character
+			// will follow next, unlike hex escapes:
+			write_octal_escape(mut b, c)
+			continue
+		}
+		b.write_b(c)
+	}
+	res := b.str()
+	return res
+}
+
 // cestring returns a V string, properly escaped for embeddeding in a C string literal.
 fn cestring(s string) string {
 	return s.replace('\\', '\\\\').replace('"', "'")
@@ -2517,7 +2544,7 @@ fn cestring(s string) string {
 
 // ctoslit returns a '_SLIT("$s")' call, where s is properly escaped.
 fn ctoslit(s string) string {
-	return '_SLIT("' + cestring(s) + '")'
+	return '_SLIT("' + cescape_nonascii(cestring(s)) + '")'
 }
 
 fn (mut g Gen) gen_attrs(attrs []ast.Attr) {
@@ -3155,16 +3182,7 @@ fn (mut g Gen) expr(node ast.Expr) {
 			g.write('))')
 		}
 		ast.CharLiteral {
-			if node.val == r'\`' {
-				g.write("'`'")
-			} else {
-				// TODO: optimize use L-char instead of u32 when possible
-				if utf8_str_len(node.val) < node.val.len {
-					g.write('((rune)0x$node.val.utf32_code().hex() /* `$node.val` */)')
-				} else {
-					g.write("'$node.val'")
-				}
-			}
+			g.char_literal(node)
 		}
 		ast.Comment {}
 		ast.ComptimeCall {
@@ -3394,6 +3412,28 @@ fn (mut g Gen) expr(node ast.Expr) {
 	}
 	g.discard_or_result = old_discard_or_result
 	g.is_void_expr_stmt = old_is_void_expr_stmt
+}
+
+fn (mut g Gen) char_literal(node ast.CharLiteral) {
+	if node.val == r'\`' {
+		g.write("'`'")
+		return
+	}
+	// TODO: optimize use L-char instead of u32 when possible
+	if utf8_str_len(node.val) < node.val.len {
+		g.write('((rune)0x$node.val.utf32_code().hex() /* `$node.val` */)')
+		return
+	}
+	if node.val.len == 1 {
+		clit := node.val[0]
+		if clit < 32 || clit == 92 || clit > 126 {
+			g.write("'")
+			write_octal_escape(mut g.out, clit)
+			g.write("'")
+			return
+		}
+	}
+	g.write("'$node.val'")
 }
 
 // T.name, typeof(expr).name
@@ -3736,8 +3776,6 @@ fn (mut g Gen) need_tmp_var_in_match(node ast.MatchExpr) bool {
 }
 
 fn (mut g Gen) match_expr(node ast.MatchExpr) {
-	// println('match expr typ=$it.expr_type')
-	// TODO
 	if node.cond_type == 0 {
 		g.writeln('// match 0')
 		return
@@ -4437,11 +4475,6 @@ fn (mut g Gen) ident(node ast.Ident) {
 }
 
 fn (mut g Gen) cast_expr(node ast.CastExpr) {
-	if g.is_amp {
-		// &Foo(0) => ((Foo*)0)
-		g.out.go_back(1)
-	}
-	g.is_amp = false
 	sym := g.table.sym(node.typ)
 	if sym.kind in [.sum_type, .interface_] {
 		g.expr_with_cast(node.expr, node.expr_type, node.typ)

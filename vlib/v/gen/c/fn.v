@@ -1471,7 +1471,37 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 	} else {
 		node.args
 	}
-	expected_types := node.expected_arg_types
+	mut expected_types := node.expected_arg_types
+	// unwrap generics fn/method arguments to concretes
+	if node.concrete_types.len > 0 && node.concrete_types.all(!it.has_flag(.generic)) {
+		if node.is_method {
+			if func := g.table.find_method(g.table.sym(node.left_type), node.name) {
+				if func.generic_names.len > 0 {
+					for i in 0 .. expected_types.len {
+						mut muttable := unsafe { &ast.Table(g.table) }
+						if utyp := muttable.resolve_generic_to_concrete(node.expected_arg_types[i],
+							func.generic_names, node.concrete_types)
+						{
+							expected_types[i] = utyp
+						}
+					}
+				}
+			}
+		} else {
+			if func := g.table.find_fn(node.name) {
+				if func.generic_names.len > 0 {
+					for i in 0 .. expected_types.len {
+						mut muttable := unsafe { &ast.Table(g.table) }
+						if utyp := muttable.resolve_generic_to_concrete(node.expected_arg_types[i],
+							func.generic_names, node.concrete_types)
+						{
+							expected_types[i] = utyp
+						}
+					}
+				}
+			}
+		}
+	}
 	// only v variadic, C variadic args will be appeneded like normal args
 	is_variadic := expected_types.len > 0 && expected_types.last().has_flag(.variadic)
 		&& node.language == .v
@@ -1602,6 +1632,7 @@ fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type ast.Type, lang as
 		g.write('&/*mut*/')
 	} else if arg_is_ptr && !expr_is_ptr {
 		if arg.is_mut {
+			arg_sym := g.table.sym(arg_typ)
 			if exp_sym.kind == .array {
 				if (arg.expr is ast.Ident && (arg.expr as ast.Ident).kind == .variable)
 					|| arg.expr is ast.SelectorExpr {
@@ -1614,6 +1645,11 @@ fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type ast.Type, lang as
 					g.expr(arg.expr)
 					g.write('}[0]')
 				}
+				return
+			} else if arg_sym.kind == .sum_type && exp_sym.kind == .sum_type
+				&& arg.expr is ast.Ident {
+				g.write('&')
+				g.expr(arg.expr)
 				return
 			}
 		}

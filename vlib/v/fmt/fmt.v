@@ -543,11 +543,7 @@ pub fn (mut f Fmt) expr(node ast.Expr) {
 			f.chan_init(mut node)
 		}
 		ast.CharLiteral {
-			if node.val == r"\'" {
-				f.write("`'`")
-			} else {
-				f.write('`$node.val`')
-			}
+			f.char_literal(node)
 		}
 		ast.Comment {
 			f.comment(node, inline: true)
@@ -1893,6 +1889,9 @@ fn branch_is_single_line(b ast.IfBranch) bool {
 }
 
 pub fn (mut f Fmt) if_guard_expr(node ast.IfGuardExpr) {
+	if node.is_mut {
+		f.write('mut ')
+	}
 	f.write(node.var_name + ' := ')
 	f.expr(node.expr)
 }
@@ -2392,6 +2391,21 @@ pub fn (mut f Fmt) sql_expr(node ast.SqlExpr) {
 	}
 	f.writeln('')
 	f.write('}')
+}
+
+pub fn (mut f Fmt) char_literal(node ast.CharLiteral) {
+	if node.val == r"\'" {
+		f.write("`'`")
+		return
+	}
+	if node.val.len == 1 {
+		clit := node.val[0]
+		if clit < 32 || clit > 127 || clit == 92 || clit == 96 {
+			f.write('`\\x$clit.hex()`')
+			return
+		}
+	}
+	f.write('`$node.val`')
 }
 
 pub fn (mut f Fmt) string_literal(node ast.StringLiteral) {

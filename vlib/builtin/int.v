@@ -471,19 +471,45 @@ pub fn (b byte) ascii_str() string {
 
 // str_escaped returns the contents of `byte` as an escaped `string`.
 // Example: assert byte(0).str_escaped() == r'`\0`'
+[manualfree]
 pub fn (b byte) str_escaped() string {
 	str := match b {
-		0 { r'`\0`' }
-		7 { r'`\a`' }
-		8 { r'`\b`' }
-		9 { r'`\t`' }
-		10 { r'`\n`' }
-		11 { r'`\v`' }
-		12 { r'`\f`' }
-		13 { r'`\r`' }
-		27 { r'`\e`' }
-		32...126 { b.ascii_str() }
-		else { '0x' + b.hex() }
+		0 {
+			r'`\0`'
+		}
+		7 {
+			r'`\a`'
+		}
+		8 {
+			r'`\b`'
+		}
+		9 {
+			r'`\t`'
+		}
+		10 {
+			r'`\n`'
+		}
+		11 {
+			r'`\v`'
+		}
+		12 {
+			r'`\f`'
+		}
+		13 {
+			r'`\r`'
+		}
+		27 {
+			r'`\e`'
+		}
+		32...126 {
+			b.ascii_str()
+		}
+		else {
+			xx := b.hex()
+			yy := '0x' + xx
+			unsafe { xx.free() }
+			yy
+		}
 	}
 	return str
 }
@@ -518,6 +544,15 @@ pub fn (b []byte) bytestr() string {
 		buf[b.len] = 0
 		return tos(buf, b.len)
 	}
+}
+
+// byterune attempts to decode a sequence of bytes
+// from utf8 to utf32 and return the result as a rune
+// it will produce an error if there are more than
+// four bytes in the array.
+pub fn (b []byte) byterune() ?rune {
+	r := b.utf8_to_utf32() ?
+	return rune(r)
 }
 
 // repeat returns a new string with `count` number of copies of the byte it was called on.
