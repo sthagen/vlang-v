@@ -2317,6 +2317,10 @@ pub fn (mut p Parser) name_expr() ast.Expr {
 				scope: p.scope
 			}
 		}
+		if p.peek_token(2).kind == .name && p.peek_token(3).kind == .lpar && !known_var {
+			p.error_with_pos('the receiver of the method call must be an instantiated object, e.g. `foo.bar()`',
+				p.tok.position())
+		}
 		// `Color.green`
 		mut enum_name := p.check_name()
 		enum_name_pos := p.prev_tok.position()
@@ -2742,7 +2746,7 @@ fn (mut p Parser) parse_generic_types() ([]ast.Type, []string) {
 
 		mut idx := p.table.find_type_idx(name)
 		if idx == 0 {
-			idx = p.table.register_type_symbol(ast.TypeSymbol{
+			idx = p.table.register_sym(ast.TypeSymbol{
 				name: name
 				cname: util.no_dots(name)
 				mod: p.mod
@@ -3449,7 +3453,7 @@ fn (mut p Parser) enum_decl() ast.EnumDecl {
 //
 ')
 	}
-	idx := p.table.register_type_symbol(ast.TypeSymbol{
+	idx := p.table.register_sym(ast.TypeSymbol{
 		kind: .enum_
 		name: name
 		cname: util.no_dots(name)
@@ -3538,7 +3542,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 		}
 		variant_types := sum_variants.map(it.typ)
 		prepend_mod_name := p.prepend_mod(name)
-		typ := p.table.register_type_symbol(ast.TypeSymbol{
+		typ := p.table.register_sym(ast.TypeSymbol{
 			kind: .sum_type
 			name: prepend_mod_name
 			cname: util.no_dots(prepend_mod_name)
@@ -3578,7 +3582,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 	pidx := parent_type.idx()
 	p.check_for_impure_v(parent_sym.language, decl_pos)
 	prepend_mod_name := p.prepend_mod(name)
-	idx := p.table.register_type_symbol(ast.TypeSymbol{
+	idx := p.table.register_sym(ast.TypeSymbol{
 		kind: .alias
 		name: prepend_mod_name
 		cname: util.no_dots(prepend_mod_name)

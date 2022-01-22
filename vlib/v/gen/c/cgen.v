@@ -113,6 +113,7 @@ mut:
 	inside_match_optional  bool
 	inside_vweb_tmpl       bool
 	inside_return          bool
+	inside_struct_init     bool
 	inside_or_block        bool
 	inside_call            bool
 	inside_for_c_stmt      bool
@@ -701,6 +702,9 @@ pub fn (mut g Gen) init() {
 	}
 	if g.pref.is_test || 'test' in g.pref.compile_defines {
 		g.comptime_definitions.writeln('#define _VTEST (1)')
+	}
+	if g.pref.is_prof || 'profile' in g.pref.compile_defines {
+		g.comptime_definitions.writeln('#define _VPROFILE (1)')
 	}
 	if g.pref.autofree {
 		g.comptime_definitions.writeln('#define _VAUTOFREE (1)')
@@ -3390,7 +3394,9 @@ fn (mut g Gen) expr(node ast.Expr) {
 				g.expr(ast.resolve_init(node, g.unwrap_generic(node.typ), g.table))
 			} else {
 				// `user := User{name: 'Bob'}`
+				g.inside_struct_init = true
 				g.struct_init(node)
+				g.inside_struct_init = false
 			}
 		}
 		ast.TypeNode {
@@ -5004,6 +5010,8 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 			if g.fn_decl.return_type.is_ptr() {
 				var_str := g.expr_string(expr0)
 				g.write(var_str.trim('&'))
+			} else if g.table.sym(g.fn_decl.return_type).kind in [.sum_type, .interface_] {
+				g.expr_with_cast(expr0, node.types[0], g.fn_decl.return_type)
 			} else {
 				g.write('*')
 				g.expr(expr0)
@@ -6152,7 +6160,7 @@ fn (mut g Gen) type_default(typ_ ast.Type) string {
 			noscan := g.check_noscan(elem_typ)
 			init_str := '__new_array${noscan}(0, 0, sizeof($elem_type_str))'
 			if typ.has_flag(.shared_f) {
-				atyp := '__shared__Array_${g.table.sym(elem_typ).cname}'
+				atyp := '__shared__$sym.cname'
 				return '($atyp*)__dup_shared_array(&($atyp){.mtx = {0}, .val =$init_str}, sizeof($atyp))'
 			} else {
 				return init_str

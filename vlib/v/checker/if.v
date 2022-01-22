@@ -28,7 +28,7 @@ pub fn (mut c Checker) if_expr(mut node ast.IfExpr) ast.Type {
 	mut is_comptime_type_is_expr := false // if `$if T is string`
 	for i in 0 .. node.branches.len {
 		mut branch := node.branches[i]
-		if branch.cond is ast.ParExpr {
+		if branch.cond is ast.ParExpr && !c.pref.translated {
 			c.error('unnecessary `()` in `$if_kind` condition, use `$if_kind expr {` instead of `$if_kind (expr) {`.',
 				branch.pos)
 		}
@@ -50,7 +50,7 @@ pub fn (mut c Checker) if_expr(mut node ast.IfExpr) ast.Type {
 		if node.is_comptime { // Skip checking if needed
 			// smartcast field type on comptime if
 			mut comptime_field_name := ''
-			if branch.cond is ast.InfixExpr {
+			if mut branch.cond is ast.InfixExpr {
 				if branch.cond.op == .key_is {
 					if branch.cond.right !is ast.TypeNode {
 						c.error('invalid `\$if` condition: expected a type', branch.cond.right.position())
@@ -106,7 +106,7 @@ pub fn (mut c Checker) if_expr(mut node ast.IfExpr) ast.Type {
 				}
 			} else if c.pref.output_cross_c {
 				mut is_freestanding_block := false
-				if branch.cond is ast.Ident {
+				if mut branch.cond is ast.Ident {
 					if branch.cond.name == 'freestanding' {
 						is_freestanding_block = true
 					}

@@ -26,7 +26,7 @@ const (
 	valid_comptime_if_cpu_features   = ['x64', 'x32', 'little_endian', 'big_endian']
 	valid_comptime_if_other          = ['apk', 'js', 'debug', 'prod', 'test', 'glibc', 'prealloc',
 		'no_bounds_checking', 'freestanding', 'threads', 'js_node', 'js_browser', 'js_freestanding',
-		'interpreter', 'es5']
+		'interpreter', 'es5', 'profile']
 	valid_comptime_not_user_defined  = all_valid_comptime_idents()
 	array_builtin_methods            = ['filter', 'clone', 'repeat', 'reverse', 'map', 'slice',
 		'sort', 'contains', 'index', 'wait', 'any', 'all', 'first', 'last', 'pop']
@@ -679,31 +679,25 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				}
 			}
 			if left_sym.kind in [.array, .array_fixed, .map, .struct_] {
-				if left_sym.has_method(node.op.str()) {
-					if method := left_sym.find_method(node.op.str()) {
+				if left_sym.has_method_with_generic_parent(node.op.str()) {
+					if method := left_sym.find_method_with_generic_parent(node.op.str()) {
 						return_type = method.return_type
 					} else {
 						return_type = left_type
 					}
 				} else {
-					if left_sym.kind == .struct_
-						&& (left_sym.info as ast.Struct).generic_types.len > 0 {
-						return_type = left_type
+					left_name := c.table.type_to_str(left_type)
+					right_name := c.table.type_to_str(right_type)
+					if left_name == right_name {
+						c.error('undefined operation `$left_name` $node.op.str() `$right_name`',
+							left_right_pos)
 					} else {
-						left_name := c.table.type_to_str(left_type)
-						right_name := c.table.type_to_str(right_type)
-						if left_name == right_name {
-							c.error('undefined operation `$left_name` $node.op.str() `$right_name`',
-								left_right_pos)
-						} else {
-							c.error('mismatched types `$left_name` and `$right_name`',
-								left_right_pos)
-						}
+						c.error('mismatched types `$left_name` and `$right_name`', left_right_pos)
 					}
 				}
 			} else if right_sym.kind in [.array, .array_fixed, .map, .struct_] {
-				if right_sym.has_method(node.op.str()) {
-					if method := right_sym.find_method(node.op.str()) {
+				if right_sym.has_method_with_generic_parent(node.op.str()) {
+					if method := right_sym.find_method_with_generic_parent(node.op.str()) {
 						return_type = method.return_type
 					} else {
 						return_type = right_type
@@ -1821,7 +1815,7 @@ fn (mut c Checker) stmt(node ast.Stmt) {
 			node.typ = c.expr(node.expr)
 			c.expected_type = ast.void_type
 			mut or_typ := ast.void_type
-			match node.expr {
+			match mut node.expr {
 				ast.IndexExpr {
 					if node.expr.or_expr.kind != .absent {
 						node.is_expr = true
@@ -1837,7 +1831,7 @@ fn (mut c Checker) stmt(node ast.Stmt) {
 				else {}
 			}
 			if !c.pref.is_repl && (c.stmt_level == 1 || (c.stmt_level > 1 && !c.is_last_stmt)) {
-				if node.expr is ast.InfixExpr {
+				if mut node.expr is ast.InfixExpr {
 					if node.expr.op == .left_shift {
 						left_sym := c.table.final_sym(node.expr.left_type)
 						if left_sym.kind != .array {
@@ -2422,7 +2416,7 @@ pub fn (mut c Checker) expr(node ast.Expr) ast.Type {
 				c.error('expected `string` instead of `$expr_sym.name` (e.g. `field.name`)',
 					node.field_expr.position())
 			}
-			if node.field_expr is ast.SelectorExpr {
+			if mut node.field_expr is ast.SelectorExpr {
 				left_pos := node.field_expr.expr.position()
 				if c.comptime_fields_type.len == 0 {
 					c.error('compile time field access can only be used when iterating over `T.fields`',
@@ -2704,7 +2698,8 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 				}
 			}
 		}
-	} else if to_type == ast.bool_type && from_type != ast.bool_type && !c.inside_unsafe {
+	} else if to_type == ast.bool_type && from_type != ast.bool_type && !c.inside_unsafe
+		&& !c.pref.translated {
 		c.error('cannot cast to bool - use e.g. `some_int != 0` instead', node.pos)
 	} else if from_type == ast.none_type && !to_type.has_flag(.optional) {
 		type_name := c.table.type_to_str(to_type)
@@ -3024,7 +3019,7 @@ pub fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 						c.inside_const = false
 						c.mod = old_c_mod
 
-						if obj.expr is ast.CallExpr {
+						if mut obj.expr is ast.CallExpr {
 							if obj.expr.or_block.kind != .absent {
 								typ = typ.clear_flag(.optional)
 							}

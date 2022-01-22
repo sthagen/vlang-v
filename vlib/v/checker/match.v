@@ -8,7 +8,7 @@ import strings
 pub fn (mut c Checker) match_expr(mut node ast.MatchExpr) ast.Type {
 	node.is_expr = c.expected_type != ast.void_type
 	node.expected_type = c.expected_type
-	if node.cond is ast.ParExpr {
+	if mut node.cond is ast.ParExpr && !c.pref.translated {
 		c.error('unnecessary `()` in `match` condition, use `match expr {` instead of `match (expr) {`.',
 			node.cond.pos)
 	}
@@ -264,7 +264,7 @@ fn (mut c Checker) match_exprs(mut node ast.MatchExpr, cond_type_sym ast.TypeSym
 					if existing_idx > 0 {
 						expr_type = existing_idx
 					} else {
-						expr_type = c.table.register_type_symbol(ast.TypeSymbol{
+						expr_type = c.table.register_sym(ast.TypeSymbol{
 							name: name
 							cname: agg_cname.str()
 							kind: .aggregate

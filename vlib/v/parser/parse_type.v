@@ -27,13 +27,13 @@ pub fn (mut p Parser) parse_array_type(expecting token.Kind) ast.Type {
 				}
 				ast.Ident {
 					mut show_non_const_error := false
-					if const_field := p.table.global_scope.find_const('${p.mod}.$size_expr.name') {
-						if const_field.expr is ast.IntegerLiteral {
+					if mut const_field := p.table.global_scope.find_const('${p.mod}.$size_expr.name') {
+						if mut const_field.expr is ast.IntegerLiteral {
 							fixed_size = const_field.expr.val.int()
 						} else {
-							if const_field.expr is ast.InfixExpr {
+							if mut const_field.expr is ast.InfixExpr {
 								mut t := transformer.new_transformer(p.pref)
-								folded_expr := t.infix_expr(const_field.expr)
+								folded_expr := t.infix_expr(mut const_field.expr)
 
 								if folded_expr is ast.IntegerLiteral {
 									fixed_size = folded_expr.val.int()
@@ -59,7 +59,8 @@ pub fn (mut p Parser) parse_array_type(expecting token.Kind) ast.Type {
 					}
 				}
 				else {
-					p.error('expecting `int` for fixed size')
+					p.error_with_pos('fixed array size cannot use non-constant value',
+						size_expr.position())
 				}
 			}
 		}
@@ -308,7 +309,7 @@ pub fn (mut p Parser) parse_inline_sum_type() ast.Type {
 		if idx > 0 {
 			return ast.new_type(idx)
 		}
-		idx = p.table.register_type_symbol(ast.TypeSymbol{
+		idx = p.table.register_sym(ast.TypeSymbol{
 			kind: .sum_type
 			name: prepend_mod_name
 			cname: util.no_dots(prepend_mod_name)
@@ -601,7 +602,7 @@ pub fn (mut p Parser) parse_generic_type(name string) ast.Type {
 	if idx > 0 {
 		return ast.new_type(idx).set_flag(.generic)
 	}
-	idx = p.table.register_type_symbol(ast.TypeSymbol{
+	idx = p.table.register_sym(ast.TypeSymbol{
 		name: name
 		cname: util.no_dots(name)
 		mod: p.mod
@@ -684,7 +685,7 @@ pub fn (mut p Parser) parse_generic_inst_type(name string) ast.Type {
 			else {}
 		}
 
-		idx := p.table.register_type_symbol(ast.TypeSymbol{
+		idx := p.table.register_sym(ast.TypeSymbol{
 			kind: .generic_inst
 			name: bs_name
 			cname: util.no_dots(bs_cname)
