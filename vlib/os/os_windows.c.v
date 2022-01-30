@@ -366,7 +366,7 @@ pub fn execute(cmd string) Result {
 			break
 		}
 	}
-	soutput := read_data.str().trim_space()
+	soutput := read_data.str()
 	unsafe { read_data.free() }
 	exit_code := u32(0)
 	C.WaitForSingleObject(proc_info.h_process, C.INFINITE)
@@ -542,4 +542,18 @@ pub fn getegid() int {
 
 pub fn posix_set_permission_bit(path_s string, mode u32, enable bool) {
 	// windows has no concept of a permission mask, so do nothing
+}
+
+//
+
+pub fn (mut c Command) start() ? {
+	panic('not implemented')
+}
+
+pub fn (mut c Command) read_line() string {
+	panic('not implemented')
+}
+
+pub fn (mut c Command) close() ? {
+	panic('not implemented')
 }

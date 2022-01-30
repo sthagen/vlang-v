@@ -762,8 +762,11 @@ pub fn (mut g Gen) finish() {
 	if g.pref.is_livemain || g.pref.is_liveshared {
 		g.generate_hotcode_reloader_code()
 	}
-	if g.embed_file_is_prod_mode() && g.embedded_files.len > 0 {
-		g.gen_embedded_data()
+	if g.embedded_files.len > 0 {
+		if g.embed_file_is_prod_mode() {
+			g.gen_embedded_data()
+		}
+		g.gen_embedded_metadata()
 	}
 	if g.pref.is_test {
 		g.gen_c_main_for_tests()
@@ -1499,7 +1502,7 @@ fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) {
 				if stmt is ast.ExprStmt {
 					// For some reason ExprStmt.pos is 0 when ExprStmt.expr is comp if expr
 					// Extract the pos. TODO figure out why and fix.
-					stmt_pos = stmt.expr.position()
+					stmt_pos = stmt.expr.pos()
 				}
 				if stmt_pos.pos == 0 {
 					$if trace_autofree ? {
@@ -1514,7 +1517,7 @@ fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) {
 }
 
 [inline]
-fn (mut g Gen) write_v_source_line_info(pos token.Position) {
+fn (mut g Gen) write_v_source_line_info(pos token.Pos) {
 	if g.inside_ternary == 0 && g.pref.is_vlines && g.is_vlines_enabled {
 		nline := pos.line_nr + 1
 		lineinfo := '\n#line $nline "$g.vlines_path"'
@@ -1873,7 +1876,7 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 	if g.is_autofree {
 		// if node is ast.ExprStmt {&& node.expr is ast.CallExpr {
 		if node !is ast.FnDecl {
-			// p := node.position()
+			// p := node.pos()
 			// g.autofree_call_postgen(p.pos)
 		}
 	}
@@ -2437,7 +2440,7 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 		got_deref_type := if got_is_ptr { unwrapped_got_type.deref() } else { unwrapped_got_type }
 		if g.table.sumtype_has_variant(expected_deref_type, got_deref_type, false) {
 			mut is_already_sum_type := false
-			scope := g.file.scope.innermost(expr.position().pos)
+			scope := g.file.scope.innermost(expr.pos().pos)
 			if expr is ast.Ident {
 				if v := scope.find_var(expr.name) {
 					if v.smartcasts.len > 0 {
@@ -2474,7 +2477,7 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 	if to_shared {
 		shared_styp := exp_styp[0..exp_styp.len - 1] // `shared` implies ptr, so eat one `*`
 		if got_type_raw.is_ptr() {
-			g.error('cannot convert reference to `shared`', expr.position())
+			g.error('cannot convert reference to `shared`', expr.pos())
 		}
 		if exp_sym.kind == .array {
 			g.writeln('($shared_styp*)__dup_shared_array(&($shared_styp){.mtx = {0}, .val =')
@@ -2535,7 +2538,7 @@ fn cescape_nonascii(original string) string {
 			write_octal_escape(mut b, c)
 			continue
 		}
-		b.write_b(c)
+		b.write_byte(c)
 	}
 	res := b.str()
 	return res
@@ -3088,7 +3091,7 @@ fn (mut g Gen) expr(node ast.Expr) {
 	// NB: please keep the type names in the match here in alphabetical order:
 	match mut node {
 		ast.EmptyExpr {
-			g.error('g.expr(): unhandled EmptyExpr', token.Position{})
+			g.error('g.expr(): unhandled EmptyExpr', token.Pos{})
 		}
 		ast.AnonFn {
 			g.gen_anon_fn(mut node)
@@ -4164,9 +4167,9 @@ fn (mut g Gen) map_init(node ast.MapInit) {
 	unwrap_val_typ := g.unwrap_generic(node.value_type)
 	key_typ_str := g.typ(unwrap_key_typ)
 	value_typ_str := g.typ(unwrap_val_typ)
-	value_typ := g.table.sym(unwrap_val_typ)
-	key_typ := g.table.final_sym(unwrap_key_typ)
-	hash_fn, key_eq_fn, clone_fn, free_fn := g.map_fn_ptrs(key_typ)
+	value_sym := g.table.sym(unwrap_val_typ)
+	key_sym := g.table.final_sym(unwrap_key_typ)
+	hash_fn, key_eq_fn, clone_fn, free_fn := g.map_fn_ptrs(key_sym)
 	size := node.vals.len
 	mut shared_styp := '' // only needed for shared &[]{...}
 	mut styp := ''
@@ -4195,7 +4198,7 @@ fn (mut g Gen) map_init(node ast.MapInit) {
 		}
 	}
 	if size > 0 {
-		if value_typ.kind == .function {
+		if value_sym.kind == .function {
 			g.write('new_map_init${noscan}($hash_fn, $key_eq_fn, $clone_fn, $free_fn, $size, sizeof($key_typ_str), sizeof(voidptr), _MOV(($key_typ_str[$size]){')
 		} else {
 			g.write('new_map_init${noscan}($hash_fn, $key_eq_fn, $clone_fn, $free_fn, $size, sizeof($key_typ_str), sizeof($value_typ_str), _MOV(($key_typ_str[$size]){')
@@ -4204,16 +4207,20 @@ fn (mut g Gen) map_init(node ast.MapInit) {
 			g.expr(expr)
 			g.write(', ')
 		}
-		if value_typ.kind == .function {
+		if value_sym.kind == .function {
 			g.write('}), _MOV((voidptr[$size]){')
 		} else {
 			g.write('}), _MOV(($value_typ_str[$size]){')
 		}
-		for expr in node.vals {
+		for i, expr in node.vals {
 			if expr.is_auto_deref_var() {
 				g.write('*')
 			}
-			g.expr(expr)
+			if value_sym.kind == .sum_type {
+				g.expr_with_cast(expr, node.val_types[i], unwrap_val_typ)
+			} else {
+				g.expr(expr)
+			}
 			g.write(', ')
 		}
 		g.write('}))')
@@ -4674,13 +4681,13 @@ fn (mut g Gen) if_expr(node ast.IfExpr) {
 						g.expr(branch.cond.expr)
 						g.writeln(', ${var_name}.state == 0) {')
 					}
-					if short_opt || branch.cond.var_name != '_' {
+					if short_opt || branch.cond.vars[0].name != '_' {
 						base_type := g.base_type(branch.cond.expr_type)
 						if short_opt {
-							cond_var_name := if branch.cond.var_name == '_' {
+							cond_var_name := if branch.cond.vars[0].name == '_' {
 								'_dummy_${g.tmp_count + 1}'
 							} else {
-								branch.cond.var_name
+								branch.cond.vars[0].name
 							}
 							g.write('\t$base_type $cond_var_name = ')
 							g.expr(branch.cond.expr)
@@ -4688,16 +4695,34 @@ fn (mut g Gen) if_expr(node ast.IfExpr) {
 						} else {
 							mut is_auto_heap := false
 							if branch.stmts.len > 0 {
-								scope := g.file.scope.innermost(ast.Node(branch.stmts[branch.stmts.len - 1]).position().pos)
-								if v := scope.find_var(branch.cond.var_name) {
+								scope := g.file.scope.innermost(ast.Node(branch.stmts[branch.stmts.len - 1]).pos().pos)
+								if v := scope.find_var(branch.cond.vars[0].name) {
 									is_auto_heap = v.is_auto_heap
 								}
 							}
-							left_var_name := c_name(branch.cond.var_name)
-							if is_auto_heap {
-								g.writeln('\t$base_type* $left_var_name = HEAP($base_type, *($base_type*)${var_name}.data);')
-							} else {
-								g.writeln('\t$base_type $left_var_name = *($base_type*)${var_name}.data;')
+							if branch.cond.vars.len == 1 {
+								left_var_name := c_name(branch.cond.vars[0].name)
+								if is_auto_heap {
+									g.writeln('\t$base_type* $left_var_name = HEAP($base_type, *($base_type*)${var_name}.data);')
+								} else {
+									g.writeln('\t$base_type $left_var_name = *($base_type*)${var_name}.data;')
+								}
+							} else if branch.cond.vars.len > 1 {
+								for vi, var in branch.cond.vars {
+									left_var_name := c_name(var.name)
+									sym := g.table.sym(branch.cond.expr_type)
+									if sym.kind == .multi_return {
+										mr_info := sym.info as ast.MultiReturn
+										if mr_info.types.len == branch.cond.vars.len {
+											var_typ := g.typ(mr_info.types[vi])
+											if is_auto_heap {
+												g.writeln('\t$var_typ* $left_var_name = (HEAP($base_type, *($base_type*)${var_name}.data).arg$vi);')
+											} else {
+												g.writeln('\t$var_typ $left_var_name = (*($base_type*)${var_name}.data).arg$vi;')
+											}
+										}
+									}
+								}
 							}
 						}
 					}
@@ -5613,13 +5638,13 @@ fn verror(s string) {
 }
 
 [noreturn]
-fn (g &Gen) error(s string, pos token.Position) {
+fn (g &Gen) error(s string, pos token.Pos) {
 	ferror := util.formatted_error('cgen error:', s, g.file.path, pos)
 	eprintln(ferror)
 	exit(1)
 }
 
-fn (g &Gen) checker_bug(s string, pos token.Position) {
+fn (g &Gen) checker_bug(s string, pos token.Pos) {
 	g.error('checker bug; $s', pos)
 }
 
@@ -6922,7 +6947,7 @@ static inline __shared__$interface_name ${shared_fn_name}(__shared__$cctype* x) 
 	return sb.str()
 }
 
-fn (mut g Gen) panic_debug_info(pos token.Position) (int, string, string, string) {
+fn (mut g Gen) panic_debug_info(pos token.Pos) (int, string, string, string) {
 	paline := pos.line_nr + 1
 	if isnil(g.fn_decl) {
 		return paline, '', 'main', 'C._vinit'

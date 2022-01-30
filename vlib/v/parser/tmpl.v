@@ -76,7 +76,7 @@ fn is_html_open_tag(name string, s string) bool {
 fn insert_template_code(fn_name string, tmpl_str_start string, line string) string {
 	// HTML, may include `@var`
 	// escaped by cgen, unless it's a `vweb.RawHtml` string
-	trailing_bs := parser.tmpl_str_end + 'sb_${fn_name}.write_b(92)\n' + tmpl_str_start
+	trailing_bs := parser.tmpl_str_end + 'sb_${fn_name}.write_byte(92)\n' + tmpl_str_start
 	round1 := ['\\', '\\\\', r"'", "\\'", r'@', r'$']
 	round2 := [r'$$', r'\@', r'.$', r'.@']
 	mut rline := line.replace_each(round1).replace_each(round2)
@@ -133,7 +133,7 @@ fn vweb_tmpl_${fn_name}() string {
 			p.error_with_error(errors.Error{
 				message: "Please use @include 'header' instead of @header (deprecated)"
 				file_path: template_file
-				pos: token.Position{
+				pos: token.Pos{
 					len: '@header'.len
 					line_nr: tline_number
 					pos: start_of_line_pos + position
@@ -148,7 +148,7 @@ fn vweb_tmpl_${fn_name}() string {
 			p.error_with_error(errors.Error{
 				message: "Please use @include 'footer' instead of @footer (deprecated)"
 				file_path: template_file
-				pos: token.Position{
+				pos: token.Pos{
 					len: '@footer'.len
 					line_nr: tline_number
 					pos: start_of_line_pos + position
@@ -182,7 +182,7 @@ fn vweb_tmpl_${fn_name}() string {
 					message: 'Reading file $file_name from path: $file_path failed'
 					details: "Failed to @include '$file_name'"
 					file_path: template_file
-					pos: token.Position{
+					pos: token.Pos{
 						len: '@include '.len + file_name.len
 						line_nr: tline_number
 						pos: start_of_line_pos + position

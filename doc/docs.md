@@ -2743,6 +2743,48 @@ fn announce(s Something) {
 	}
 }
 ```
+
+```v
+interface IFoo {
+	foo()
+}
+
+interface IBar {
+	bar()
+}
+
+// implements only IFoo
+struct SFoo {}
+
+fn (sf SFoo) foo() {}
+
+// implements both IFoo and IBar
+struct SFooBar {}
+
+fn (sfb SFooBar) foo() {}
+
+fn (sfb SFooBar) bar() {
+	dump('This implements IBar')
+}
+
+fn main() {
+	mut arr := []IFoo{}
+	arr << SFoo{}
+	arr << SFooBar{}
+
+	for a in arr {
+		dump(a)
+		// In order to execute instances that implements IBar.
+		if a is IBar {
+			// a.bar() // Error.
+			b := a as IBar
+			dump(b)
+			b.bar()
+		}
+	}
+}
+```
+
 For more information, see [Dynamic casts](#dynamic-casts).
 
 #### Interface method definitions
@@ -3461,7 +3503,7 @@ fn main() {
 ```
 
 ### Channels
-Channels are the preferred way to communicate between coroutines. V's channels work basically like
+Channels are the preferred way to communicate between threads. V's channels work basically like
 those in Go. You can push objects into a channel on one end and pop objects from the other end.
 Channels can be buffered or unbuffered and it is possible to `select` from multiple channels.
 
@@ -3475,7 +3517,7 @@ ch2 := chan f64{cap: 100} // buffer length 100
 ```
 
 Channels do not have to be declared as `mut`. The buffer length is not part of the type but
-a field of the individual channel object. Channels can be passed to coroutines like normal
+a field of the individual channel object. Channels can be passed to threads like normal
 variables:
 
 ```v
@@ -3627,8 +3669,8 @@ and [Channel Select](#channel-select) above).
 
 ### Shared Objects
 
-Data can be exchanged between a coroutine and the calling thread via a shared variable.
-Such variables should be created as `shared` and passed to the coroutine as such, too.
+Data can be exchanged between a thread and the calling thread via a shared variable.
+Such variables should be created as `shared` and passed to the thread as such, too.
 The underlying `struct` contains a hidden *mutex* that allows locking concurrent access
 using `rlock` for read-only and `lock` for read/write access.
 
@@ -3845,6 +3887,11 @@ memory manually. (See [attributes](#attributes)).
 
 _Note: right now autofree is hidden behind the -autofree flag. It will be enabled by
 default in V 0.3. If autofree is not used, V programs will leak memory._
+
+Note 2: Autofree is still WIP. Until it stabilises and becomes the default, please 
+compile your long running processes with `-gc boehm`, which will use the 
+Boehm-Demers-Weiser conservative garbage collector, to free the memory, that your
+programs leak, at runtime.
 
 ### Examples
 
