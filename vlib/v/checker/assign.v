@@ -47,6 +47,9 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 				c.error('unexpected `mut` on right-hand side of assignment', right.mut_pos)
 			}
 		}
+		if right is ast.None {
+			c.error('you can not assign a `none` value to a variable', right.pos)
+		}
 	}
 	if node.left.len != right_len {
 		if right_first is ast.CallExpr {
@@ -177,7 +180,7 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 					}
 					if obj.is_stack_obj && !c.inside_unsafe {
 						type_sym := c.table.sym(obj.typ.set_nr_muls(0))
-						if !type_sym.is_heap() && !c.pref.translated {
+						if !type_sym.is_heap() && !c.pref.translated && !c.file.is_translated {
 							suggestion := if type_sym.kind == .struct_ {
 								'declaring `$type_sym.name` as `[heap]`'
 							} else {
@@ -278,7 +281,7 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 			ast.PrefixExpr {
 				// Do now allow `*x = y` outside `unsafe`
 				if left.op == .mul {
-					if !c.inside_unsafe && !c.pref.translated {
+					if !c.inside_unsafe && !c.pref.translated && !c.file.is_translated {
 						c.error('modifying variables via dereferencing can only be done in `unsafe` blocks',
 							node.pos)
 					} else {
@@ -325,7 +328,7 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 			// right type was a generic `T`
 			continue
 		}
-		if c.pref.translated {
+		if c.pref.translated || c.file.is_translated {
 			// TODO fix this in C2V instead, for example cast enums to int before using `|` on them.
 			// TODO replace all c.pref.translated checks with `$if !translated` for performance
 			continue

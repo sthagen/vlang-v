@@ -4474,7 +4474,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 			}
 		}
 	} else if node_info is ast.IdentFn {
-		if g.pref.translated {
+		if g.pref.translated || g.file.is_translated {
 			// `p_mobjthinker` => `P_MobjThinker`
 			if f := g.table.find_fn(node.name) {
 				// TODO PERF fn lookup for each fn call in translated mode
@@ -4511,7 +4511,7 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 		g.expr(node.expr)
 	} else {
 		styp := g.typ(node.typ)
-		if g.pref.translated && sym.kind == .function {
+		if (g.pref.translated || g.file.is_translated) && sym.kind == .function {
 			// TODO handle the type in fn casts, not just exprs
 			/*
 			info := sym.info as ast.FnType
@@ -4530,6 +4530,12 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 			g.gen_optional_error(node.typ, node.expr)
 		} else {
 			g.write('(${cast_label}(')
+			if sym.kind == .alias && g.table.final_sym(node.typ).kind == .string {
+				ptr_cnt := node.typ.nr_muls() - node.expr_type.nr_muls()
+				if ptr_cnt > 0 {
+					g.write('&'.repeat(ptr_cnt))
+				}
+			}
 			g.expr(node.expr)
 			if node.expr is ast.IntegerLiteral {
 				if node.typ in [ast.u64_type, ast.u32_type, ast.u16_type] {
@@ -6849,7 +6855,7 @@ static inline __shared__$interface_name ${shared_fn_name}(__shared__$cctype* x) 
 						...params[0]
 						typ: st.set_nr_muls(1)
 					}
-					fargs, _, _ := g.fn_args(params, voidptr(0))
+					fargs, _, _ := g.fn_decl_params(params, voidptr(0), false)
 					mut parameter_name := g.out.cut_last(g.out.len - params_start_pos)
 
 					if st.is_ptr() {

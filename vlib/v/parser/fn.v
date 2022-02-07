@@ -255,7 +255,8 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 	if p.tok.kind == .name {
 		// TODO high order fn
 		name = if language == .js { p.check_js_name() } else { p.check_name() }
-		if language == .v && !p.pref.translated && util.contains_capital(name) && !p.builtin_mod {
+		if language == .v && !p.pref.translated && !p.is_translated && util.contains_capital(name)
+			&& !p.builtin_mod {
 			p.error_with_pos('function names cannot contain uppercase letters, use snake_case instead',
 				name_pos)
 			return ast.FnDecl{
@@ -425,7 +426,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 		} else {
 			name = p.prepend_mod(name)
 		}
-		if !p.pref.translated && language == .v {
+		if language == .v {
 			if existing := p.table.fns[name] {
 				if existing.name != '' {
 					if file_mode == .v && existing.file_mode != .v {

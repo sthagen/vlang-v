@@ -135,6 +135,9 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 			c.error('generic struct init must specify type parameter, e.g. Foo<int>',
 				node.pos)
 		}
+		if node.generic_types.len > 0 && struct_sym.info.generic_types != node.generic_types {
+			c.table.replace_generic_type(node.typ, node.generic_types)
+		}
 	} else if struct_sym.info is ast.Alias {
 		parent_sym := c.table.sym(struct_sym.info.parent_type)
 		// e.g. ´x := MyMapAlias{}´, should be a cast to alias type ´x := MyMapAlias(map[...]...)´
@@ -310,7 +313,7 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 							}
 							if obj.is_stack_obj && !c.inside_unsafe {
 								sym := c.table.sym(obj.typ.set_nr_muls(0))
-								if !sym.is_heap() && !c.pref.translated {
+								if !sym.is_heap() && !c.pref.translated && !c.file.is_translated {
 									suggestion := if sym.kind == .struct_ {
 										'declaring `$sym.name` as `[heap]`'
 									} else {
@@ -345,7 +348,7 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 					continue
 				}
 				if field.typ.is_ptr() && !field.typ.has_flag(.shared_f) && !node.has_update_expr
-					&& !c.pref.translated {
+					&& !c.pref.translated && !c.file.is_translated {
 					c.error('reference field `${type_sym.name}.$field.name` must be initialized',
 						node.pos)
 				}
