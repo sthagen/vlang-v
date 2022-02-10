@@ -116,7 +116,7 @@ pub fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 
 pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 	if node.typ == ast.void_type {
-		// Short syntax `({foo: bar})`
+		// short syntax `foo(key:val, key2:val2)`
 		if c.expected_type == ast.void_type {
 			c.error('unexpected short struct syntax', node.pos)
 			return ast.void_type
@@ -131,9 +131,14 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 	struct_sym := c.table.sym(node.typ)
 	if struct_sym.info is ast.Struct {
 		if struct_sym.info.generic_types.len > 0 && struct_sym.info.concrete_types.len == 0
-			&& c.table.cur_concrete_types.len == 0 {
-			c.error('generic struct init must specify type parameter, e.g. Foo<int>',
-				node.pos)
+			&& !node.is_short_syntax {
+			if c.table.cur_concrete_types.len == 0 {
+				c.error('generic struct init must specify type parameter, e.g. Foo<int>',
+					node.pos)
+			} else if node.generic_types.len == 0 {
+				c.error('generic struct init must specify type parameter, e.g. Foo<T>',
+					node.pos)
+			}
 		}
 		if node.generic_types.len > 0 && struct_sym.info.generic_types != node.generic_types {
 			c.table.replace_generic_type(node.typ, node.generic_types)
