@@ -12,7 +12,7 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 	node.left_type = c.expr(node.left)
 	if node.is_env {
 		env_value := util.resolve_env_value("\$env('$node.args_var')", false) or {
-			c.error(err.msg, node.env_pos)
+			c.error(err.msg(), node.env_pos)
 			return ast.string_type
 		}
 		node.env_value = env_value
@@ -109,10 +109,19 @@ fn (mut c Checker) comptime_for(node ast.ComptimeFor) {
 		c.error('unknown type `$sym.name`', node.typ_pos)
 	}
 	if node.kind == .fields {
-		c.comptime_fields_type[node.val_var] = node.typ
-		c.comptime_fields_default_type = node.typ
+		if sym.kind == .struct_ {
+			sym_info := sym.info as ast.Struct
+			c.inside_comptime_for_field = true
+			for field in sym_info.fields {
+				c.comptime_fields_type[node.val_var] = node.typ
+				c.comptime_fields_default_type = field.typ
+				c.stmts(node.stmts)
+			}
+			c.inside_comptime_for_field = false
+		}
+	} else {
+		c.stmts(node.stmts)
 	}
-	c.stmts(node.stmts)
 }
 
 // comptime const eval
@@ -476,7 +485,7 @@ fn (mut c Checker) comptime_if_branch(cond ast.Expr, pos token.Pos) bool {
 						left_type := c.expr(cond.left)
 						right_type := c.expr(cond.right)
 						expr := c.find_definition(cond.left) or {
-							c.error(err.msg, cond.left.pos)
+							c.error(err.msg(), cond.left.pos)
 							return false
 						}
 						if !c.check_types(right_type, left_type) {
@@ -558,7 +567,7 @@ fn (mut c Checker) comptime_if_branch(cond ast.Expr, pos token.Pos) bool {
 					return false
 				}
 				expr := c.find_obj_definition(cond.obj) or {
-					c.error(err.msg, cond.pos)
+					c.error(err.msg(), cond.pos)
 					return false
 				}
 				if !c.check_types(typ, ast.bool_type) {
@@ -573,7 +582,7 @@ fn (mut c Checker) comptime_if_branch(cond ast.Expr, pos token.Pos) bool {
 		ast.ComptimeCall {
 			if cond.is_pkgconfig {
 				mut m := pkgconfig.main([cond.args_var]) or {
-					c.error(err.msg, cond.pos)
+					c.error(err.msg(), cond.pos)
 					return true
 				}
 				m.run() or { return true }

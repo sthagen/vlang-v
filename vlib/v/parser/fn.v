@@ -92,6 +92,7 @@ pub fn (mut p Parser) call_expr(language ast.Language, mod string) ast.CallExpr 
 		language: language
 		concrete_types: concrete_types
 		concrete_list_pos: concrete_list_pos
+		raw_concrete_types: concrete_types
 		or_block: ast.OrExpr{
 			stmts: or_stmts
 			kind: or_kind
@@ -281,12 +282,6 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 			}
 		}
 		if !p.pref.is_fmt {
-			if !is_method && !p.builtin_mod && name in builtin_functions {
-				p.error_with_pos('cannot redefine builtin function `$name`', name_pos)
-				return ast.FnDecl{
-					scope: 0
-				}
-			}
 			if name in p.imported_symbols {
 				p.error_with_pos('cannot redefine imported function `$name`', name_pos)
 				return ast.FnDecl{
@@ -493,6 +488,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 	// }
 	fn_decl := ast.FnDecl{
 		name: name
+		short_name: short_fn_name
 		mod: p.mod
 		stmts: stmts
 		return_type: return_type
@@ -704,6 +700,7 @@ fn (mut p Parser) anon_fn() ast.AnonFn {
 	return ast.AnonFn{
 		decl: ast.FnDecl{
 			name: name
+			short_name: ''
 			mod: p.mod
 			stmts: stmts
 			return_type: return_type
@@ -1011,7 +1008,7 @@ fn (mut p Parser) check_fn_atomic_arguments(typ ast.Type, pos token.Pos) {
 fn have_fn_main(stmts []ast.Stmt) bool {
 	for stmt in stmts {
 		if stmt is ast.FnDecl {
-			if stmt.name == 'main.main' && stmt.mod == 'main' {
+			if stmt.name == 'main.main' {
 				return true
 			}
 		}

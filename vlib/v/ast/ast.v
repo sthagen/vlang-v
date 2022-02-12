@@ -183,7 +183,6 @@ pub:
 pub struct StringInterLiteral {
 pub:
 	vals       []string
-	exprs      []Expr
 	fwidths    []int
 	precisions []int
 	pluss      []bool
@@ -191,6 +190,7 @@ pub:
 	fmt_poss   []token.Pos
 	pos        token.Pos
 pub mut:
+	exprs      []Expr
 	expr_types []Type
 	fmts       []byte
 	need_fmts  []bool // an explicit non-default fmt required, e.g. `x`
@@ -409,6 +409,7 @@ pub mut:
 	update_expr          Expr
 	update_expr_type     Type
 	update_expr_comments []Comment
+	is_update_embed      bool
 	has_update_expr      bool
 	fields               []StructInitField
 	embeds               []StructInitEmbed
@@ -449,8 +450,9 @@ pub mut:
 // function or method declaration
 pub struct FnDecl {
 pub:
-	name            string
-	mod             string
+	name            string // 'math.bits.normalize'
+	short_name      string // 'normalize'
+	mod             string // 'math.bits'
 	is_deprecated   bool
 	is_pub          bool
 	is_variadic     bool
@@ -533,6 +535,7 @@ pub mut:
 	should_be_skipped  bool   // true for calls to `[if someflag?]` functions, when there is no `-d someflag`
 	concrete_types     []Type // concrete types, e.g. <int, string>
 	concrete_list_pos  token.Pos
+	raw_concrete_types []Type
 	free_receiver      bool // true if the receiver expression needs to be freed
 	scope              &Scope
 	from_embed_types   []Type // holds the type of the embed that the method is called from

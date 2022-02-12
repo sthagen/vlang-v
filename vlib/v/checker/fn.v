@@ -70,6 +70,9 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 	}
 	if node.language == .v && !c.is_builtin_mod && !node.is_anon {
 		c.check_valid_snake_case(node.name, 'function name', node.pos)
+		if !node.is_method && node.mod == 'main' && node.short_name in c.table.builtin_pub_fns {
+			c.error('cannot redefine builtin public function `$node.short_name`', node.pos)
+		}
 	}
 	if node.name == 'main.main' {
 		c.main_fn_decl_node = *node
@@ -425,6 +428,7 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 	}
 	mut has_generic := false // foo<T>() instead of foo<int>()
 	mut concrete_types := []ast.Type{}
+	node.concrete_types = node.raw_concrete_types
 	for concrete_type in node.concrete_types {
 		if concrete_type.has_flag(.generic) {
 			has_generic = true
@@ -774,6 +778,13 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 
 		typ := c.check_expr_opt_call(call_arg.expr, c.expr(call_arg.expr))
 		node.args[i].typ = typ
+		if c.inside_comptime_for_field {
+			if mut call_arg.expr is ast.Ident {
+				if mut call_arg.expr.obj is ast.Var {
+					node.args[i].typ = call_arg.expr.obj.typ
+				}
+			}
+		}
 		typ_sym := c.table.sym(typ)
 		param_typ_sym := c.table.sym(param.typ)
 		if func.is_variadic && typ.has_flag(.variadic) && node.args.len - 1 > i {
@@ -891,7 +902,7 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 					continue
 				}
 			}
-			c.error('$err.msg in argument ${i + 1} to `$fn_name`', call_arg.pos)
+			c.error('$err.msg() in argument ${i + 1} to `$fn_name`', call_arg.pos)
 		}
 		// Warn about automatic (de)referencing, which will be removed soon.
 		if func.language != .c && !c.inside_unsafe && typ.nr_muls() != param.typ.nr_muls()
@@ -933,7 +944,10 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 						continue
 					}
 					c.check_expected_call_arg(utyp, unwrap_typ, node.language, call_arg) or {
-						c.error('$err.msg in argument ${i + 1} to `$fn_name`', call_arg.pos)
+						if c.comptime_fields_type.len > 0 {
+							continue
+						}
+						c.error('$err.msg() in argument ${i + 1} to `$fn_name`', call_arg.pos)
 					}
 				}
 			}
@@ -1140,8 +1154,8 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 			has_method = true
 			mut embed_types := []ast.Type{}
 			method, embed_types = c.table.find_method_from_embeds(left_sym, method_name) or {
-				if err.msg != '' {
-					c.error(err.msg, node.pos)
+				if err.msg() != '' {
+					c.error(err.msg(), node.pos)
 				}
 				has_method = false
 				ast.Fn{}, []ast.Type{}
@@ -1153,7 +1167,7 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 		}
 		if left_sym.kind == .aggregate {
 			// the error message contains the problematic type
-			unknown_method_msg = err.msg
+			unknown_method_msg = err.msg()
 		}
 	}
 	if has_method {
@@ -1282,7 +1296,7 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 				// continue
 				// }
 				if got_arg_typ != ast.void_type {
-					c.error('$err.msg in argument ${i + 1} to `${left_sym.name}.$method_name`',
+					c.error('$err.msg() in argument ${i + 1} to `${left_sym.name}.$method_name`',
 						arg.pos)
 				}
 			}
@@ -1429,7 +1443,7 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 					c.check_expected_call_arg(targ, c.unwrap_generic(exp_arg_typ), node.language,
 						arg) or {
 						if targ != ast.void_type {
-							c.error('$err.msg in argument ${i + 1} to `${left_sym.name}.$method_name`',
+							c.error('$err.msg() in argument ${i + 1} to `${left_sym.name}.$method_name`',
 								arg.pos)
 						}
 					}
@@ -1663,7 +1677,7 @@ fn (mut c Checker) map_builtin_method_call(mut node ast.CallExpr, left_type ast.
 			info := left_sym.info as ast.Map
 			arg_type := c.expr(node.args[0].expr)
 			c.check_expected_call_arg(arg_type, info.key_type, node.language, node.args[0]) or {
-				c.error('$err.msg in argument 1 to `Map.delete`', node.args[0].pos)
+				c.error('$err.msg() in argument 1 to `Map.delete`', node.args[0].pos)
 			}
 		}
 		else {}

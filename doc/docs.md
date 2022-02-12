@@ -113,6 +113,7 @@ For more details and troubleshooting, please visit the [vab GitHub repository](h
     * [Sum types](#sum-types)
     * [Type aliases](#type-aliases)
     * [Option/Result types & error handling](#optionresult-types-and-error-handling)
+* [Custom error types](#custom-error-types)
 * [Generics](#generics)
 * [Concurrency](#concurrency)
     * [Spawning Concurrent Tasks](#spawning-concurrent-tasks)
@@ -2647,18 +2648,18 @@ particularly useful for initializing a C library.
 ## Type Declarations
 
 ### Interfaces
-
 ```v
+// interface-example.1
 struct Dog {
-	breed string
-}
-
-struct Cat {
 	breed string
 }
 
 fn (d Dog) speak() string {
 	return 'woof'
+}
+
+struct Cat {
+	breed string
 }
 
 fn (c Cat) speak() string {
@@ -2671,14 +2672,16 @@ interface Speaker {
 	speak() string
 }
 
-dog := Dog{'Leonberger'}
-cat := Cat{'Siamese'}
+fn main() {
+	dog := Dog{'Leonberger'}
+	cat := Cat{'Siamese'}
 
-mut arr := []Speaker{}
-arr << dog
-arr << cat
-for item in arr {
-	println('a $item.breed says: $item.speak()')
+	mut arr := []Speaker{}
+	arr << dog
+	arr << cat
+	for item in arr {
+		println('a $item.breed says: $item.speak()')
+	}
 }
 ```
 
@@ -2691,6 +2694,7 @@ An interface can have a `mut:` section. Implementing types will need
 to have a `mut` receiver, for methods declared in the `mut:` section
 of an interface.
 ```v
+// interface-example.2
 module main
 
 pub interface Foo {
@@ -2734,20 +2738,29 @@ fn fn1(s Foo) {
 
 We can test the underlying type of an interface using dynamic cast operators:
 ```v oksyntax
+// interface-exmaple.3 (continued from interface-exampe.1)
 interface Something {}
 
 fn announce(s Something) {
 	if s is Dog {
 		println('a $s.breed dog') // `s` is automatically cast to `Dog` (smart cast)
 	} else if s is Cat {
-		println('a $s.breed cat')
+		println('a cat speaks $s.speak()')
 	} else {
 		println('something else')
 	}
 }
+
+fn main() {
+	dog := Dog{'Leonberger'}
+	cat := Cat{'Siamese'}
+	announce(dog)
+	announce(cat)
+}
 ```
 
 ```v
+// interface-example.4
 interface IFoo {
 	foo()
 }
@@ -3338,6 +3351,39 @@ if resp := http.get('https://google.com') {
 ```
 Above, `http.get` returns a `?http.Response`. `resp` is only in scope for the first
 `if` branch. `err` is only in scope for the `else` branch.
+
+
+## Custom error types
+
+V gives you the ability to define custom error types through the `IError` interface. 
+The interface requires two methods: `msg() string` and `code() int`. Every type that 
+implements these methods can be used as an error. 
+
+When defining a custom error type it is recommended to embed the builtin `Error` default 
+implementation. This provides an empty default implementation for both required methods, 
+so you only have to implement what you really need, and may provide additional utility 
+functions in the future.
+
+```v
+struct PathError {
+	Error
+	path string
+}
+
+fn (err PathError) msg() string {
+	return 'Failed to open path: $err.path'
+}
+
+fn try_open(path string) ? {
+	return IError(PathError{
+		path: path
+	})
+}
+
+fn main() {
+	try_open('/tmp') or { panic(err) }
+}
+```
 
 ## Generics
 

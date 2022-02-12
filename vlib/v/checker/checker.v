@@ -70,21 +70,22 @@ pub mut:
 	rlocked_names    []string // vars that are currently read-locked
 	in_for_count     int      // if checker is currently in a for loop
 	// checked_ident  string // to avoid infinite checker loops
-	should_abort   bool // when too many errors/warnings/notices are accumulated, .should_abort becomes true. It is checked in statement/expression loops, so the checker can return early, instead of wasting time.
-	returns        bool
-	scope_returns  bool
-	is_builtin_mod bool // true inside the 'builtin', 'os' or 'strconv' modules; TODO: remove the need for special casing this
-	is_generated   bool // true for `[generated] module xyz` .v files
-	inside_unsafe  bool // true inside `unsafe {}` blocks
-	inside_const   bool // true inside `const ( ... )` blocks
-	inside_anon_fn bool // true inside `fn() { ... }()`
-	inside_ref_lit bool // true inside `a := &something`
-	inside_defer   bool // true inside `defer {}` blocks
-	inside_fn_arg  bool // `a`, `b` in `a.f(b)`
-	inside_ct_attr bool // true inside `[if expr]`
-	skip_flags     bool // should `#flag` and `#include` be skipped
-	fn_level       int  // 0 for the top level, 1 for `fn abc() {}`, 2 for a nested fn, etc
-	ct_cond_stack  []ast.Expr
+	should_abort              bool // when too many errors/warnings/notices are accumulated, .should_abort becomes true. It is checked in statement/expression loops, so the checker can return early, instead of wasting time.
+	returns                   bool
+	scope_returns             bool
+	is_builtin_mod            bool // true inside the 'builtin', 'os' or 'strconv' modules; TODO: remove the need for special casing this
+	is_generated              bool // true for `[generated] module xyz` .v files
+	inside_unsafe             bool // true inside `unsafe {}` blocks
+	inside_const              bool // true inside `const ( ... )` blocks
+	inside_anon_fn            bool // true inside `fn() { ... }()`
+	inside_ref_lit            bool // true inside `a := &something`
+	inside_defer              bool // true inside `defer {}` blocks
+	inside_fn_arg             bool // `a`, `b` in `a.f(b)`
+	inside_ct_attr            bool // true inside `[if expr]`
+	inside_comptime_for_field bool
+	skip_flags                bool // should `#flag` and `#include` be skipped
+	fn_level                  int  // 0 for the top level, 1 for `fn abc() {}`, 2 for a nested fn, etc
+	ct_cond_stack             []ast.Expr
 mut:
 	stmt_level int // the nesting level inside each stmts list;
 	// .stmt_level is used to check for `evaluated but not used` ExprStmts like `1 << 1`
@@ -612,7 +613,7 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					if left_sym.kind !in [.sum_type, .interface_] {
 						elem_type := right_final.array_info().elem_type
 						c.check_expected(left_type, elem_type) or {
-							c.error('left operand to `$node.op` does not match the array element type: $err.msg',
+							c.error('left operand to `$node.op` does not match the array element type: $err.msg()',
 								left_right_pos)
 						}
 					}
@@ -620,7 +621,7 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				.map {
 					map_info := right_final.map_info()
 					c.check_expected(left_type, map_info.key_type) or {
-						c.error('left operand to `$node.op` does not match the map key type: $err.msg',
+						c.error('left operand to `$node.op` does not match the map key type: $err.msg()',
 							left_right_pos)
 					}
 					node.left_type = map_info.key_type
@@ -1306,6 +1307,15 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 		// Verify methods
 		for imethod in imethods {
 			method := c.table.find_method_with_embeds(typ_sym, imethod.name) or {
+				// >> Hack to allow old style custom error implementations
+				// TODO: remove once deprecation period for `IError` methods has ended
+				if inter_sym.name == 'IError' && (imethod.name == 'msg' || imethod.name == 'code') {
+					c.note("`$styp` doesn't implement method `$imethod.name` of interface `$inter_sym.name`. The usage of fields is being deprecated in favor of methods.",
+						pos)
+					continue
+				}
+				// <<
+
 				typ_sym.find_method_with_generic_parent(imethod.name) or {
 					c.error("`$styp` doesn't implement method `$imethod.name` of interface `$inter_sym.name`",
 						pos)
@@ -1343,8 +1353,15 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 			}
 			// voidptr is an escape hatch, it should be allowed to be passed
 			if utyp != ast.voidptr_type {
-				c.error("`$styp` doesn't implement field `$ifield.name` of interface `$inter_sym.name`",
-					pos)
+				// >> Hack to allow old style custom error implementations
+				// TODO: remove once deprecation period for `IError` methods has ended
+				if inter_sym.name == 'IError' && (ifield.name == 'msg' || ifield.name == 'code') {
+					// do nothing, necessary warnings are already printed
+				} else {
+					// <<
+					c.error("`$styp` doesn't implement field `$ifield.name` of interface `$inter_sym.name`",
+						pos)
+				}
 			}
 		}
 		inter_sym.info.types << utyp
@@ -1571,15 +1588,15 @@ pub fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 			has_field = true
 			mut embed_types := []ast.Type{}
 			field, embed_types = c.table.find_field_from_embeds(sym, field_name) or {
-				if err.msg != '' {
-					c.error(err.msg, node.pos)
+				if err.msg() != '' {
+					c.error(err.msg(), node.pos)
 				}
 				has_field = false
 				ast.StructField{}, []ast.Type{}
 			}
 			node.from_embed_types = embed_types
 			if sym.kind in [.aggregate, .sum_type] {
-				unknown_field_msg = err.msg
+				unknown_field_msg = err.msg()
 			}
 		}
 		if !c.inside_unsafe {
@@ -1600,8 +1617,8 @@ pub fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 				has_field = true
 				mut embed_types := []ast.Type{}
 				field, embed_types = c.table.find_field_from_embeds(gs, field_name) or {
-					if err.msg != '' {
-						c.error(err.msg, node.pos)
+					if err.msg() != '' {
+						c.error(err.msg(), node.pos)
 					}
 					has_field = false
 					ast.StructField{}, []ast.Type{}
@@ -1636,6 +1653,20 @@ pub fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 			suggestion := util.new_suggestion(field_name, sym.info.fields.map(it.name))
 			c.error(suggestion.say(unknown_field_msg), node.pos)
 		}
+
+		// >> Hack to allow old style custom error implementations
+		// TODO: remove once deprecation period for `IError` methods has ended
+		if sym.name == 'IError' && (field_name == 'msg' || field_name == 'code') {
+			method := c.table.find_method(sym, field_name) or {
+				c.error('invalid `IError` interface implementation: $err', node.pos)
+				return ast.void_type
+			}
+			c.note('the `.$field_name` field on `IError` is deprecated, use `.${field_name}()` instead.',
+				node.pos)
+			return method.return_type
+		}
+		// <<<
+
 		c.error(unknown_field_msg, node.pos)
 	}
 	return ast.void_type
@@ -2128,7 +2159,7 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 			if flag.contains('@VROOT') {
 				// c.note(checker.vroot_is_deprecated_message, node.pos)
 				vroot := util.resolve_vmodroot(flag.replace('@VROOT', '@VMODROOT'), c.file.path) or {
-					c.error(err.msg, node.pos)
+					c.error(err.msg(), node.pos)
 					return
 				}
 				node.val = 'include $vroot'
@@ -2143,7 +2174,7 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 			}
 			if flag.contains('@VMODROOT') {
 				vroot := util.resolve_vmodroot(flag, c.file.path) or {
-					c.error(err.msg, node.pos)
+					c.error(err.msg(), node.pos)
 					return
 				}
 				node.val = 'include $vroot'
@@ -2152,7 +2183,7 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 			}
 			if flag.contains('\$env(') {
 				env := util.resolve_env_value(flag, true) or {
-					c.error(err.msg, node.pos)
+					c.error(err.msg(), node.pos)
 					return
 				}
 				node.main = env
@@ -2171,15 +2202,15 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 				'--cflags --libs $node.main'.split(' ')
 			}
 			mut m := pkgconfig.main(args) or {
-				c.error(err.msg, node.pos)
+				c.error(err.msg(), node.pos)
 				return
 			}
 			cflags := m.run() or {
-				c.error(err.msg, node.pos)
+				c.error(err.msg(), node.pos)
 				return
 			}
 			c.table.parse_cflag(cflags, c.mod, c.pref.compile_defines_all) or {
-				c.error(err.msg, node.pos)
+				c.error(err.msg(), node.pos)
 				return
 			}
 		}
@@ -2189,7 +2220,7 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 			if flag.contains('@VROOT') {
 				// c.note(checker.vroot_is_deprecated_message, node.pos)
 				flag = util.resolve_vmodroot(flag.replace('@VROOT', '@VMODROOT'), c.file.path) or {
-					c.error(err.msg, node.pos)
+					c.error(err.msg(), node.pos)
 					return
 				}
 			}
@@ -2199,13 +2230,13 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 			}
 			if flag.contains('@VMODROOT') {
 				flag = util.resolve_vmodroot(flag, c.file.path) or {
-					c.error(err.msg, node.pos)
+					c.error(err.msg(), node.pos)
 					return
 				}
 			}
 			if flag.contains('\$env(') {
 				flag = util.resolve_env_value(flag, true) or {
-					c.error(err.msg, node.pos)
+					c.error(err.msg(), node.pos)
 					return
 				}
 			}
@@ -2219,7 +2250,7 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 			}
 			// println('adding flag "$flag"')
 			c.table.parse_cflag(flag, c.mod, c.pref.compile_defines_all) or {
-				c.error(err.msg, node.pos)
+				c.error(err.msg(), node.pos)
 			}
 		}
 		else {
@@ -3015,14 +3046,6 @@ pub fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 					node.info = ast.IdentVar{
 						typ: typ
 						is_optional: is_optional
-					}
-					if typ == ast.error_type && c.expected_type == ast.string_type
-						&& !c.using_new_err_struct && !c.inside_selector_expr
-						&& !c.inside_println_arg && !c.file.mod.name.contains('v.')
-						&& !c.is_builtin_mod {
-						//                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ <- TODO: remove; this prevents a failure in the `performance-regressions` CI job
-						c.warn('string errors are deprecated; use `err.msg` instead',
-							node.pos)
 					}
 					// if typ == ast.t_type {
 					// sym := c.table.sym(c.cur_generic_type)

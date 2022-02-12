@@ -135,6 +135,8 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 					}
 				}
 			}
+		} else if right is ast.ComptimeSelector {
+			right_type = c.comptime_fields_default_type
 		}
 		if is_decl {
 			// check generic struct init and return unwrap generic struct type
@@ -535,7 +537,7 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 							node.pos)
 					}
 				} else {
-					c.error('cannot assign to `$left`: $err.msg', right.pos())
+					c.error('cannot assign to `$left`: $err.msg()', right.pos())
 				}
 			}
 		}
