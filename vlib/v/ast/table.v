@@ -426,6 +426,26 @@ pub fn (t &Table) find_method_from_embeds(sym &TypeSymbol, method_name string) ?
 		} else if found_methods.len > 1 {
 			return error('ambiguous method `$method_name`')
 		}
+	} else if sym.info is Interface {
+		mut found_methods := []Fn{}
+		mut embed_of_found_methods := []Type{}
+		for embed in sym.info.ifaces {
+			embed_sym := t.sym(embed)
+			if m := t.find_method(embed_sym, method_name) {
+				found_methods << m
+				embed_of_found_methods << embed
+			} else {
+				method, types := t.find_method_from_embeds(embed_sym, method_name) or { continue }
+				found_methods << method
+				embed_of_found_methods << embed
+				embed_of_found_methods << types
+			}
+		}
+		if found_methods.len == 1 {
+			return found_methods[0], embed_of_found_methods
+		} else if found_methods.len > 1 {
+			return error('ambiguous method `$method_name`')
+		}
 	} else if sym.info is Aggregate {
 		for typ in sym.info.types {
 			agg_sym := t.sym(typ)
@@ -1293,14 +1313,7 @@ pub fn (mut t Table) complete_interface_check() {
 		if tsym.kind != .struct_ {
 			continue
 		}
-		info := tsym.info as Struct
 		for _, mut idecl in t.interfaces {
-			if idecl.methods.len > tsym.methods.len {
-				continue
-			}
-			if idecl.fields.len > info.fields.len {
-				continue
-			}
 			if idecl.typ == 0 {
 				continue
 			}
@@ -1391,7 +1404,7 @@ pub fn (t Table) does_type_implement_interface(typ Type, inter_typ Type) bool {
 		}
 		// verify methods
 		for imethod in inter_sym.info.methods {
-			if method := sym.find_method(imethod.name) {
+			if method := t.find_method_with_embeds(sym, imethod.name) {
 				msg := t.is_same_method(imethod, method)
 				if msg.len > 0 {
 					return false

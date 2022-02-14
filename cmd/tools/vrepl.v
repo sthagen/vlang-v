@@ -42,7 +42,9 @@ enum FnType {
 
 fn new_repl() Repl {
 	return Repl{
-		readline: readline.Readline{}
+		readline: readline.Readline{
+			skip_empty: true
+		}
 		modules: ['os', 'time', 'math']
 		vstartup_lines: os.read_file(vstartup) or { '' }.trim_right('\n\r').split_into_lines()
 		// Test file used to check if a function as a void return or a
@@ -207,16 +209,44 @@ fn (mut r Repl) parse_import(line string) {
 }
 
 fn print_welcome_screen() {
-	println(version.full_v_version(false))
-	println('Use Ctrl-C or ${term.highlight_command('exit')} to exit, or ${term.highlight_command('help')} to see other available commands')
-	println(r'
-		____    ____
-		\   \  /   /
-		 \   \/   /
-		  \      /
-		   \    /
-		    \__/
-	')
+	cmd_exit := term.highlight_command('exit')
+	cmd_help := term.highlight_command('v help')
+	file_main := term.highlight_command('main.v')
+	cmd_run := term.highlight_command('v run main.v')
+	vbar := term.bright_green('|')
+	width, _ := term.get_terminal_size() // get the size of the terminal
+	vlogo := [
+		term.bright_blue(r' ____    ____ '),
+		term.bright_blue(r' \   \  /   / '),
+		term.bright_blue(r'  \   \/   /  '),
+		term.bright_blue(r'   \      /   '),
+		term.bright_blue(r'    \    /    '),
+		term.bright_blue(r'     \__/     '),
+	]
+	help_text := [
+		'Welcome to the V REPL (for help with V itself, type $cmd_exit, then run $cmd_help).',
+		'NB: the REPL is highly experimental. For best V experience, use a text editor, ',
+		'save your code in a $file_main file and execute: $cmd_run',
+		version.full_v_version(false),
+		'Use Ctrl-C or ${term.highlight_command('exit')} to exit, or ${term.highlight_command('help')} to see other available commands',
+	]
+	if width >= 97 {
+		eprintln('${vlogo[0]}')
+		eprintln('${vlogo[1]} $vbar  ${help_text[0]}')
+		eprintln('${vlogo[2]} $vbar  ${help_text[1]}')
+		eprintln('${vlogo[3]} $vbar  ${help_text[2]}')
+		eprintln('${vlogo[4]} $vbar  ${help_text[3]}')
+		eprintln('${vlogo[5]} $vbar  ${help_text[4]}')
+		eprintln('')
+	} else {
+		if width >= 14 {
+			left_margin := ' '.repeat(int(width / 2 - 7))
+			for l in vlogo {
+				println(left_margin + l)
+			}
+		}
+		println(help_text.join('\n'))
+	}
 }
 
 fn run_repl(workdir string, vrepl_prefix string) {
@@ -301,9 +331,7 @@ fn run_repl(workdir string, vrepl_prefix string) {
 		}
 		if r.line == 'list' {
 			source_code := r.current_source_code(true, true)
-			println('//////////////////////////////////////////////////////////////////////////////////////')
-			println(source_code)
-			println('//////////////////////////////////////////////////////////////////////////////////////')
+			println('\n${source_code.replace('\n\n', '\n')}')
 			continue
 		}
 		// Save the source only if the user is printing something,
