@@ -11,12 +11,17 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 	defer {
 		c.expected_type = ast.void_type
 	}
+	is_decl := node.op == .decl_assign
 	right_first := node.right[0]
 	node.left_types = []
 	mut right_len := node.right.len
 	mut right_type0 := ast.void_type
 	for i, right in node.right {
 		if right in [ast.CallExpr, ast.IfExpr, ast.LockExpr, ast.MatchExpr] {
+			if right in [ast.IfExpr, ast.MatchExpr] && node.left.len == node.right.len && !is_decl
+				&& node.left[i] in [ast.Ident, ast.SelectorExpr] && !node.left[i].is_blank_ident() {
+				c.expected_type = c.expr(node.left[i])
+			}
 			right_type := c.expr(right)
 			if i == 0 {
 				right_type0 = right_type
@@ -66,7 +71,6 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 		return
 	}
 
-	is_decl := node.op == .decl_assign
 	for i, left in node.left {
 		if left is ast.CallExpr {
 			// ban `foo() = 10`
@@ -92,22 +96,6 @@ pub fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 			}
 			left_type = c.expr(left)
 			c.expected_type = c.unwrap_generic(left_type)
-			// `map = {}`
-			if left_type != 0 {
-				sym := c.table.sym(left_type)
-				if sym.kind == .map {
-					if node.right.len <= i {
-						// `map_1, map_2, map_3 = f()`, where f returns (map[int]int, map[int]int, map[int]int)
-						// i.e. 3 left parts of the assignment, but just 1 right part
-					} else {
-						if node.right[i] is ast.StructInit {
-							c.warn('assigning a struct literal to a map is deprecated - use `map{}` instead',
-								node.right[i].pos())
-							node.right[i] = ast.MapInit{}
-						}
-					}
-				}
-			}
 		}
 		if node.right_types.len < node.left.len { // first type or multi return types added above
 			old_inside_ref_lit := c.inside_ref_lit

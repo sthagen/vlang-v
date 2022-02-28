@@ -69,6 +69,8 @@ pub fn (mut t Table) free() {
 	}
 }
 
+pub const invalid_type_idx = -1
+
 pub type FnPanicHandler = fn (&Table, string)
 
 fn default_table_panic_handler(t &Table, message string) {
@@ -429,7 +431,7 @@ pub fn (t &Table) find_method_from_embeds(sym &TypeSymbol, method_name string) ?
 	} else if sym.info is Interface {
 		mut found_methods := []Fn{}
 		mut embed_of_found_methods := []Type{}
-		for embed in sym.info.ifaces {
+		for embed in sym.info.embeds {
 			embed_sym := t.sym(embed)
 			if m := t.find_method(embed_sym, method_name) {
 				found_methods << m
@@ -685,8 +687,8 @@ pub fn (t &Table) find_sym_and_type_idx(name string) (&TypeSymbol, int) {
 }
 
 pub const invalid_type_symbol = &TypeSymbol{
-	idx: -1
-	parent_idx: -1
+	idx: invalid_type_idx
+	parent_idx: invalid_type_idx
 	language: .v
 	mod: 'builtin'
 	kind: .placeholder
@@ -756,6 +758,9 @@ pub fn (t &Table) unaliased_type(typ Type) Type {
 
 fn (mut t Table) rewrite_already_registered_symbol(typ TypeSymbol, existing_idx int) int {
 	existing_symbol := t.type_symbols[existing_idx]
+	$if trace_rewrite_already_registered_symbol ? {
+		eprintln('>> rewrite_already_registered_symbol sym: $typ.name | existing_idx: $existing_idx | existing_symbol: $existing_symbol.name')
+	}
 	if existing_symbol.kind == .placeholder {
 		// override placeholder
 		t.type_symbols[existing_idx] = &TypeSymbol{
@@ -783,12 +788,17 @@ fn (mut t Table) rewrite_already_registered_symbol(typ TypeSymbol, existing_idx 
 		}
 		return existing_idx
 	}
-	return -1
+	return ast.invalid_type_idx
 }
 
 [inline]
 pub fn (mut t Table) register_sym(sym TypeSymbol) int {
 	mut idx := -2
+	$if trace_register_sym ? {
+		defer {
+			eprintln('>> register_sym: ${sym.name:-60} | idx: $idx')
+		}
+	}
 	mut existing_idx := t.type_idxs[sym.name]
 	if existing_idx > 0 {
 		idx = t.rewrite_already_registered_symbol(sym, existing_idx)
@@ -1272,6 +1282,17 @@ pub fn (t &Table) sumtype_has_variant(parent Type, variant Type, is_as bool) boo
 		}
 	}
 	return false
+}
+
+pub fn (t &Table) is_sumtype_or_in_variant(parent Type, typ Type) bool {
+	if typ == 0 {
+		return false
+	}
+	if t.type_kind(typ) == .sum_type && parent.idx() == typ.idx()
+		&& parent.nr_muls() == typ.nr_muls() {
+		return true
+	}
+	return t.sumtype_has_variant(parent, typ, false)
 }
 
 // only used for debugging V compiler type bugs
@@ -2033,6 +2054,52 @@ pub fn (mut t Table) generic_insts_to_concrete() {
 				}
 				else {}
 			}
+		}
+	}
+}
+
+pub fn (t &Table) is_comptime_type(x Type, y ComptimeType) bool {
+	x_kind := t.type_kind(x)
+	match y.kind {
+		.map_ {
+			return x_kind == .map
+		}
+		.int {
+			return x_kind in [
+				.i8,
+				.i16,
+				.int,
+				.i64,
+				.byte,
+				.u8,
+				.u16,
+				.u32,
+				.u64,
+				.usize,
+				.int_literal,
+			]
+		}
+		.float {
+			return x_kind in [
+				.f32,
+				.f64,
+				.float_literal,
+			]
+		}
+		.struct_ {
+			return x_kind == .struct_
+		}
+		.iface {
+			return x_kind == .interface_
+		}
+		.array {
+			return x_kind in [.array, .array_fixed]
+		}
+		.sum_type {
+			return x_kind == .sum_type
+		}
+		.enum_ {
+			return x_kind == .enum_
 		}
 	}
 }

@@ -196,10 +196,12 @@ mut:
 	tests_inited        bool
 	has_main            bool
 	// main_fn_decl_node  ast.FnDecl
-	cur_mod            ast.Module
-	cur_concrete_types []ast.Type  // do not use table.cur_concrete_types because table is global, so should not be accessed by different threads
-	cur_fn             &ast.FnDecl = 0 // same here
-	cur_lock           ast.LockExpr
+	cur_mod                ast.Module
+	cur_concrete_types     []ast.Type  // do not use table.cur_concrete_types because table is global, so should not be accessed by different threads
+	cur_fn                 &ast.FnDecl = 0 // same here
+	cur_lock               ast.LockExpr
+	autofree_methods       map[int]bool
+	generated_free_methods map[int]bool
 }
 
 pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
@@ -346,6 +348,9 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 			global_g.json_types << g.json_types
 			global_g.hotcode_fn_names << g.hotcode_fn_names
 			unsafe { g.free_builders() }
+			for k, v in g.autofree_methods {
+				global_g.autofree_methods[k] = v
+			}
 		}
 	} else {
 		for file in files {
@@ -374,6 +379,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	global_g.gen_array_contains_methods()
 	global_g.gen_array_index_methods()
 	global_g.gen_equality_fns()
+	global_g.gen_free_methods()
 	global_g.timers.show('cgen unification')
 
 	mut g := global_g
@@ -714,6 +720,12 @@ pub fn (mut g Gen) init() {
 	if g.pref.prealloc {
 		g.comptime_definitions.writeln('#define _VPREALLOC (1)')
 	}
+	if g.pref.use_cache {
+		g.comptime_definitions.writeln('#define _VUSECACHE (1)')
+	}
+	if g.pref.build_mode == .build_module {
+		g.comptime_definitions.writeln('#define _VBUILDMODULE (1)')
+	}
 	if g.pref.is_livemain || g.pref.is_liveshared {
 		g.generate_hotcode_reloading_declarations()
 	}
@@ -806,7 +818,7 @@ pub fn (mut g Gen) write_typeof_functions() {
 			}
 			g.writeln('}')
 			g.writeln('')
-			g.writeln('int v_typeof_sumtype_idx_${sym.cname}(int sidx) { /* $sym.name */ ')
+			g.writeln('static int v_typeof_sumtype_idx_${sym.cname}(int sidx) { /* $sym.name */ ')
 			if g.pref.build_mode == .build_module {
 				g.writeln('\t\tif( sidx == _v_type_idx_${sym.cname}() ) return ${int(ityp)};')
 				for v in sum_info.variants {
@@ -1522,6 +1534,9 @@ fn (mut g Gen) write_v_source_line_info(pos token.Pos) {
 	if g.inside_ternary == 0 && g.pref.is_vlines && g.is_vlines_enabled {
 		nline := pos.line_nr + 1
 		lineinfo := '\n#line $nline "$g.vlines_path"'
+		$if trace_gen_source_line_info ? {
+			eprintln('> lineinfo: ${lineinfo.replace('\n', '')}')
+		}
 		g.writeln(lineinfo)
 	}
 }
@@ -2728,6 +2743,9 @@ fn (mut g Gen) expr(node ast.Expr) {
 	}
 	// NB: please keep the type names in the match here in alphabetical order:
 	match mut node {
+		ast.ComptimeType {
+			g.error('g.expr(): Unhandled ComptimeType', node.pos)
+		}
 		ast.EmptyExpr {
 			g.error('g.expr(): unhandled EmptyExpr', token.Pos{})
 		}
@@ -2847,10 +2865,7 @@ fn (mut g Gen) expr(node ast.Expr) {
 			g.dump_expr(node)
 		}
 		ast.EnumVal {
-			// g.write('${it.mod}${it.enum_name}_$it.val')
-			// g.enum_expr(node)
-			styp := g.typ(g.table.unaliased_type(node.typ))
-			g.write('${styp}__$node.val')
+			g.enum_val(node)
 		}
 		ast.FloatLiteral {
 			if g.pref.nofloat {
@@ -3843,7 +3858,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 		return
 	}
 	tmpvar := g.new_tmp_var()
-	ret_typ := g.typ(g.fn_decl.return_type)
+	ret_typ := g.typ(g.unwrap_generic(g.fn_decl.return_type))
 	mut use_tmp_var := g.defer_stmts.len > 0 || g.defer_profile_code.len > 0
 	// handle promoting none/error/function returning 'Option'
 	if fn_return_is_optional {
@@ -4292,7 +4307,19 @@ fn (mut g Gen) const_decl_init_later(mod string, name string, expr ast.Expr, typ
 }
 
 fn (mut g Gen) global_decl(node ast.GlobalDecl) {
-	mod := if g.pref.build_mode == .build_module && g.is_builtin_mod { 'static ' } else { '' }
+	// was static used here to to make code optimizable? it was removed when
+	// 'extern' was used to fix the duplicate symbols with usecache && clang
+	// visibility_kw := if g.pref.build_mode == .build_module && g.is_builtin_mod { 'static ' }
+	visibility_kw := if
+		(g.pref.use_cache || (g.pref.build_mode == .build_module && g.module_built != node.mod))
+		&& !util.should_bundle_module(node.mod) {
+		'extern '
+	} else {
+		''
+	}
+	// should the global be initialized now
+	should_init := (!g.pref.use_cache && g.pref.build_mode != .build_module)
+		|| (g.pref.build_mode == .build_module && g.module_built == node.mod)
 	mut attributes := ''
 	if node.attrs.contains('weak') {
 		attributes += 'VWEAK '
@@ -4307,25 +4334,24 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 			}
 		}
 		styp := g.typ(field.typ)
+		g.definitions.write_string('$visibility_kw$styp $attributes $field.name')
 		if field.has_expr {
-			g.definitions.write_string('$mod$styp $attributes $field.name')
-			if field.expr.is_literal() {
-				g.definitions.writeln(' = ${g.expr_string(field.expr)}; // global')
+			if field.expr.is_literal() && should_init {
+				g.definitions.write_string(' = ${g.expr_string(field.expr)}')
 			} else {
-				g.definitions.writeln(';')
 				g.global_init.writeln('\t$field.name = ${g.expr_string(field.expr)}; // global')
 			}
 		} else {
 			default_initializer := g.type_default(field.typ)
-			if default_initializer == '{0}' {
-				g.definitions.writeln('$mod$styp $attributes $field.name = {0}; // global')
+			if default_initializer == '{0}' && should_init {
+				g.definitions.write_string(' = {0}')
 			} else {
-				g.definitions.writeln('$mod$styp $attributes $field.name; // global')
 				if field.name !in ['as_cast_type_indexes', 'g_memory_block', 'global_allocator'] {
 					g.global_init.writeln('\t$field.name = *($styp*)&(($styp[]){${g.type_default(field.typ)}}[0]); // global')
 				}
 			}
 		}
+		g.definitions.writeln('; // global')
 	}
 }
 
@@ -5045,6 +5071,17 @@ fn (mut g Gen) size_of(node ast.SizeOf) {
 	g.write('sizeof(${util.no_dots(styp)})')
 }
 
+fn (mut g Gen) enum_val(node ast.EnumVal) {
+	// g.write('${it.mod}${it.enum_name}_$it.val')
+	// g.enum_expr(node)
+	styp := g.typ(g.table.unaliased_type(node.typ))
+	if node.typ.is_number() {
+		// Mostly in translated code, when C enums are used as ints in switches
+		// g.write('/*enum val is_number $node.mod styp=$styp*/')
+	}
+	g.write('${styp}__$node.val')
+}
+
 fn (mut g Gen) go_expr(node ast.GoExpr) {
 	line := g.go_before_stmt(0)
 	mut handle := ''
@@ -5530,7 +5567,7 @@ static inline __shared__$interface_name ${shared_fn_name}(__shared__$cctype* x) 
 			}
 			t_methods := g.table.get_embed_methods(st_sym)
 			for t_method in t_methods {
-				if t_method.name !in method_names {
+				if t_method.name !in methods.map(it.name) {
 					methods << t_method
 				}
 			}
@@ -5601,6 +5638,9 @@ static inline __shared__$interface_name ${shared_fn_name}(__shared__$cctype* x) 
 							} else {
 								methods_wrapper.write_string('.$esym.embed_name()')
 							}
+						}
+						if fargs.len > 1 {
+							methods_wrapper.write_string(', ')
 						}
 						methods_wrapper.writeln('${fargs[1..].join(', ')});')
 					} else {

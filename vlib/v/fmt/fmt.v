@@ -660,6 +660,18 @@ pub fn (mut f Fmt) expr(node ast.Expr) {
 		ast.UnsafeExpr {
 			f.unsafe_expr(node)
 		}
+		ast.ComptimeType {
+			match node.kind {
+				.array { f.write('\$Array') }
+				.struct_ { f.write('\$Struct') }
+				.iface { f.write('\$Interface') }
+				.map_ { f.write('\$Map') }
+				.int { f.write('\$Int') }
+				.float { f.write('\$Float') }
+				.sum_type { f.write('\$Sumtype') }
+				.enum_ { f.write('\$Enum') }
+			}
+		}
 	}
 }
 
@@ -830,10 +842,25 @@ pub fn (mut f Fmt) const_decl(node ast.ConstDecl) {
 		f.write(strings.repeat(` `, align_infos[align_idx].max - field.name.len))
 		f.write('= ')
 		f.expr(field.expr)
-		f.writeln('')
+		if node.is_block {
+			f.writeln('')
+		} else {
+			// Write out single line comments after const expr if present
+			// E.g.: `const x = 1 // <comment>`
+			if node.end_comments.len > 0 && node.end_comments[0].text.contains('\n') {
+				f.writeln('\n')
+			}
+			f.comments(node.end_comments, inline: true)
+		}
 		prev_field = field
 	}
-	f.comments_after_last_field(node.end_comments)
+
+	if node.is_block {
+		f.comments_after_last_field(node.end_comments)
+	} else if node.end_comments.len == 0 {
+		// If no single line comments after the const expr is present
+		f.writeln('')
+	}
 	if node.is_block {
 		f.indent--
 		f.writeln(')\n')
@@ -887,6 +914,26 @@ pub fn (mut f Fmt) enum_decl(node ast.EnumDecl) {
 pub fn (mut f Fmt) fn_decl(node ast.FnDecl) {
 	f.attrs(node.attrs)
 	f.write(node.stringify(f.table, f.cur_mod, f.mod2alias)) // `Expr` instead of `ast.Expr` in mod ast
+	// Handle trailing comments after fn header declarations
+	if node.end_comments.len > 0 {
+		first_comment := node.end_comments[0]
+		if first_comment.text.contains('\n') {
+			f.writeln('\n')
+		} else {
+			f.write(' ')
+		}
+		f.comment(first_comment)
+		if node.end_comments.len > 1 {
+			f.writeln('\n')
+			comments := node.end_comments[1..]
+			for i, comment in comments {
+				f.comment(comment)
+				if i != comments.len - 1 {
+					f.writeln('\n')
+				}
+			}
+		}
+	}
 	f.fn_body(node)
 }
 
@@ -1071,9 +1118,9 @@ pub fn (mut f Fmt) interface_decl(node ast.InterfaceDecl) {
 		f.writeln('')
 	}
 	f.comments_before_field(node.pre_comments)
-	for iface in node.ifaces {
-		f.write('\t$iface.name')
-		f.comments(iface.comments, inline: true, has_nl: false, level: .indent)
+	for embed in node.embeds {
+		f.write('\t$embed.name')
+		f.comments(embed.comments, inline: true, has_nl: false, level: .indent)
 		f.writeln('')
 	}
 	immut_fields := if node.mut_pos < 0 { node.fields } else { node.fields[..node.mut_pos] }
@@ -2110,16 +2157,25 @@ pub fn (mut f Fmt) map_init(node ast.MapInit) {
 	f.indent++
 	f.comments(node.pre_cmnts)
 	mut max_field_len := 0
+	mut skeys := []string{}
 	for key in node.keys {
-		if key.str().len > max_field_len {
-			max_field_len = key.str().len
+		skey := f.node_str(key).trim_space()
+		skeys << skey
+		if skey.len > max_field_len {
+			max_field_len = skey.len
 		}
 	}
 	for i, key in node.keys {
-		f.expr(key)
+		skey := skeys[i]
+		f.write(skey)
 		f.write(': ')
-		f.write(strings.repeat(` `, max_field_len - key.str().len))
+		f.write(strings.repeat(` `, max_field_len - skey.len))
 		f.expr(node.vals[i])
+		if key is ast.EnumVal && skey.starts_with('.') {
+			// enforce the use of `,` for maps with short enum keys, otherwise there is ambiguity
+			// when the values are struct values, and the code will no longer parse properly
+			f.write(',')
+		}
 		f.comments(node.comments[i], prev_line: node.vals[i].pos().last_line, has_nl: false)
 		f.writeln('')
 	}

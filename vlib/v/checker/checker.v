@@ -17,7 +17,14 @@ const int_min = int(0x80000000)
 
 const int_max = int(0x7FFFFFFF)
 
-const (
+// prevent stack overflows by restricting too deep recursion:
+const expr_level_cutoff_limit = 40
+
+const stmt_level_cutoff_limit = 40
+
+const iface_level_cutoff_limit = 100
+
+pub const (
 	valid_comptime_if_os             = ['windows', 'ios', 'macos', 'mach', 'darwin', 'hpux', 'gnu',
 		'qnx', 'linux', 'freebsd', 'openbsd', 'netbsd', 'bsd', 'dragonfly', 'android', 'solaris',
 		'haiku', 'serenity', 'vinix']
@@ -488,7 +495,7 @@ pub fn (mut c Checker) sum_type_decl(node ast.SumTypeDecl) {
 
 pub fn (mut c Checker) expand_iface_embeds(idecl &ast.InterfaceDecl, level int, iface_embeds []ast.InterfaceEmbedding) []ast.InterfaceEmbedding {
 	// eprintln('> expand_iface_embeds: idecl.name: $idecl.name | level: $level | iface_embeds.len: $iface_embeds.len')
-	if level > 100 {
+	if level > checker.iface_level_cutoff_limit {
 		c.error('too many interface embedding levels: $level, for interface `$idecl.name`',
 			idecl.pos)
 		return []
@@ -500,11 +507,11 @@ pub fn (mut c Checker) expand_iface_embeds(idecl &ast.InterfaceDecl, level int, 
 	mut ares := []ast.InterfaceEmbedding{}
 	for ie in iface_embeds {
 		if iface_decl := c.table.interfaces[ie.typ] {
-			mut list := iface_decl.ifaces
-			if !iface_decl.are_ifaces_expanded {
-				list = c.expand_iface_embeds(idecl, level + 1, iface_decl.ifaces)
-				c.table.interfaces[ie.typ].ifaces = list
-				c.table.interfaces[ie.typ].are_ifaces_expanded = true
+			mut list := iface_decl.embeds
+			if !iface_decl.are_embeds_expanded {
+				list = c.expand_iface_embeds(idecl, level + 1, iface_decl.embeds)
+				c.table.interfaces[ie.typ].embeds = list
+				c.table.interfaces[ie.typ].are_embeds_expanded = true
 			}
 			for partial in list {
 				res[partial.typ] = partial
@@ -836,6 +843,20 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 						// []Animal << []Cat
 						c.type_implements(c.table.value_type(right_type), left_value_type,
 							right_pos)
+					}
+					return ast.void_type
+				} else if left_value_sym.kind == .sum_type {
+					if right_final.kind != .array {
+						if !c.table.is_sumtype_or_in_variant(left_value_type, right_type) {
+							c.error('cannot append `$right_sym.name` to `$left_sym.name`',
+								right_pos)
+						}
+					} else {
+						right_value_type := c.table.value_type(right_type)
+						if !c.table.is_sumtype_or_in_variant(left_value_type, right_value_type) {
+							c.error('cannot append `$right_sym.name` to `$left_sym.name`',
+								right_pos)
+						}
 					}
 					return ast.void_type
 				}
@@ -2310,6 +2331,17 @@ fn (mut c Checker) stmts(stmts []ast.Stmt) {
 //    `x := if cond { stmt1 stmt2 ExprStmt } else { stmt2 stmt3 ExprStmt }`,
 //    `x := match expr { Type1 { stmt1 stmt2 ExprStmt } else { stmt2 stmt3 ExprStmt }`.
 fn (mut c Checker) stmts_ending_with_expression(stmts []ast.Stmt) {
+	if stmts.len == 0 {
+		c.scope_returns = false
+		c.expected_type = ast.void_type
+		return
+	}
+	if c.stmt_level > checker.stmt_level_cutoff_limit {
+		c.scope_returns = false
+		c.expected_type = ast.void_type
+		c.error('checker: too many stmt levels: $c.stmt_level ', stmts[0].pos)
+		return
+	}
 	mut unreachable := token.Pos{
 		line_nr: -1
 	}
@@ -2360,13 +2392,15 @@ pub fn (mut c Checker) expr(node ast.Expr) ast.Type {
 		c.expr_level--
 	}
 
-	// c.expr_level set to 150 so that stack overflow does not occur on windows
-	if c.expr_level > 150 {
+	if c.expr_level > checker.expr_level_cutoff_limit {
 		c.error('checker: too many expr levels: $c.expr_level ', node.pos())
 		return ast.void_type
 	}
 	match mut node {
 		ast.NodeError {}
+		ast.ComptimeType {
+			c.error('incorrect use of compile-time type', node.pos)
+		}
 		ast.EmptyExpr {
 			c.error('checker.expr(): unhandled EmptyExpr', token.Pos{})
 		}

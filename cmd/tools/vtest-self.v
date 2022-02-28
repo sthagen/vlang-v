@@ -53,6 +53,7 @@ const (
 		'vlib/vweb/route_test.v',
 		'vlib/net/websocket/websocket_test.v',
 		'vlib/crypto/rand/crypto_rand_read_test.v',
+		'vlib/net/smtp/smtp_test.v',
 	]
 	skip_with_fsanitize_address   = [
 		'vlib/net/websocket/websocket_test.v',
@@ -96,6 +97,7 @@ const (
 		'vlib/net/http/server_test.v',
 		'vlib/net/http/response_test.v',
 		'vlib/builtin/js/array_test.js.v',
+		'vlib/net/smtp/smtp_test.v',
 	]
 	skip_on_linux                 = [
 		'do_not_remove',
@@ -114,6 +116,7 @@ const (
 		'vlib/v/tests/closure_generator_test.v',
 		'vlib/net/websocket/ws_test.v',
 		'vlib/net/unix/unix_test.v',
+		'vlib/net/unix/use_net_and_net_unix_together_test.v',
 		'vlib/net/websocket/websocket_test.v',
 		'vlib/vweb/tests/vweb_test.v',
 		'vlib/vweb/request_test.v',
@@ -121,6 +124,7 @@ const (
 		'vlib/vweb/route_test.v',
 		'vlib/sync/many_times_test.v',
 		'vlib/sync/once_test.v',
+		'vlib/net/smtp/smtp_test.v',
 	]
 	skip_on_non_windows           = [
 		'do_not_remove',

@@ -40,6 +40,7 @@ mut:
 	inside_or_expr            bool
 	inside_for                bool
 	inside_fn                 bool // true even with implicit main
+	inside_fn_return          bool
 	inside_unsafe_fn          bool
 	inside_str_interp         bool
 	inside_array_lit          bool
@@ -94,6 +95,9 @@ __global codegen_files = []&ast.File{}
 
 // for tests
 pub fn parse_stmt(text string, table &ast.Table, scope &ast.Scope) ast.Stmt {
+	$if trace_parse_stmt ? {
+		eprintln('> ${@MOD}.${@FN} text: $text')
+	}
 	mut p := Parser{
 		scanner: scanner.new_scanner(text, .skip_comments, &pref.Preferences{})
 		inside_test_file: true
@@ -111,6 +115,9 @@ pub fn parse_stmt(text string, table &ast.Table, scope &ast.Scope) ast.Stmt {
 }
 
 pub fn parse_comptime(text string, table &ast.Table, pref &pref.Preferences, scope &ast.Scope) &ast.File {
+	$if trace_parse_comptime ? {
+		eprintln('> ${@MOD}.${@FN} text: $text')
+	}
 	mut p := Parser{
 		scanner: scanner.new_scanner(text, .skip_comments, pref)
 		table: table
@@ -125,6 +132,9 @@ pub fn parse_comptime(text string, table &ast.Table, pref &pref.Preferences, sco
 }
 
 pub fn parse_text(text string, path string, table &ast.Table, comments_mode scanner.CommentsMode, pref &pref.Preferences) &ast.File {
+	$if trace_parse_text ? {
+		eprintln('> ${@MOD}.${@FN} comments_mode: ${comments_mode:-20} | path: ${path:-20} | text: $text')
+	}
 	mut p := Parser{
 		scanner: scanner.new_scanner(text, comments_mode, pref)
 		comments_mode: comments_mode
@@ -199,6 +209,9 @@ pub fn parse_file(path string, table &ast.Table, comments_mode scanner.CommentsM
 	// the parser gives feedback to the scanner about toplevel statements, so that the scanner can skip
 	// all the tricky inner comments. This is needed because we do not have a good general solution
 	// for handling them, and should be removed when we do (the general solution is also needed for vfmt)
+	$if trace_parse_file ? {
+		eprintln('> ${@MOD}.${@FN} comments_mode: ${comments_mode:-20} | path: $path')
+	}
 	mut p := Parser{
 		scanner: scanner.new_scanner_file(path, comments_mode, pref)
 		comments_mode: comments_mode
@@ -218,6 +231,9 @@ pub fn parse_file(path string, table &ast.Table, comments_mode scanner.CommentsM
 }
 
 pub fn parse_vet_file(path string, table_ &ast.Table, pref &pref.Preferences) (&ast.File, []vet.Error) {
+	$if trace_parse_vet_file ? {
+		eprintln('> ${@MOD}.${@FN} path: $path')
+	}
 	global_scope := &ast.Scope{
 		parent: 0
 	}
@@ -2090,6 +2106,11 @@ pub fn (mut p Parser) name_expr() ast.Expr {
 	prev_tok_kind := p.prev_tok.kind
 	mut node := ast.empty_expr()
 	if p.expecting_type {
+		if p.tok.kind == .dollar {
+			node = p.parse_comptime_type()
+			p.expecting_type = false
+			return node
+		}
 		p.expecting_type = false
 		// get type position before moving to next
 		type_pos := p.tok.pos()
@@ -2679,6 +2700,10 @@ fn (mut p Parser) dot_expr(left ast.Expr) ast.Expr {
 		// `foo()?`
 		if p.tok.kind == .question {
 			p.next()
+			if p.inside_defer {
+				p.error_with_pos('error propagation not allowed inside `defer` blocks',
+					p.prev_tok.pos())
+			}
 			or_kind = .propagate
 		}
 		//
@@ -3268,6 +3293,8 @@ fn (mut p Parser) const_decl() ast.ConstDecl {
 	p.top_level_statement_end()
 	if is_block {
 		p.check(.rpar)
+	} else {
+		comments << p.eat_comments(same_line: true)
 	}
 	return ast.ConstDecl{
 		pos: start_pos.extend_with_last_line(const_pos, p.prev_tok.line_nr)
@@ -3333,7 +3360,7 @@ fn (mut p Parser) global_decl() ast.GlobalDecl {
 	for {
 		comments = p.eat_comments()
 		if is_block && p.tok.kind == .eof {
-			p.error('unexpected eof, expecting ´)´')
+			p.error('unexpected eof, expecting `)`')
 			return ast.GlobalDecl{}
 		}
 		if p.tok.kind == .rpar {
@@ -3348,18 +3375,9 @@ fn (mut p Parser) global_decl() ast.GlobalDecl {
 		if has_expr {
 			p.next() // =
 			expr = p.expr(0)
-			match expr {
-				ast.CastExpr {
-					typ = (expr as ast.CastExpr).typ
-				}
-				ast.StructInit {
-					typ = (expr as ast.StructInit).typ
-				}
-				ast.ArrayInit {
-					typ = (expr as ast.ArrayInit).typ
-				}
-				ast.ChanInit {
-					typ = (expr as ast.ChanInit).typ
+			match mut expr {
+				ast.CastExpr, ast.StructInit, ast.ArrayInit, ast.ChanInit {
+					typ = expr.typ
 				}
 				ast.BoolLiteral, ast.IsRefType {
 					typ = ast.bool_type
@@ -3590,7 +3608,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 			}
 			is_public: is_pub
 		})
-		if typ == -1 {
+		if typ == ast.invalid_type_idx {
 			p.error_with_pos('cannot register sum type `$name`, another type with this name exists',
 				name_pos)
 			return ast.SumTypeDecl{}
@@ -3631,7 +3649,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 		is_public: is_pub
 	})
 	type_end_pos := p.prev_tok.pos()
-	if idx == -1 {
+	if idx == ast.invalid_type_idx {
 		p.error_with_pos('cannot register alias `$name`, another type with this name exists',
 			name_pos)
 		return ast.AliasTypeDecl{}

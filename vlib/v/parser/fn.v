@@ -353,7 +353,9 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 	same_line := p.tok.line_nr == p.prev_tok.line_nr
 	if (p.tok.kind.is_start_of_type() && (same_line || p.tok.kind != .lsbr))
 		|| (same_line && p.tok.kind == .key_fn) {
+		p.inside_fn_return = true
 		return_type = p.parse_type()
+		p.inside_fn_return = false
 		return_type_pos = return_type_pos.extend(p.prev_tok.pos())
 	}
 	mut type_sym_method_idx := 0
@@ -402,7 +404,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 			receiver_type: rec.typ
 			//
 			attrs: p.attrs
-			is_conditional: conditional_ctdefine_idx != -1
+			is_conditional: conditional_ctdefine_idx != ast.invalid_type_idx
 			ctdefine_idx: conditional_ctdefine_idx
 			//
 			no_body: no_body
@@ -419,7 +421,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 		} else {
 			name = p.prepend_mod(name)
 		}
-		if language == .v {
+		if !p.pref.translated && language == .v {
 			if existing := p.table.fns[name] {
 				if existing.name != '' {
 					if file_mode == .v && existing.file_mode != .v {
@@ -451,7 +453,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 			is_method: false
 			//
 			attrs: p.attrs
-			is_conditional: conditional_ctdefine_idx != -1
+			is_conditional: conditional_ctdefine_idx != ast.invalid_type_idx
 			ctdefine_idx: conditional_ctdefine_idx
 			//
 			no_body: no_body
@@ -506,7 +508,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 		is_markused: is_markused
 		//
 		attrs: p.attrs
-		is_conditional: conditional_ctdefine_idx != -1
+		is_conditional: conditional_ctdefine_idx != ast.invalid_type_idx
 		ctdefine_idx: conditional_ctdefine_idx
 		//
 		receiver: ast.StructField{
@@ -527,6 +529,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 		is_builtin: p.builtin_mod || p.mod in util.builtin_module_parts
 		scope: p.scope
 		label_names: p.label_names
+		end_comments: p.eat_comments(same_line: true)
 	}
 	if generic_names.len > 0 {
 		p.table.register_fn_generic_types(fn_decl.fkey())

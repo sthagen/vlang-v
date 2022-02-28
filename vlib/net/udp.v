@@ -8,8 +8,8 @@ const (
 )
 
 struct UdpSocket {
-	handle int
-	l      Addr
+	Socket
+	l Addr
 	// TODO(emily): replace with option again
 	// when i figure out how to coerce it properly
 mut:

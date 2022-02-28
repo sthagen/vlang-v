@@ -87,11 +87,11 @@ For more details and troubleshooting, please visit the [vab GitHub repository](h
     * [Match](#match)
     * [Defer](#defer)
 * [Structs](#structs)
-    * [Embedded structs](#embedded-structs)
     * [Default field values](#default-field-values)
     * [Short struct literal syntax](#short-struct-literal-syntax)
     * [Access modifiers](#access-modifiers)
     * [Methods](#methods)
+    * [Embedded structs](#embedded-structs)
 * [Unions](#unions)
 
 </td><td width=33% valign=top>
@@ -1145,6 +1145,15 @@ println(a) // `[2, 2, 2, 13, 2, 3, 4]`
 println(b) // `[2, 3, 13]`
 ```
 
+You can call .clone() on the slice, if you do want to have an independent copy right away:
+```v
+mut a := [0, 1, 2, 3, 4, 5]
+mut b := a[2..4].clone()
+b[0] = 7 // NB: `b[0]` is NOT referring to `a[2]`, as it would have been, without the .clone()
+println(a) // [0, 1, 2, 3, 4, 5]
+println(b) // [7, 3]
+```
+
 ### Slices with negative indexes
 
 V supports array and string slices with negative indexes.
@@ -1174,10 +1183,8 @@ the `it` built-in variable to achieve a classic `map/filter` functional paradigm
 
 ```v
 // using filter, map and negatives array slices
-a := ['pippo.jpg', '01.bmp', '_v.txt', 'img_02.jpg', 'img_01.JPG']
-res := a.filter(it#[-4..].to_lower() == '.jpg').map(fn (w string) string {
-	return w.to_upper()
-})
+files := ['pippo.jpg', '01.bmp', '_v.txt', 'img_02.jpg', 'img_01.JPG']
+filtered := files.filter(it#[-4..].to_lower() == '.jpg').map(it.to_upper())
 // ['PIPPO.JPG', 'IMG_02.JPG', 'IMG_01.JPG']
 ```
 
@@ -1922,33 +1929,6 @@ println(p.x)
 The type of `p` is `&Point`. It's a [reference](#references) to `Point`.
 References are similar to Go pointers and C++ references.
 
-### Embedded structs
-
-V doesn't allow subclassing, but it supports embedded structs:
-
-```v
-struct Widget {
-mut:
-	x int
-	y int
-}
-
-struct Button {
-	Widget
-	title string
-}
-
-mut button := Button{
-	title: 'Click me'
-}
-button.x = 3
-```
-Without embedding we'd have to name the `Widget` field and do:
-
-```v oksyntax
-button.widget.x = 3
-```
-
 ### Default field values
 
 ```v
@@ -2102,7 +2082,7 @@ fn main() {
 
 This means that defining public readonly fields is very easy in V.
 
-## Methods
+### Methods
 
 ```v
 struct User {
@@ -2131,6 +2111,87 @@ Methods must be in the same module as the receiver type.
 In this example, the `can_register` method has a receiver of type `User` named `u`.
 The convention is not to use receiver names like `self` or `this`,
 but a short, preferably one letter long, name.
+
+### Embedded structs
+
+V support embedded structs .
+
+```v
+struct Size {
+mut:
+	width  int
+	height int
+}
+
+fn (s &Size) area() int {
+	return s.width * s.height
+}
+
+struct Button {
+	Size
+	title string
+}
+```
+
+With embedding, the struct `Button` will automatically have get all the fields and methods from
+the struct `Size`, which allows you to do:
+
+```v oksyntax
+mut button := Button{
+	title: 'Click me'
+	height: 2
+}
+
+button.width = 3
+assert button.area() == 6
+assert button.Size.area() == 6
+print(button)
+```
+
+output :
+```
+Button{
+    Size: Size{
+        width: 3
+        height: 2
+    }
+    title: 'Click me'
+}
+```
+
+Unlike inheritance, you cannot type cast between structs and embedded structs
+(the embedding struct can also has its own fields, and it can also embed multiple structs).
+
+If you need to access embedded structs directly, use an explicit reference like `button.Size`.
+
+Conceptually, embedded structs are similar to [mixin](https://en.wikipedia.org/wiki/Mixin)s
+in OOP, *NOT* base classes.
+
+You can also initialize an embedded struct:
+
+```v oksyntax
+mut button := Button{
+	Size: Size{
+		width: 3
+		height: 2
+	}
+}
+```
+
+or assign values:
+
+```v oksyntax
+button.Size = Size{
+	width: 4
+	height: 5
+}
+```
+
+If multiple embedded structs have methods or fields with the same name, or if methods or fields
+with the same name are defined in the struct, you can call methods or assign to variables in
+the embedded struct like `button.Size.area()`.
+When you do not specify the embedded struct name, the method of the outermost struct will be 
+targeted.
 
 ## Unions
 
@@ -4668,7 +4729,7 @@ surrounding code).
 
 * Note: This is work in progress.
 
-### Structs with reference fields
+## Structs with reference fields
 
 Structs with references require explicitly setting the initial value to a
 reference value unless the struct already defines its own initial value.
@@ -5697,10 +5758,19 @@ rmdir_all('build') or { }
 mkdir('build') ?
 
 // Move *.v files to build/
-result := exec('mv *.v build/') ?
+result := execute('mv *.v build/') ?
 if result.exit_code != 0 {
 	println(result.output)
 }
+
+// print command then execute it
+fn sh(cmd string){
+  println("❯ $cmd")
+  print(execute_or_exit(cmd).output)
+}
+
+sh('ls')
+
 // Similar to:
 // files := ls('.') ?
 // mut count := 0
