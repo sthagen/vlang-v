@@ -2001,7 +2001,7 @@ fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp_is_ptr
 	if !got_is_ptr {
 		if !expr.is_lvalue()
 			|| (expr is ast.Ident && (expr as ast.Ident).obj.is_simple_define_const()) {
-			g.write('ADDR($got_styp, (')
+			g.write('HEAP($got_styp, (')
 			rparen_n += 2
 		} else {
 			g.write('&')
@@ -3665,8 +3665,10 @@ fn (mut g Gen) ident(node ast.Ident) {
 			g.write('${name}.val')
 			return
 		}
-		scope := g.file.scope.innermost(node.pos.pos)
-		if v := scope.find_var(node.name) {
+		// TODO: investigate why node.obj is pointing to outdated ScopeObject?
+		// v := node.obj
+		// if v is ast.Var {
+		if v := node.scope.find_var(node.name) {
 			is_auto_heap = v.is_auto_heap && (!g.is_assign_lhs || g.assign_op != .decl_assign)
 			if is_auto_heap {
 				g.write('(*(')
