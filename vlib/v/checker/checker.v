@@ -57,25 +57,26 @@ fn all_valid_comptime_idents() []string {
 pub struct Checker {
 	pref &pref.Preferences // Preferences shared from V struct
 pub mut:
-	table            &ast.Table
-	file             &ast.File = 0
-	nr_errors        int
-	nr_warnings      int
-	nr_notices       int
-	errors           []errors.Error
-	warnings         []errors.Warning
-	notices          []errors.Notice
-	error_lines      []int // to avoid printing multiple errors for the same line
-	expected_type    ast.Type
-	expected_or_type ast.Type // fn() or { 'this type' } eg. string. expected or block type
-	mod              string   // current module name
-	const_decl       string
-	const_deps       []string
-	const_names      []string
-	global_names     []string
-	locked_names     []string // vars that are currently locked
-	rlocked_names    []string // vars that are currently read-locked
-	in_for_count     int      // if checker is currently in a for loop
+	table              &ast.Table
+	file               &ast.File = 0
+	nr_errors          int
+	nr_warnings        int
+	nr_notices         int
+	errors             []errors.Error
+	warnings           []errors.Warning
+	notices            []errors.Notice
+	error_lines        []int // to avoid printing multiple errors for the same line
+	expected_type      ast.Type
+	expected_or_type   ast.Type // fn() or { 'this type' } eg. string. expected or block type
+	expected_expr_type ast.Type // if/match is_expr: expected_type
+	mod                string   // current module name
+	const_decl         string
+	const_deps         []string
+	const_names        []string
+	global_names       []string
+	locked_names       []string // vars that are currently locked
+	rlocked_names      []string // vars that are currently read-locked
+	in_for_count       int      // if checker is currently in a for loop
 	// checked_ident  string // to avoid infinite checker loops
 	should_abort              bool // when too many errors/warnings/notices are accumulated, .should_abort becomes true. It is checked in statement/expression loops, so the checker can return early, instead of wasting time.
 	returns                   bool
@@ -92,6 +93,7 @@ pub mut:
 	inside_comptime_for_field bool
 	skip_flags                bool // should `#flag` and `#include` be skipped
 	fn_level                  int  // 0 for the top level, 1 for `fn abc() {}`, 2 for a nested fn, etc
+	smartcast_mut_pos         token.Pos
 	ct_cond_stack             []ast.Expr
 mut:
 	stmt_level int // the nesting level inside each stmts list;
@@ -818,6 +820,28 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				} else if need_overload && !gen_sym.has_method('<') && node.op == .gt {
 					c.error('cannot use `>` as `<=` operator method is not defined', left_right_pos)
 				}
+			} else if left_type in ast.integer_type_idxs && right_type in ast.integer_type_idxs {
+				is_left_type_signed := left_type in ast.signed_integer_type_idxs
+					|| left_type == ast.int_literal_type_idx
+				is_right_type_signed := right_type in ast.signed_integer_type_idxs
+					|| right_type == ast.int_literal_type_idx
+				if is_left_type_signed != is_right_type_signed {
+					if is_right_type_signed {
+						if mut node.right is ast.IntegerLiteral {
+							if node.right.val.int() < 0 {
+								c.error('unsigned integer cannot be compared with negative value',
+									node.right.pos)
+							}
+						}
+					} else if is_left_type_signed {
+						if mut node.left is ast.IntegerLiteral {
+							if node.left.val.int() < 0 {
+								c.error('unsigned integer cannot be compared with negative value',
+									node.left.pos)
+							}
+						}
+					}
+				}
 			}
 		}
 		.left_shift {
@@ -1440,34 +1464,50 @@ pub fn (mut c Checker) check_or_expr(node ast.OrExpr, ret_type ast.Type, expr_re
 		return
 	}
 	last_stmt := node.stmts[stmts_len - 1]
+	c.check_or_last_stmt(last_stmt, ret_type, expr_return_type)
+}
+
+fn (mut c Checker) check_or_last_stmt(stmt ast.Stmt, ret_type ast.Type, expr_return_type ast.Type) {
 	if ret_type != ast.void_type {
-		match last_stmt {
+		match stmt {
 			ast.ExprStmt {
 				c.expected_type = ret_type
 				c.expected_or_type = ret_type.clear_flag(.optional)
-				last_stmt_typ := c.expr(last_stmt.expr)
+				last_stmt_typ := c.expr(stmt.expr)
 				c.expected_or_type = ast.void_type
 				type_fits := c.check_types(last_stmt_typ, ret_type)
 					&& last_stmt_typ.nr_muls() == ret_type.nr_muls()
-				is_noreturn := is_noreturn_callexpr(last_stmt.expr)
+				is_noreturn := is_noreturn_callexpr(stmt.expr)
 				if type_fits || is_noreturn {
 					return
 				}
 				expected_type_name := c.table.type_to_str(ret_type.clear_flag(.optional))
-				if last_stmt.typ == ast.void_type {
+				if stmt.typ == ast.void_type {
+					if stmt.expr is ast.IfExpr {
+						for branch in stmt.expr.branches {
+							last_stmt := branch.stmts[branch.stmts.len - 1]
+							c.check_or_last_stmt(last_stmt, ret_type, expr_return_type)
+						}
+						return
+					} else if stmt.expr is ast.MatchExpr {
+						for branch in stmt.expr.branches {
+							last_stmt := branch.stmts[branch.stmts.len - 1]
+							c.check_or_last_stmt(last_stmt, ret_type, expr_return_type)
+						}
+						return
+					}
 					c.error('`or` block must provide a default value of type `$expected_type_name`, or return/continue/break or call a [noreturn] function like panic(err) or exit(1)',
-						last_stmt.pos)
+						stmt.expr.pos())
 				} else {
 					type_name := c.table.type_to_str(last_stmt_typ)
 					c.error('wrong return type `$type_name` in the `or {}` block, expected `$expected_type_name`',
-						last_stmt.pos)
+						stmt.expr.pos())
 				}
-				return
 			}
 			ast.BranchStmt {
-				if last_stmt.kind !in [.key_continue, .key_break] {
+				if stmt.kind !in [.key_continue, .key_break] {
 					c.error('only break/continue is allowed as a branch statement in the end of an `or {}` block',
-						last_stmt.pos)
+						stmt.pos)
 					return
 				}
 			}
@@ -1475,27 +1515,42 @@ pub fn (mut c Checker) check_or_expr(node ast.OrExpr, ret_type ast.Type, expr_re
 			else {
 				expected_type_name := c.table.type_to_str(ret_type.clear_flag(.optional))
 				c.error('last statement in the `or {}` block should be an expression of type `$expected_type_name` or exit parent scope',
-					node.pos)
-				return
+					stmt.pos)
 			}
 		}
 	} else {
-		match last_stmt {
+		match stmt {
 			ast.ExprStmt {
-				if last_stmt.typ == ast.void_type {
-					return
+				match stmt.expr {
+					ast.IfExpr {
+						for branch in stmt.expr.branches {
+							last_stmt := branch.stmts[branch.stmts.len - 1]
+							c.check_or_last_stmt(last_stmt, ret_type, expr_return_type)
+						}
+					}
+					ast.MatchExpr {
+						for branch in stmt.expr.branches {
+							last_stmt := branch.stmts[branch.stmts.len - 1]
+							c.check_or_last_stmt(last_stmt, ret_type, expr_return_type)
+						}
+					}
+					else {
+						if stmt.typ == ast.void_type {
+							return
+						}
+						if is_noreturn_callexpr(stmt.expr) {
+							return
+						}
+						if c.check_types(stmt.typ, expr_return_type) {
+							return
+						}
+						// opt_returning_string() or { ... 123 }
+						type_name := c.table.type_to_str(stmt.typ)
+						expr_return_type_name := c.table.type_to_str(expr_return_type)
+						c.error('the default expression type in the `or` block should be `$expr_return_type_name`, instead you gave a value of type `$type_name`',
+							stmt.expr.pos())
+					}
 				}
-				if is_noreturn_callexpr(last_stmt.expr) {
-					return
-				}
-				if c.check_types(last_stmt.typ, expr_return_type) {
-					return
-				}
-				// opt_returning_string() or { ... 123 }
-				type_name := c.table.type_to_str(last_stmt.typ)
-				expr_return_type_name := c.table.type_to_str(expr_return_type)
-				c.error('the default expression type in the `or` block should be `$expr_return_type_name`, instead you gave a value of type `$type_name`',
-					last_stmt.expr.pos())
 			}
 			else {}
 		}
@@ -1677,8 +1732,13 @@ pub fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 		}
 	} else {
 		if sym.info is ast.Struct {
+			if c.smartcast_mut_pos != token.Pos{} {
+				c.note('smartcasting requires either an immutable value, or an explicit mut keyword before the value',
+					c.smartcast_mut_pos)
+			}
 			suggestion := util.new_suggestion(field_name, sym.info.fields.map(it.name))
 			c.error(suggestion.say(unknown_field_msg), node.pos)
+			return ast.void_type
 		}
 
 		// >> Hack to allow old style custom error implementations
@@ -1693,7 +1753,10 @@ pub fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 			return method.return_type
 		}
 		// <<<
-
+		if c.smartcast_mut_pos != token.Pos{} {
+			c.note('smartcasting requires either an immutable value, or an explicit mut keyword before the value',
+				c.smartcast_mut_pos)
+		}
 		c.error(unknown_field_msg, node.pos)
 	}
 	return ast.void_type
@@ -3215,7 +3278,7 @@ pub fn (mut c Checker) concat_expr(mut node ast.ConcatExpr) ast.Type {
 }
 
 // smartcast takes the expression with the current type which should be smartcasted to the target type in the given scope
-fn (c Checker) smartcast(expr ast.Expr, cur_type ast.Type, to_type_ ast.Type, mut scope ast.Scope) {
+fn (mut c Checker) smartcast(expr ast.Expr, cur_type ast.Type, to_type_ ast.Type, mut scope ast.Scope) {
 	sym := c.table.sym(cur_type)
 	to_type := if sym.kind == .interface_ { to_type_.ref() } else { to_type_ }
 	match expr {
@@ -3250,6 +3313,8 @@ fn (c Checker) smartcast(expr ast.Expr, cur_type ast.Type, to_type_ ast.Type, mu
 					pos: expr.pos
 					orig_type: orig_type
 				})
+			} else {
+				c.smartcast_mut_pos = expr.pos
 			}
 		}
 		ast.Ident {
@@ -3277,6 +3342,8 @@ fn (c Checker) smartcast(expr ast.Expr, cur_type ast.Type, to_type_ ast.Type, mu
 					smartcasts: smartcasts
 					orig_type: orig_type
 				})
+			} else if is_mut && !expr.is_mut {
+				c.smartcast_mut_pos = expr.pos
 			}
 		}
 		else {}
@@ -3544,12 +3611,9 @@ pub fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) ast.Type {
 		for mut expr is ast.ParExpr {
 			expr = expr.expr
 		}
-		match expr {
-			ast.BoolLiteral, ast.CallExpr, ast.CharLiteral, ast.FloatLiteral, ast.IntegerLiteral,
-			ast.InfixExpr, ast.StringLiteral, ast.StringInterLiteral {
-				c.error('cannot take the address of $expr', node.pos)
-			}
-			else {}
+		if expr in [ast.BoolLiteral, ast.CallExpr, ast.CharLiteral, ast.FloatLiteral,
+			ast.IntegerLiteral, ast.InfixExpr, ast.StringLiteral, ast.StringInterLiteral] {
+			c.error('cannot take the address of $expr', node.pos)
 		}
 		if mut node.right is ast.IndexExpr {
 			typ_sym := c.table.sym(node.right.left_type)
@@ -3772,7 +3836,11 @@ pub fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 // with this value.
 pub fn (mut c Checker) enum_val(mut node ast.EnumVal) ast.Type {
 	mut typ_idx := if node.enum_name == '' {
-		c.expected_type.idx()
+		if c.expected_type == ast.void_type && c.expected_expr_type != ast.void_type {
+			c.expected_expr_type.idx()
+		} else {
+			c.expected_type.idx()
+		}
 	} else {
 		c.table.find_type_idx(node.enum_name)
 	}

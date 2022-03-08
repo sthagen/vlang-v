@@ -63,12 +63,36 @@ fn (mut p Parser) check_undefined_variables(exprs []ast.Expr, val ast.Expr) ? {
 			p.check_undefined_variables(exprs, val.left) ?
 			p.check_undefined_variables(exprs, val.right) ?
 		}
+		ast.IfExpr {
+			p.check_undefined_variables(exprs, val.left) ?
+			for branch in val.branches {
+				p.check_undefined_variables(exprs, branch.cond) ?
+				for stmt in branch.stmts {
+					if stmt is ast.ExprStmt {
+						p.check_undefined_variables(exprs, stmt.expr) ?
+					}
+				}
+			}
+		}
 		ast.MapInit {
 			for key in val.keys {
 				p.check_undefined_variables(exprs, key) ?
 			}
 			for value in val.vals {
 				p.check_undefined_variables(exprs, value) ?
+			}
+		}
+		ast.MatchExpr {
+			p.check_undefined_variables(exprs, val.cond) ?
+			for branch in val.branches {
+				for expr in branch.exprs {
+					p.check_undefined_variables(exprs, expr) ?
+				}
+				for stmt in branch.stmts {
+					if stmt is ast.ExprStmt {
+						p.check_undefined_variables(exprs, stmt.expr) ?
+					}
+				}
 			}
 		}
 		ast.ParExpr {
@@ -159,10 +183,9 @@ fn (mut p Parser) partial_assign_stmt(left []ast.Expr, left_comments []ast.Comme
 						return p.error_with_pos('redefinition of `$lx.name`', lx.pos)
 					}
 					mut share := ast.ShareType(0)
-					if lx.info is ast.IdentVar {
-						iv := lx.info as ast.IdentVar
-						share = iv.share
-						if iv.is_static {
+					if mut lx.info is ast.IdentVar {
+						share = lx.info.share
+						if lx.info.is_static {
 							if !p.pref.translated && !p.is_translated && !p.pref.is_fmt
 								&& !p.inside_unsafe_fn {
 								return p.error_with_pos('static variables are supported only in translated mode or in [unsafe] fn',
@@ -170,7 +193,7 @@ fn (mut p Parser) partial_assign_stmt(left []ast.Expr, left_comments []ast.Comme
 							}
 							is_static = true
 						}
-						if iv.is_volatile {
+						if lx.info.is_volatile {
 							is_volatile = true
 						}
 					}

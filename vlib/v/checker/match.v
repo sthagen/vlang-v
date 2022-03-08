@@ -3,6 +3,7 @@ module checker
 import v.ast
 import v.pref
 import v.util
+import v.token
 import strings
 
 pub fn (mut c Checker) match_expr(mut node ast.MatchExpr) ast.Type {
@@ -11,6 +12,12 @@ pub fn (mut c Checker) match_expr(mut node ast.MatchExpr) ast.Type {
 	if mut node.cond is ast.ParExpr && !c.pref.translated && !c.file.is_translated {
 		c.error('unnecessary `()` in `match` condition, use `match expr {` instead of `match (expr) {`.',
 			node.cond.pos)
+	}
+	if node.is_expr {
+		c.expected_expr_type = c.expected_type
+		defer {
+			c.expected_expr_type = ast.void_type
+		}
 	}
 	cond_type := c.expr(node.cond)
 	// we setting this here rather than at the end of the method
@@ -31,6 +38,9 @@ pub fn (mut c Checker) match_expr(mut node ast.MatchExpr) ast.Type {
 			c.stmts_ending_with_expression(branch.stmts)
 		} else {
 			c.stmts(branch.stmts)
+		}
+		if c.smartcast_mut_pos != token.Pos{} {
+			c.smartcast_mut_pos = token.Pos{}
 		}
 		if node.is_expr {
 			if branch.stmts.len > 0 {
