@@ -1,3 +1,5 @@
+import os
+
 fn dump_of_int() {
 	x := dump(1) + 1
 	assert x == 2
@@ -31,8 +33,18 @@ fn dump_of_struct() {
 	assert x3 == Point{101, 2, 3}
 }
 
+fn dump_of_callexpr() {
+	vfile := @FILE
+	dump(os.file_name(vfile))
+	mut f := os.open_file(@FILE, 'r') or { return }
+	mut buf := []byte{len: 10}
+	dump(f.read(mut buf) or { -999 })
+	f.close()
+}
+
 fn main() {
 	dump_of_int()
 	dump_of_string()
 	dump_of_struct()
+	dump_of_callexpr()
 }

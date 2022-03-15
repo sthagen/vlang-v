@@ -1342,7 +1342,7 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 									}
 								}
 								dot := if is_ptr { '->' } else { '.' }
-								if mut cast_sym.info is ast.Aggregate {
+								if cast_sym.info is ast.Aggregate {
 									sym := g.table.sym(cast_sym.info.types[g.aggregate_type_idx])
 									g.write('${dot}_$sym.cname')
 								} else {
@@ -1443,7 +1443,7 @@ fn (mut g Gen) autofree_call_pregen(node ast.CallExpr) {
 			// We do not need to declare this variable again, so just generate `t = ...`
 			// instead of `string t = ...`, and we need to mark this variable as unused,
 			// so that it's freed after the call. (Used tmp arg vars are not freed to avoid double frees).
-			if x := scope.find(t) {
+			if mut x := scope.find(t) {
 				match mut x {
 					ast.Var { x.is_used = false }
 					else {}
@@ -1491,8 +1491,8 @@ fn (mut g Gen) autofree_call_postgen(node_pos int) {
 	}
 	// g.doing_autofree_tmp = true
 	// g.write('/* postgen */')
-	scope := g.file.scope.innermost(node_pos)
-	for _, obj in scope.objects {
+	mut scope := g.file.scope.innermost(node_pos)
+	for _, mut obj in scope.objects {
 		match mut obj {
 			ast.Var {
 				// if var.typ == 0 {

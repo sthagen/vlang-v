@@ -7,6 +7,7 @@ import os
 import strings
 import v.ast
 import v.util
+import v.mathutil as mu
 import v.token
 import v.errors
 import v.pref
@@ -156,7 +157,7 @@ pub fn (mut g Gen) create_executable() {
 	os.write_file_array(g.out_name, g.buf) or { panic(err) }
 	os.chmod(g.out_name, 0o775) or { panic(err) } // make it executable
 	if g.pref.is_verbose {
-		println('\n$g.out_name: native binary has been successfully generated')
+		eprintln('\n$g.out_name: native binary has been successfully generated')
 	}
 }
 
@@ -276,12 +277,26 @@ fn (mut g Gen) write_string_with_padding(s string, max int) {
 	}
 }
 
-fn (mut g Gen) get_var_offset(var_name string) int {
-	offset := g.var_offset[var_name]
+fn (mut g Gen) try_var_offset(var_name string) int {
+	offset := g.var_offset[var_name] or { return -1 }
 	if offset == 0 {
-		g.n_error('unknown variable `$var_name`')
+		return -1
 	}
 	return offset
+}
+
+fn (mut g Gen) get_var_offset(var_name string) int {
+	r := g.try_var_offset(var_name)
+	if r == -1 {
+		g.n_error('unknown variable `$var_name`')
+	}
+	return r
+}
+
+fn (mut g Gen) gen_typeof_expr(it ast.TypeOf, newline bool) {
+	nl := if newline { '\n' } else { '' }
+	r := g.typ(it.expr_type).name
+	g.learel(.rax, g.allocate_string('$r$nl', 3, .rel32))
 }
 
 pub fn (mut g Gen) gen_print_from_expr(expr ast.Expr, name string) {
@@ -300,7 +315,16 @@ pub fn (mut g Gen) gen_print_from_expr(expr ast.Expr, name string) {
 			g.gen_print_reg(.rax, 3, fd)
 		}
 		ast.Ident {
-			g.expr(expr)
+			vo := g.try_var_offset(expr.name)
+			if vo != -1 {
+				g.n_error('Printing idents is not yet supported in the native backend')
+				// g.mov_var_to_reg(.rsi, vo)
+				// g.mov_reg(.rax, .rsi)
+				// g.learel(.rax, vo * 8)
+				// g.relpc(.rax, .rsi)
+				// g.learel(.rax, g.allocate_string('$vo\n', 3, .rel32))
+				// g.expr(expr)
+			}
 			g.gen_print_reg(.rax, 3, fd)
 		}
 		ast.IntegerLiteral {
@@ -388,8 +412,10 @@ g.expr
 		ast.SelectExpr {}
 		ast.SqlExpr {}
 		ast.TypeNode {}
-		ast.TypeOf {}
 		*/
+		ast.TypeOf {
+			g.gen_typeof_expr(expr, newline)
+		}
 		ast.LockExpr {
 			// passthru
 			eprintln('Warning: locks not implemented yet in the native backend')
@@ -448,19 +474,25 @@ fn (mut g Gen) println(comment string) {
 		return
 	}
 	addr := g.debug_pos.hex()
+	mut sb := strings.new_builder(80)
 	// println('$g.debug_pos "$addr"')
-	print(term.red(strings.repeat(`0`, 6 - addr.len) + addr + '  '))
+	sb.write_string(term.red(strings.repeat(`0`, 6 - addr.len) + addr + '  '))
 	for i := g.debug_pos; i < g.pos(); i++ {
 		s := g.buf[i].hex()
 		if s.len == 1 {
-			print(term.blue('0'))
+			sb.write_string(term.blue('0'))
 		}
 		gbihex := g.buf[i].hex()
 		hexstr := term.blue(gbihex) + ' '
-		print(hexstr)
+		sb.write_string(hexstr)
 	}
 	g.debug_pos = g.buf.len
-	println(' ' + comment)
+	//
+	colored := sb.str()
+	plain := term.strip_ansi(colored)
+	padding := ' '.repeat(mu.max(1, 40 - plain.len))
+	final := '$colored$padding$comment'
+	println(final)
 }
 
 fn (mut g Gen) gen_forc_stmt(node ast.ForCStmt) {
@@ -474,7 +506,7 @@ fn (mut g Gen) gen_forc_stmt(node ast.ForCStmt) {
 		match cond {
 			ast.InfixExpr {
 				// g.infix_expr(node.cond)
-				match mut cond.left {
+				match cond.left {
 					ast.Ident {
 						lit := cond.right as ast.IntegerLiteral
 						g.cmp_var(cond.left.name, lit.val.int())
@@ -716,7 +748,10 @@ fn (mut g Gen) expr(node ast.Expr) {
 		}
 		ast.FloatLiteral {}
 		ast.Ident {
-			offset := g.get_var_offset(node.obj.name) // i := 0
+			offset := g.try_var_offset(node.obj.name) // i := 0
+			if offset == -1 {
+				g.n_error('invalid ident $node.obj.name')
+			}
 			// offset := g.get_var_offset(node.name)
 			// XXX this is intel specific
 			g.mov_var_to_reg(.rax, offset)

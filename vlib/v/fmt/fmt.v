@@ -505,7 +505,8 @@ fn stmt_is_single_line(stmt ast.Stmt) bool {
 
 //=== General Expr-related methods and helpers ===//
 
-pub fn (mut f Fmt) expr(node ast.Expr) {
+pub fn (mut f Fmt) expr(node_ ast.Expr) {
+	mut node := unsafe { node_ }
 	if f.is_debug {
 		eprintln('expr: ${node.pos():-42} | node: ${node.type_name():-20} | $node.str()')
 	}
@@ -1802,7 +1803,7 @@ pub fn (mut f Fmt) enum_val(node ast.EnumVal) {
 }
 
 pub fn (mut f Fmt) ident(node ast.Ident) {
-	if mut node.info is ast.IdentVar {
+	if node.info is ast.IdentVar {
 		if node.info.is_mut {
 			f.write(node.info.share.str() + ' ')
 		}

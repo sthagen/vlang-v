@@ -791,7 +791,7 @@ pub fn (a []string) str() string {
 // hex returns a string with the hexadecimal representation
 // of the byte elements of the array.
 pub fn (b []byte) hex() string {
-	mut hex := unsafe { malloc(b.len * 2 + 1) }
+	mut hex := unsafe { malloc_noscan(b.len * 2 + 1) }
 	mut dst_i := 0
 	for i in b {
 		n0 := i >> 4
@@ -816,7 +816,7 @@ pub fn (b []byte) hex() string {
 // Returns the number of elements copied.
 // NOTE: This is not an `array` method. It is a function that takes two arrays of bytes.
 // See also: `arrays.copy`.
-pub fn copy(dst []byte, src []byte) int {
+pub fn copy(mut dst []byte, src []byte) int {
 	min := if dst.len < src.len { dst.len } else { src.len }
 	if min > 0 {
 		unsafe { vmemmove(&byte(dst.data), src.data, min) }
@@ -826,7 +826,8 @@ pub fn copy(dst []byte, src []byte) int {
 
 // reduce executes a given reducer function on each element of the array,
 // resulting in a single output value.
-// NOTE: It exists as a method on `[]int` types only
+// NOTE: It exists as a method on `[]int` types only.
+// See also `arrays.fold`.
 pub fn (a []int) reduce(iter fn (int, int) int, accum_start int) int {
 	mut accum_ := accum_start
 	for i in a {

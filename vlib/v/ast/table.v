@@ -1640,7 +1640,7 @@ pub fn (mut t Table) unwrap_generic_type(typ Type, generic_names []string, concr
 	mut nrt := ''
 	mut c_nrt := ''
 	ts := t.sym(typ)
-	match mut ts.info {
+	match ts.info {
 		Array {
 			mut elem_type := ts.info.elem_type
 			mut elem_sym := t.sym(elem_type)
@@ -1744,7 +1744,7 @@ pub fn (mut t Table) unwrap_generic_type(typ Type, generic_names []string, concr
 		}
 		else {}
 	}
-	match mut ts.info {
+	match ts.info {
 		Struct {
 			mut info := ts.info
 			info.is_generic = false
@@ -1933,7 +1933,7 @@ pub fn (mut t Table) generic_insts_to_concrete() {
 							fields: fields
 							parent_type: new_type(info.parent_idx).set_flag(.generic)
 						}
-						typ.is_public = true
+						typ.is_pub = true
 						typ.kind = parent.kind
 
 						parent_sym := t.sym(parent_info.parent_type)
@@ -1996,7 +1996,7 @@ pub fn (mut t Table) generic_insts_to_concrete() {
 							methods: imethods
 							parent_type: new_type(info.parent_idx).set_flag(.generic)
 						}
-						typ.is_public = true
+						typ.is_pub = true
 						typ.kind = parent.kind
 						typ.methods = all_methods
 					} else {
@@ -2043,7 +2043,7 @@ pub fn (mut t Table) generic_insts_to_concrete() {
 							variants: variants
 							parent_type: new_type(info.parent_idx).set_flag(.generic)
 						}
-						typ.is_public = true
+						typ.is_pub = true
 						typ.kind = parent.kind
 					} else {
 						util.verror('generic error', 'the number of generic types of sumtype `$parent.name` is inconsistent with the concrete types')
