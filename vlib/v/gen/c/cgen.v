@@ -2045,7 +2045,7 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 		&& !expected_type.has_flag(.optional) {
 		if expr is ast.StructInit && !got_type.is_ptr() {
 			g.inside_cast_in_heap++
-			got_styp := g.cc_type(got_type.ref(), true)
+			got_styp := g.cc_type(got_type_raw.ref(), true)
 			// TODO: why does cc_type even add this in the first place?
 			exp_styp := exp_sym.cname
 			mut fname := 'I_${got_styp}_to_Interface_$exp_styp'
@@ -2056,12 +2056,7 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 				got_styp)
 			g.inside_cast_in_heap--
 		} else {
-			mut got_styp := g.cc_type(got_type, true)
-			got_styp = match got_styp {
-				'int' { 'int_literal' }
-				'f64' { 'float_literal' }
-				else { got_styp }
-			}
+			got_styp := g.cc_type(got_type_raw, true)
 			got_is_shared := got_type.has_flag(.shared_f)
 			exp_styp := if got_is_shared { '__shared__$exp_sym.cname' } else { exp_sym.cname }
 			// If it's shared, we need to use the other caster:
@@ -4365,6 +4360,13 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 			}
 		}
 		styp := g.typ(field.typ)
+		mut anon_fn_expr := unsafe { field.expr }
+		if field.has_expr && mut anon_fn_expr is ast.AnonFn {
+			g.gen_anon_fn_decl(mut anon_fn_expr)
+			fn_type_name := g.get_anon_fn_type_name(mut anon_fn_expr, field.name)
+			g.definitions.writeln('$fn_type_name = ${g.table.sym(field.typ).name}; // global')
+			continue
+		}
 		g.definitions.write_string('$visibility_kw$styp $attributes $field.name')
 		if field.has_expr {
 			if field.expr.is_literal() && should_init {
@@ -5161,7 +5163,8 @@ fn (mut g Gen) go_expr(node ast.GoExpr) {
 			panic('cgen: obf name "$key" not found, this should never happen')
 		}
 	}
-	g.writeln('// go')
+	g.empty_line = true
+	g.writeln('// start go')
 	wrapper_struct_name := 'thread_arg_' + name
 	wrapper_fn_name := name + '_thread_wrapper'
 	arg_tmp_var := 'arg_' + tmp
@@ -5200,7 +5203,7 @@ fn (mut g Gen) go_expr(node ast.GoExpr) {
 		} else {
 			'thread_$tmp'
 		}
-		g.writeln('HANDLE $simple_handle = CreateThread(0,0, (LPTHREAD_START_ROUTINE)$wrapper_fn_name, $arg_tmp_var, 0,0);')
+		g.writeln('HANDLE $simple_handle = CreateThread(0, 0, (LPTHREAD_START_ROUTINE)$wrapper_fn_name, $arg_tmp_var, 0, 0);')
 		g.writeln('if (!$simple_handle) panic_lasterr(tos3("`go ${name}()`: "));')
 		if node.is_expr && node.call_expr.return_type != ast.void_type {
 			g.writeln('$gohandle_name thread_$tmp = {')
@@ -5219,7 +5222,7 @@ fn (mut g Gen) go_expr(node ast.GoExpr) {
 			g.writeln('pthread_detach(thread_$tmp);')
 		}
 	}
-	g.writeln('// endgo\n')
+	g.writeln('// end go')
 	if node.is_expr {
 		handle = 'thread_$tmp'
 		// create wait handler for this return type if none exists
