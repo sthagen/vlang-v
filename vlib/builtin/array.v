@@ -22,7 +22,8 @@ pub mut:
 
 [flag]
 pub enum ArrayFlags {
-	noslices
+	noslices // when <<, `.noslices` will free the old data block immediately (you have to be sure, that there are *no slices* to that specific array). TODO: integrate with reference counting/compiler support for the static cases.
+	noshrink // when `.noslices` and `.noshrink` are *both set*, .delete(x) will NOT allocate new memory and free the old. It will just move the elements in place, and adjust .len.
 }
 
 // Internal function, used by V (`nums := []int`)
@@ -283,6 +284,14 @@ pub fn (mut a array) delete_many(i int, size int) {
 			panic('array.delete: index out of range (i == $i$endidx, a.len == $a.len)')
 		}
 	}
+	if a.flags.all(.noshrink | .noslices) {
+		unsafe {
+			vmemmove(&byte(a.data) + i * a.element_size, &byte(a.data) + (i + size) * a.element_size,
+				(a.len - i - size) * a.element_size)
+		}
+		a.len -= size
+		return
+	}
 	// Note: if a is [12,34], a.len = 2, a.delete(0)
 	// should move (2-0-1) elements = 1 element (the 34) forward
 	old_data := a.data
@@ -441,6 +450,8 @@ fn (a array) slice(start int, _end int) array {
 			panic('array.slice: slice bounds out of range ($start < 0)')
 		}
 	}
+	// TODO: integrate reference counting
+	// a.flags.clear(.noslices)
 	offset := start * a.element_size
 	data := unsafe { &byte(a.data) + offset }
 	l := end - start
@@ -461,6 +472,7 @@ fn (a array) slice(start int, _end int) array {
 // that get the last 3 elements of the array otherwise it return an empty array.
 // This function always return a valid array.
 fn (a array) slice_ni(_start int, _end int) array {
+	// a.flags.clear(.noslices)
 	mut end := _end
 	mut start := _start
 
@@ -655,7 +667,17 @@ pub fn (a &array) free() {
 // Ignore the function signature. `filter` does not take an actual callback. Rather, it
 // takes an `it` expression.
 //
-// Example: array.filter(it % 2 == 1) // will yield a new array of only odd elements
+// Certain array functions (`filter` `any` `all`) support a simplified
+// domain-specific-language by the backend compiler to make these operations
+// more idiomatic to V. These functions are described here, but their implementation
+// is compiler specific.
+//
+// Each function takes a boolean test expression as its single argument.
+// These test expressions may use `it` as a pointer to a single element at a time.
+//
+// Example: array.filter(it < 5) // create an array of elements less than 5
+// Example: array.filter(it % 2 == 1) // create an array of only odd elements
+// Example: array.filter(it.name[0] == `A`) // create an array of elements whose `name` field starts with 'A'
 pub fn (a array) filter(predicate fn (voidptr) bool) array
 
 // any tests whether at least one element in the array passes the test.
@@ -665,6 +687,7 @@ pub fn (a array) filter(predicate fn (voidptr) bool) array
 // it returns `false`. It doesn't modify the array.
 //
 // Example: array.any(it % 2 == 1) // will return true if any element is odd
+// Example: array.any(it.name == 'Bob') // will yield `true` if any element has `.name == 'Bob'`
 pub fn (a array) any(predicate fn (voidptr) bool) bool
 
 // all tests whether all elements in the array pass the test
@@ -677,34 +700,37 @@ pub fn (a array) any(predicate fn (voidptr) bool) bool
 pub fn (a array) all(predicate fn (voidptr) bool) bool
 
 // map creates a new array populated with the results of calling a provided function
-// on every element in the calling array
+// on every element in the calling array.
+// It also accepts an `it` expression.
+//
+// Example:
+// ```v
+// words := ['hello', 'world']
+// r1 := words.map(it.to_upper())
+// assert r1 == ['HELLO', 'WORLD']
+//
+// // map can also accept anonymous functions
+// r2 := words.map(fn (w string) string {
+// 	return w.to_upper()
+// })
+// assert r2 == ['HELLO', 'WORLD']
+// ```
 pub fn (a array) map(callback fn (voidptr) voidptr) array
 
-// sort sorts an array in place.
+// sort sorts the array in place.
 // Ignore the function signature. Passing a callback to `.sort` is not supported
 // for now. Consider using the `.sort_with_compare` method if you need it.
 //
-// Instead, a very simple syntax is available to you for custom sorting and more.
-//
-// Certain array functions (`filter` `any` `all` and `sort`) support a simplified
-// domain-specific-language by the backend compiler to make these operations
-// more idiomatic to V. These functions are described here, but their implementation
-// is compiler specific.
-//
-// Each function takes a boolean test expression as its single argument.
-// These test expressions may use certain 'magic' variables depending on their context:
-// - `sort` may use `a` and `b` as pointers to two elements
-//   giving you direct access to those objects
-// - `filter`, `any`, and `all` may use `it` as a pointer to a single element at a time.
+// sort can take a boolean test expression as its single argument.
+// The expression uses 2 'magic' variables `a` and `b` as pointers to the two elements
+// being compared.
 //
 // Example: array.sort() // will sort the array in ascending order
 // Example: array.sort(b < a) // will sort the array in decending order
 // Example: array.sort(b.name < a.name) // will sort descending by the .name field
-// Example: array.filter(it % 2 == 1) // will yield a new array of only odd elements
-// Example: array.any(it.name == 'Bob') // will yield `true` if any element has `.name == 'Bob'`
 pub fn (mut a array) sort(callback fn (voidptr, voidptr) int)
 
-// sort_with_compare sorts array in-place using the results of the
+// sort_with_compare sorts the array in-place using the results of the
 // given function to determine sort order.
 //
 // The function should return one of three values:
@@ -712,7 +738,7 @@ pub fn (mut a array) sort(callback fn (voidptr, voidptr) int)
 // - `1`  when `b` should come before `a` ( `b < a` )
 // - `0`  when the order cannot be determined ( `a == b` )
 //
-// ### Example:
+// Example:
 // ```v
 // fn main() {
 // 	mut a := ['hi', '1', '5', '3']

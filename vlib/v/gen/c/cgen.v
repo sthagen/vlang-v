@@ -203,6 +203,7 @@ mut:
 	cur_lock               ast.LockExpr
 	autofree_methods       map[int]bool
 	generated_free_methods map[int]bool
+	autofree_scope_stmts   []string
 }
 
 pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
@@ -716,7 +717,8 @@ pub fn (mut g Gen) init() {
 	}
 	if g.pref.autofree {
 		g.comptime_definitions.writeln('#define _VAUTOFREE (1)')
-		// g.comptime_definitions.writeln('unsigned char* g_cur_str;')
+	} else {
+		g.comptime_definitions.writeln('#define _VAUTOFREE (0)')
 	}
 	if g.pref.prealloc {
 		g.comptime_definitions.writeln('#define _VPREALLOC (1)')
@@ -812,7 +814,7 @@ pub fn (mut g Gen) write_typeof_functions() {
 				g.writeln('\t\tcase $tidx: return "${util.strip_main_name(sym.name)}";')
 				for v in sum_info.variants {
 					subtype := g.table.sym(v)
-					g.writeln('\t\tcase $v: return "${util.strip_main_name(subtype.name)}";')
+					g.writeln('\t\tcase $v.idx(): return "${util.strip_main_name(subtype.name)}";')
 				}
 				g.writeln('\t\tdefault: return "unknown ${util.strip_main_name(sym.name)}";')
 				g.writeln('\t}')
@@ -832,7 +834,7 @@ pub fn (mut g Gen) write_typeof_functions() {
 				g.writeln('\tswitch(sidx) {')
 				g.writeln('\t\tcase $tidx: return ${int(ityp)};')
 				for v in sum_info.variants {
-					g.writeln('\t\tcase $v: return ${int(v)};')
+					g.writeln('\t\tcase $v.idx(): return ${int(v)};')
 				}
 				g.writeln('\t\tdefault: return ${int(ityp)};')
 				g.writeln('\t}')
@@ -2577,6 +2579,9 @@ fn (mut g Gen) autofree_scope_vars2(scope &ast.Scope, start_pos int, end_pos int
 			else {}
 		}
 	}
+	for g.autofree_scope_stmts.len > 0 {
+		g.write(g.autofree_scope_stmts.pop())
+	}
 	// Free all vars in parent scopes as well:
 	// ```
 	// s := ...
@@ -2663,30 +2668,32 @@ fn (mut g Gen) autofree_var_call(free_fn_name string, v ast.Var) {
 		// TODO remove this temporary hack
 		return
 	}
+	mut af := strings.new_builder(128)
 	if v.typ.is_ptr() {
-		g.write('\t')
+		af.write_string('\t')
 		if v.typ.share() == .shared_t {
-			g.write(free_fn_name.replace_each(['__shared__', '']))
+			af.write_string(free_fn_name.replace_each(['__shared__', '']))
 		} else {
-			g.write(free_fn_name)
+			af.write_string(free_fn_name)
 		}
-		g.write('(')
+		af.write_string('(')
 		if v.typ.share() == .shared_t {
-			g.write('&')
+			af.write_string('&')
 		}
-		g.write(strings.repeat(`*`, v.typ.nr_muls() - 1)) // dereference if it is a pointer to a pointer
-		g.write(c_name(v.name))
+		af.write_string(strings.repeat(`*`, v.typ.nr_muls() - 1)) // dereference if it is a pointer to a pointer
+		af.write_string(c_name(v.name))
 		if v.typ.share() == .shared_t {
-			g.write('->val')
+			af.write_string('->val')
 		}
 
-		g.writeln('); // autofreed ptr var')
+		af.writeln('); // autofreed ptr var')
 	} else {
 		if v.typ == ast.error_type && !v.is_autofree_tmp {
 			return
 		}
-		g.writeln('\t${free_fn_name}(&${c_name(v.name)}); // autofreed var $g.cur_mod.name $g.is_builtin_mod')
+		af.writeln('\t${free_fn_name}(&${c_name(v.name)}); // autofreed var $g.cur_mod.name $g.is_builtin_mod')
 	}
+	g.autofree_scope_stmts << af.str()
 }
 
 fn (mut g Gen) map_fn_ptrs(key_typ ast.TypeSymbol) (string, string, string, string) {
@@ -3764,6 +3771,11 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 		g.write('))')
 	} else if sym.kind == .alias && g.table.final_sym(node.typ).kind == .array_fixed {
 		g.expr(node.expr)
+	} else if node.expr_type == ast.bool_type && node.typ.is_int() {
+		styp := g.typ(node.typ)
+		g.write('($styp[]){(')
+		g.expr(node.expr)
+		g.write(')?1:0}[0]')
 	} else {
 		styp := g.typ(node.typ)
 		if (g.pref.translated || g.file.is_translated) && sym.kind == .function {
@@ -3828,10 +3840,10 @@ fn (mut g Gen) concat_expr(node ast.ConcatExpr) {
 
 [inline]
 fn (g &Gen) expr_is_multi_return_call(expr ast.Expr) bool {
-	match expr {
-		ast.CallExpr { return g.table.sym(expr.return_type).kind == .multi_return }
-		else { return false }
+	if expr is ast.CallExpr {
+		return g.table.sym(expr.return_type).kind == .multi_return
 	}
+	return false
 }
 
 fn (mut g Gen) gen_optional_error(target_type ast.Type, expr ast.Expr) {
@@ -4364,17 +4376,23 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 		if field.has_expr && mut anon_fn_expr is ast.AnonFn {
 			g.gen_anon_fn_decl(mut anon_fn_expr)
 			fn_type_name := g.get_anon_fn_type_name(mut anon_fn_expr, field.name)
-			g.definitions.writeln('$fn_type_name = ${g.table.sym(field.typ).name}; // global')
+			g.definitions.writeln('$fn_type_name = ${g.table.sym(field.typ).name}; // global2')
 			continue
 		}
 		g.definitions.write_string('$visibility_kw$styp $attributes $field.name')
 		if field.has_expr {
-			if field.expr.is_literal() && should_init {
+			if g.pref.translated {
+				g.definitions.write_string(' = ${g.expr_string(field.expr)}')
+			} else if field.expr.is_literal() && should_init {
+				// Simple literals can be initialized right away in global scope in C.
+				// e.g. `int myglobal = 10;`
 				g.definitions.write_string(' = ${g.expr_string(field.expr)}')
 			} else {
-				g.global_init.writeln('\t$field.name = ${g.expr_string(field.expr)}; // global')
+				// More complex expressions need to be moved to `_vinit()`
+				// e.g. `__global ( mygblobal = 'hello ' + world' )`
+				g.global_init.writeln('\t$field.name = ${g.expr_string(field.expr)}; // 3global')
 			}
-		} else {
+		} else if !g.pref.translated { // don't zero globals from C code
 			default_initializer := g.type_default(field.typ)
 			if default_initializer == '{0}' && should_init {
 				g.definitions.write_string(' = {0}')
@@ -4384,7 +4402,7 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 				}
 			}
 		}
-		g.definitions.writeln('; // global')
+		g.definitions.writeln('; // global4')
 	}
 }
 

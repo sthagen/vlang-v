@@ -610,19 +610,6 @@ pub mut:
 	types []Type
 }
 
-/*
-pub enum Expr {
-	Binary(InfixExpr)
-	If(IfExpr)
-	Integer(IntegerExpr)
-}
-*/
-/*
-pub struct Stmt {
-	pos int
-	//end int
-}
-*/
 pub struct Var {
 pub:
 	name            string
@@ -794,7 +781,21 @@ pub mut:
 	name   string
 	kind   IdentKind
 	info   IdentInfo
-	is_mut bool
+	is_mut bool // if mut *token* is before name. Use `is_mut()` to lookup mut variable
+}
+
+pub fn (i &Ident) is_mut() bool {
+	match i.obj {
+		Var {
+			return i.obj.is_mut
+		}
+		ConstField {
+			return false
+		}
+		AsmRegister, GlobalField {
+			return true
+		}
+	}
 }
 
 pub fn (i &Ident) var_info() IdentVar {

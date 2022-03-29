@@ -77,6 +77,9 @@ For more details and troubleshooting, please visit the [vab GitHub repository](h
     * [Strings](#strings)
     * [Numbers](#numbers)
     * [Arrays](#arrays)
+        * [Multidimensional arrays](#multidimensional-arrays)
+        * [Array methods](#array-methods)
+        * [Array slices](#array-slices)
     * [Fixed size arrays](#fixed-size-arrays)
     * [Maps](#maps)
 * [Module imports](#module-imports)
@@ -105,7 +108,8 @@ For more details and troubleshooting, please visit the [vab GitHub repository](h
 * [References](#references)
 * [Constants](#constants)
 * [Builtin functions](#builtin-functions)
-* [Printing custom types](#printing-custom-types)
+    * [println](#println)
+    * [Dumping expressions at runtime](#dumping-expressions-at-runtime)
 * [Modules](#modules)
 * [Type Declarations](#type-declarations)
     * [Interfaces](#interfaces)
@@ -137,7 +141,6 @@ For more details and troubleshooting, please visit the [vab GitHub repository](h
 * [Package Management](#package-management)
 	* [Publish package](#publish-package)
 * [Advanced Topics](#advanced-topics)
-    * [Dumping expressions at runtime](#dumping-expressions-at-runtime)
     * [Memory-unsafe code](#memory-unsafe-code)
     * [Structs with reference fields](#structs-with-reference-fields)
     * [sizeof and __offsetof](#sizeof-and-__offsetof)
@@ -196,7 +199,7 @@ In this case `main` doesn't return anything, so there is no return type.
 
 As in many other languages (such as C, Go, and Rust), `main` is the entry point of your program.
 
-`println` is one of the few built-in functions.
+[`println`](#println) is one of the few [built-in functions](#builtin-functions).
 It prints the value passed to it to standard output.
 
 `fn main()` declaration can be skipped in one file programs.
@@ -777,19 +780,50 @@ f2 := 456e+2 // 45600
 ```
 
 ### Arrays
-#### Basic Array Concepts
-Arrays are collections of data elements of the same type. They can be represented by
-a list of elements surrounded by brackets. The elements can be accessed by appending
-an *index* (starting with `0`) in brackets to the array variable:
+
+An array is a collection of data elements of the same type. An array literal is a
+list of expressions surrounded by square brackets. An individual element can be
+accessed using an *index* expression. Indexes start from `0`:
 ```v
 mut nums := [1, 2, 3]
 println(nums) // `[1, 2, 3]`
 println(nums[0]) // `1`
 println(nums[1]) // `2`
+
 nums[1] = 5
 println(nums) // `[1, 5, 3]`
 ```
+
+<a id='array-operations' />
+
+An element can be appended to the end of an array using the push operator `<<`.
+It can also append an entire array.
+
+```v
+mut nums := [1, 2, 3]
+nums << 4
+println(nums) // "[1, 2, 3, 4]"
+
+// append array
+nums << [5, 6, 7]
+println(nums) // "[1, 2, 3, 4, 5, 6, 7]"
+```
+```v
+mut names := ['John']
+names << 'Peter'
+names << 'Sam'
+// names << 10  <-- This will not compile. `names` is an array of strings.
+```
+
+`val in array` returns true if the array contains `val`. See [`in` operator](#in-operator).
+
+```v
+names := ['John', 'Peter', 'Sam']
+println('Alex' in names) // "false"
+```
+
 #### Array Fields
+
 There are two fields that control the "size" of an array:
 * `len`: *length* - the number of pre-allocated and initialized elements in the array
 * `cap`: *capacity* - the amount of memory space which has been reserved for elements,
@@ -804,11 +838,13 @@ println(nums.cap) // "3" or greater
 nums = [] // The array is now empty
 println(nums.len) // "0"
 ```
+`data` is a field (of type `voidptr`) with the address of the first 
+element. This is for low-level [`unsafe`](#memory-unsafe-code) code.
 
-Note that fields are read-only and can't be modified by the user.
+Note that the fields are read-only and can't be modified by the user.
 
 #### Array Initialization
-The basic initialization syntax is as described [above](#basic-array-concepts).
+
 The type of an array is determined by the first element:
 * `[1, 2, 3]` is an array of ints (`[]int`).
 * `['a', 'b']` is an array of strings (`[]string`).
@@ -849,12 +885,15 @@ for i in 0 .. 1000 {
 	numbers << i
 }
 ```
-Note: The above code uses a [range `for`](#range-for) statement and a
-[push operator (`<<`)](#array-operations).
+Note: The above code uses a [range `for`](#range-for) statement.
 
-You can initialize the array by accessing the `it` variable as shown here:
+You can initialize the array by accessing the `it` variable which gives 
+the index as shown here:
 
 ```v
+count := []int{len: 4, init: it}
+assert count == [0, 1, 2, 3]
+
 mut square := []int{len: 6, init: it * it}
 // square == [0, 1, 4, 9, 16, 25]
 ```
@@ -942,33 +981,6 @@ a[0][1][1] = 2
 println(a) // [[[0, 0], [0, 2], [0, 0]], [[0, 0], [0, 0], [0, 0]]]
 ```
 
-#### Array Operations
-
-Elements can be appended to the end of an array using the push operator `<<`.
-It can also append an entire array.
-
-```v
-mut nums := [1, 2, 3]
-nums << 4
-println(nums) // "[1, 2, 3, 4]"
-// append array
-nums << [5, 6, 7]
-println(nums) // "[1, 2, 3, 4, 5, 6, 7]"
-mut names := ['John']
-names << 'Peter'
-names << 'Sam'
-// names << 10  <-- This will not compile. `names` is an array of strings.
-```
-
-`val in array` returns true if the array contains `val`. See [`in` operator](#in-operator).
-
-```v
-names := ['John', 'Peter', 'Sam']
-println(names.len) // "3"
-println('Alex' in names) // "false"
-```
-
-
 #### Array methods
 
 All arrays can be easily printed with `println(arr)` and converted to a string
@@ -993,6 +1005,8 @@ even_fn := nums.filter(fn (x int) bool {
 	return x % 2 == 0
 })
 println(even_fn)
+```
+```v
 words := ['hello', 'world']
 upper := words.map(it.to_upper())
 println(upper) // ['HELLO', 'WORLD']
@@ -1003,7 +1017,8 @@ upper_fn := words.map(fn (w string) string {
 println(upper_fn) // ['HELLO', 'WORLD']
 ```
 
-`it` is a builtin variable which refers to element currently being processed in filter/map methods.
+`it` is a builtin variable which refers to the element currently being 
+processed in filter/map methods.
 
 Additionally, `.any()` and `.all()` can be used to conveniently test
 for elements that satisfy a condition.
@@ -1014,26 +1029,30 @@ println(nums.any(it == 2)) // true
 println(nums.all(it >= 2)) // false
 ```
 
-There are further built in methods for arrays:
-* `b := a.repeat(n)` concatenate `n` times the elements of `a`
-* `a.insert(i, val)` insert new element `val` at index `i` and move all following elements upwards
-* `a.insert(i, [3, 4, 5])` insert several elements
-* `a.prepend(val)` insert value at beginning, equivalent to `a.insert(0, val)`
-* `a.prepend(arr)` insert elements of array `arr` at beginning
-* `a.trim(new_len)` truncate the length (if `new_length < a.len`, otherwise do nothing)
-* `a.clear()` empty the array (without changing `cap`, equivalent to `a.trim(0)`)
-* `a.delete_many(start, size)` removes `size` consecutive elements beginning with index `start`
+There are further built-in methods for arrays:
+* `a.repeat(n)` concatenates the array elements `n` times 
+* `a.insert(i, val)` inserts a new element `val` at index `i` and 
+  shifts all following elements to the right
+* `a.insert(i, [3, 4, 5])` inserts several elements
+* `a.prepend(val)` inserts a value at the beginning, equivalent to `a.insert(0, val)`
+* `a.prepend(arr)` inserts elements of array `arr` at the beginning
+* `a.trim(new_len)` truncates the length (if `new_length < a.len`, otherwise does nothing)
+* `a.clear()` empties the array without changing `cap` (equivalent to `a.trim(0)`)
+* `a.delete_many(start, size)` removes `size` consecutive elements from index `start`
   &ndash; triggers reallocation
 * `a.delete(index)` equivalent to `a.delete_many(index, 1)`
-* `v := a.first()` equivalent to `v := a[0]`
-* `v := a.last()` equivalent to `v := a[a.len - 1]`
-* `v := a.pop()` get last element and remove it from array
-* `a.delete_last()` remove last element from array
-* `b := a.reverse()` make `b` contain the elements of `a` in reversed order
-* `a.reverse_in_place()` reverse the order of elements in `a`
-* `a.join(joiner)` concatenate array of strings into a string using `joiner` string as a separator
+* `a.delete_last()` removes the last element
+* `a.first()` equivalent to `a[0]`
+* `a.last()` equivalent to `a[a.len - 1]`
+* `a.pop()` removes the last element and returns it
+* `a.reverse()` makes a new array with the elements of `a` in reverse order
+* `a.reverse_in_place()` reverses the order of elements in `a`
+* `a.join(joiner)` concatenates an array of strings into one string 
+  using `joiner` string as a separator
 
-#### Sorting Arrays
+See also [vlib/arrays](https://modules.vlang.io/arrays.html).
+
+##### Sorting Arrays
 
 Sorting arrays of all kinds is very simple and intuitive. Special variables `a` and `b`
 are used when providing a custom sorting condition.
@@ -1157,7 +1176,7 @@ println(a) // [0, 1, 2, 3, 4, 5]
 println(b) // [7, 3]
 ```
 
-### Slices with negative indexes
+##### Slices with negative indexes
 
 V supports array and string slices with negative indexes.
 Negative indexing starts from the end of the array towards the start,
@@ -1180,7 +1199,7 @@ println(a#[20..10]) // []
 println(a#[20..30]) // []
 ```
 
-### Array method chaining
+#### Array method chaining
 You can chain the calls of array methods like `.filter()` and `.map()` and use
 the `it` built-in variable to achieve a classic `map/filter` functional paradigm:
 
@@ -2607,16 +2626,22 @@ println('Top cities: ${top_cities.filter(.usa)}')
 Some functions are builtin like `println`. Here is the complete list:
 
 ```v ignore
-fn print(s string) // print anything on sdtout
-fn println(s string) // print anything and a newline on sdtout
+fn print(s string) // prints anything on stdout
+fn println(s string) // prints anything and a newline on stdout
 
-fn eprint(s string) // same as print(), but use stderr
-fn eprintln(s string) // same as println(), but use stderr
+fn eprint(s string) // same as print(), but uses stderr
+fn eprintln(s string) // same as println(), but uses stderr
 
-fn exit(code int) // terminate the program with a custom error code
-fn panic(s string) // print a message and backtraces on stderr, and terminate the program with error code 1
-fn print_backtrace() // print backtraces on stderr
+fn exit(code int) // terminates the program with a custom error code
+fn panic(s string) // prints a message and backtraces on stderr, and terminates the program with error code 1
+fn print_backtrace() // prints backtraces on stderr
 ```
+Note: Although the `print` functions take a string, V accepts other printable types too.
+See below for details.
+
+There is also a special built-in function called [`dump`](#dumping-expressions-at-runtime).
+
+### println
 
 `println` is a simple yet powerful builtin function, that can print anything:
 strings, numbers, arrays, maps, structs.
@@ -2633,12 +2658,14 @@ println([1, 2, 3]) // "[1, 2, 3]"
 println(User{ name: 'Bob', age: 20 }) // "User{name:'Bob', age:20}"
 ```
 
+See also [Array methods](#array-methods).
+
 <a id='custom-print-of-types' />
 
-## Printing custom types
+### Printing custom types
 
 If you want to define a custom print value for your type, simply define a
-`.str() string` method:
+`str() string` method:
 
 ```v
 struct Color {
@@ -2658,6 +2685,40 @@ red := Color{
 }
 println(red)
 ```
+
+### Dumping expressions at runtime
+
+You can dump/trace the value of any V expression using `dump(expr)`.
+For example, save this code sample as `factorial.v`, then run it with
+`v run factorial.v`:
+```v
+fn factorial(n u32) u32 {
+	if dump(n <= 1) {
+		return dump(1)
+	}
+	return dump(n * factorial(n - 1))
+}
+
+fn main() {
+	println(factorial(5))
+}
+```
+You will get:
+```
+[factorial.v:2] n <= 1: false
+[factorial.v:2] n <= 1: false
+[factorial.v:2] n <= 1: false
+[factorial.v:2] n <= 1: false
+[factorial.v:2] n <= 1: true
+[factorial.v:3] 1: 1
+[factorial.v:5] n * factorial(n - 1): 2
+[factorial.v:5] n * factorial(n - 1): 6
+[factorial.v:5] n * factorial(n - 1): 24
+[factorial.v:5] n * factorial(n - 1): 120
+120
+```
+Note that `dump(expr)` will trace both the source location,
+the expression itself, and the expression value.
 
 ## Modules
 
@@ -3074,6 +3135,50 @@ Output: `Grocery IDs: 0, 5, 6`.
 
 Operations are not allowed on enum variables; they must be explicitly cast to `int`.
 
+Enums can have methods, just like structs.
+
+```v
+enum Cycle {
+	one
+	two
+	three
+}
+
+fn (c Cycle) next() Cycle {
+	match c {
+		.one {
+			return .two
+		}
+		.two {
+			return .three
+		}
+		.three {
+			return .one
+		}
+	}
+}
+
+mut c := Cycle.one
+for _ in 0 .. 10 {
+	println(c)
+	c = c.next()
+}
+```
+
+Output:
+```
+one
+two
+three
+one
+two
+three
+one
+two
+three
+one
+```
+
 ### Sum types
 
 A sum type instance can hold a value of several different types. Use the `type`
@@ -3122,50 +3227,6 @@ fn main() {
 	tree := Node{0.5, left, right}
 	println(sum(tree)) // 0.2 + 0.3 + 0.4 + 0.5 = 1.4
 }
-```
-
-Enums can have methods, just like structs
-
-```v
-enum Cycle {
-	one
-	two
-	three
-}
-
-fn (c Cycle) next() Cycle {
-	match c {
-		.one {
-			return .two
-		}
-		.two {
-			return .three
-		}
-		.three {
-			return .one
-		}
-	}
-}
-
-mut c := Cycle.one
-for _ in 0 .. 10 {
-	println(c)
-	c = c.next()
-}
-```
-
-Output:
-```
-one
-two
-three
-one
-two
-three
-one
-two
-three
-one
 ```
 
 #### Dynamic casts
@@ -4659,39 +4720,6 @@ Modules are up to date.
 to allow for a better search experience.
 
 # Advanced Topics
-
-## Dumping expressions at runtime
-You can dump/trace the value of any V expression using `dump(expr)`.
-For example, save this code sample as `factorial.v`, then run it with
-`v run factorial.v`:
-```v
-fn factorial(n u32) u32 {
-	if dump(n <= 1) {
-		return dump(1)
-	}
-	return dump(n * factorial(n - 1))
-}
-
-fn main() {
-	println(factorial(5))
-}
-```
-You will get:
-```
-[factorial.v:2] n <= 1: false
-[factorial.v:2] n <= 1: false
-[factorial.v:2] n <= 1: false
-[factorial.v:2] n <= 1: false
-[factorial.v:2] n <= 1: true
-[factorial.v:3] 1: 1
-[factorial.v:5] n * factorial(n - 1): 2
-[factorial.v:5] n * factorial(n - 1): 6
-[factorial.v:5] n * factorial(n - 1): 24
-[factorial.v:5] n * factorial(n - 1): 120
-120
-```
-Note that `dump(expr)` will trace both the source location,
-the expression itself, and the expression value.
 
 ## Memory-unsafe code
 

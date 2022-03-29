@@ -2603,10 +2603,16 @@ pub fn (mut c Checker) expr(node_ ast.Expr) ast.Type {
 		}
 		ast.DumpExpr {
 			node.expr_type = c.expr(node.expr)
-			if node.expr_type.idx() == ast.void_type_idx {
+			etidx := node.expr_type.idx()
+			if etidx == ast.void_type_idx {
 				c.error('dump expression can not be void', node.expr.pos())
 				return ast.void_type
+			} else if etidx == ast.char_type_idx && node.expr_type.nr_muls() == 0 {
+				c.error('`char` values cannot be dumped directly, use dump(byte(x)) or dump(int(x)) instead',
+					node.expr.pos())
+				return ast.void_type
 			}
+
 			tsym := c.table.sym(node.expr_type)
 			c.table.dumps[int(node.expr_type)] = tsym.cname
 			node.cname = tsym.cname
@@ -4169,5 +4175,46 @@ fn (mut c Checker) ensure_type_exists(typ ast.Type, pos token.Pos) ? {
 			c.ensure_type_exists(info.value_type, pos) ?
 		}
 		else {}
+	}
+}
+
+pub fn (mut c Checker) fail_if_unreadable(expr ast.Expr, typ ast.Type, what string) {
+	mut pos := token.Pos{}
+	match expr {
+		ast.Ident {
+			if typ.has_flag(.shared_f) {
+				if expr.name !in c.rlocked_names && expr.name !in c.locked_names {
+					action := if what == 'argument' { 'passed' } else { 'used' }
+					c.error('`$expr.name` is `shared` and must be `rlock`ed or `lock`ed to be $action as non-mut $what',
+						expr.pos)
+				}
+			}
+			return
+		}
+		ast.SelectorExpr {
+			pos = expr.pos
+			if typ.has_flag(.shared_f) {
+				expr_name := '${expr.expr}.$expr.field_name'
+				if expr_name !in c.rlocked_names && expr_name !in c.locked_names {
+					action := if what == 'argument' { 'passed' } else { 'used' }
+					c.error('`$expr_name` is `shared` and must be `rlock`ed or `lock`ed to be $action as non-mut $what',
+						expr.pos)
+				}
+				return
+			} else {
+				c.fail_if_unreadable(expr.expr, expr.expr_type, what)
+			}
+		}
+		ast.IndexExpr {
+			pos = expr.left.pos().extend(expr.pos)
+			c.fail_if_unreadable(expr.left, expr.left_type, what)
+		}
+		else {
+			pos = expr.pos()
+		}
+	}
+	if typ.has_flag(.shared_f) {
+		c.error('you have to create a handle and `rlock` it to use a `shared` element as non-mut $what',
+			pos)
 	}
 }
