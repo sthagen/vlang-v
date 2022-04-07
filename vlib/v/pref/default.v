@@ -92,7 +92,7 @@ pub fn (mut p Preferences) fill_with_defaults() {
 	//
 	p.try_to_use_tcc_by_default()
 	if p.ccompiler == '' {
-		p.ccompiler = default_c_compiler()
+		p.default_c_compiler()
 	}
 	p.find_cc_if_cross_compiling()
 	p.ccompiler_type = cc_from_string(p.ccompiler)
@@ -203,16 +203,35 @@ pub fn default_tcc_compiler() string {
 	return ''
 }
 
-pub fn default_c_compiler() string {
+pub fn (mut p Preferences) default_c_compiler() {
 	// fast_clang := '/usr/local/Cellar/llvm/8.0.0/bin/clang'
 	// if os.exists(fast_clang) {
 	// return fast_clang
 	// }
 	// TODO fix $if after 'string'
 	$if windows {
-		return 'gcc'
+		p.ccompiler = 'gcc'
+		return
 	}
-	return 'cc'
+	if p.os == .ios {
+		$if !ios {
+			ios_sdk := if p.is_ios_simulator { 'iphonesimulator' } else { 'iphoneos' }
+			ios_sdk_path_res := os.execute_or_exit('xcrun --sdk $ios_sdk --show-sdk-path')
+			mut isysroot := ios_sdk_path_res.output.replace('\n', '')
+			arch := if p.is_ios_simulator {
+				'-arch x86_64 -arch arm64'
+			} else {
+				'-arch armv7 -arch armv7s -arch arm64'
+			}
+			// On macOS, /usr/bin/cc is a hardlink/wrapper for xcrun. clang on darwin hosts
+			// will automatically change the build target based off of the selected sdk, making xcrun -sdk iphoneos pointless
+			p.ccompiler = '/usr/bin/cc'
+			p.cflags = '-isysroot $isysroot $arch' + p.cflags
+			return
+		}
+	}
+	p.ccompiler = 'cc'
+	return
 }
 
 pub fn vexe_path() string {

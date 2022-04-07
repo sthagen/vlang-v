@@ -608,6 +608,15 @@ fn (mut p Parser) fn_receiver(mut params []ast.Param, mut rec ReceiverParsingInf
 		p.check_for_impure_v(rec.language, rec.type_pos)
 	}
 
+	p.check(.rpar)
+
+	if is_auto_rec && p.tok.kind != .name {
+		// Disable the auto-reference conversion for methodlike operators like ==, <=, > etc,
+		// since their parameters and receivers, *must* always be of the same type.
+		is_auto_rec = false
+		rec.typ = rec.typ.deref()
+	}
+
 	params << ast.Param{
 		pos: rec_start_pos
 		name: rec.name
@@ -616,9 +625,6 @@ fn (mut p Parser) fn_receiver(mut params []ast.Param, mut rec ReceiverParsingInf
 		typ: rec.typ
 		type_pos: rec.type_pos
 	}
-	p.check(.rpar)
-
-	return
 }
 
 fn (mut p Parser) anon_fn() ast.AnonFn {
@@ -732,13 +738,14 @@ fn (mut p Parser) fn_args() ([]ast.Param, bool, bool) {
 	} else {
 		p.tok.lit
 	}
+
 	types_only := p.tok.kind in [.amp, .ellipsis, .key_fn, .lsbr]
 		|| (p.peek_tok.kind == .comma && p.table.known_type(argname))
 		|| p.peek_tok.kind == .dot || p.peek_tok.kind == .rpar
 		|| (p.tok.kind == .key_mut && (p.peek_token(2).kind == .comma
 		|| p.peek_token(2).kind == .rpar || (p.peek_tok.kind == .name
 		&& p.peek_token(2).kind == .dot)))
-	// TODO copy pasta, merge 2 branches
+	// TODO copy paste, merge 2 branches
 	if types_only {
 		mut arg_no := 1
 		for p.tok.kind != .rpar {
@@ -794,6 +801,7 @@ fn (mut p Parser) fn_args() ([]ast.Param, bool, bool) {
 				p.error_with_pos('expecting `)`', p.prev_tok.pos())
 				return []ast.Param{}, false, false
 			}
+
 			if p.tok.kind == .comma {
 				if is_variadic {
 					p.error_with_pos('cannot use ...(variadic) with non-final parameter no $arg_no',
@@ -926,6 +934,27 @@ fn (mut p Parser) fn_args() ([]ast.Param, bool, bool) {
 	}
 	p.check(.rpar)
 	return args, types_only, is_variadic
+}
+
+fn (mut p Parser) go_expr() ast.GoExpr {
+	p.next()
+	spos := p.tok.pos()
+	expr := p.expr(0)
+	call_expr := if expr is ast.CallExpr {
+		expr
+	} else {
+		p.error_with_pos('expression in `go` must be a function call', expr.pos())
+		ast.CallExpr{
+			scope: p.scope
+		}
+	}
+	pos := spos.extend(p.prev_tok.pos())
+	p.register_auto_import('sync.threads')
+	p.table.gostmts++
+	return ast.GoExpr{
+		call_expr: call_expr
+		pos: pos
+	}
 }
 
 fn (mut p Parser) closure_vars() []ast.Param {

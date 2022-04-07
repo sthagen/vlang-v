@@ -651,7 +651,8 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			}
 			return ast.bool_type
 		}
-		.plus, .minus, .mul, .div, .mod, .xor, .amp, .pipe { // binary operators that expect matching types
+		.plus, .minus, .mul, .div, .mod, .xor, .amp, .pipe {
+			// binary operators that expect matching types
 			if right_sym.info is ast.Alias && (right_sym.info as ast.Alias).language != .c
 				&& c.mod == c.table.type_to_str(right_type).split('.')[0]
 				&& c.table.sym((right_sym.info as ast.Alias).parent_type).is_primitive() {
@@ -803,8 +804,12 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					left_name := c.table.type_to_str(left_type)
 					right_name := c.table.type_to_str(right_type)
 					if left_name == right_name {
-						c.error('undefined operation `$left_name` $node.op.str() `$right_name`',
-							left_right_pos)
+						if !(node.op == .lt && c.pref.translated) {
+							// Allow `&Foo < &Foo` in translated code.
+							// TODO maybe in unsafe as well?
+							c.error('undefined operation `$left_name` $node.op.str() `$right_name`',
+								left_right_pos)
+						}
 					} else {
 						c.error('mismatched types `$left_name` and `$right_name`', left_right_pos)
 					}
@@ -823,10 +828,12 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				left_gen_type := c.unwrap_generic(left_type)
 				gen_sym := c.table.sym(left_gen_type)
 				need_overload := gen_sym.kind in [.struct_, .interface_]
-				if need_overload && !gen_sym.has_method('<') && node.op in [.ge, .le] {
+				if need_overload && !gen_sym.has_method_with_generic_parent('<')
+					&& node.op in [.ge, .le] {
 					c.error('cannot use `$node.op` as `<` operator method is not defined',
 						left_right_pos)
-				} else if need_overload && !gen_sym.has_method('<') && node.op == .gt {
+				} else if need_overload && !gen_sym.has_method_with_generic_parent('<')
+					&& node.op == .gt {
 					c.error('cannot use `>` as `<=` operator method is not defined', left_right_pos)
 				}
 			} else if left_type in ast.integer_type_idxs && right_type in ast.integer_type_idxs {
@@ -2108,32 +2115,6 @@ fn (mut c Checker) global_decl(mut node ast.GlobalDecl) {
 			v.typ = ast.mktyp(field.typ)
 		}
 		c.global_names << field.name
-	}
-}
-
-fn (mut c Checker) go_expr(mut node ast.GoExpr) ast.Type {
-	ret_type := c.call_expr(mut node.call_expr)
-	if node.call_expr.or_block.kind != .absent {
-		c.error('optional handling cannot be done in `go` call. Do it when calling `.wait()`',
-			node.call_expr.or_block.pos)
-	}
-	// Make sure there are no mutable arguments
-	for arg in node.call_expr.args {
-		if arg.is_mut && !arg.typ.is_ptr() {
-			c.error('function in `go` statement cannot contain mutable non-reference arguments',
-				arg.expr.pos())
-		}
-	}
-	if node.call_expr.is_method && node.call_expr.receiver_type.is_ptr()
-		&& !node.call_expr.left_type.is_ptr() {
-		c.error('method in `go` statement cannot have non-reference mutable receiver',
-			node.call_expr.left.pos())
-	}
-
-	if c.pref.backend.is_js() {
-		return c.table.find_or_register_promise(ret_type)
-	} else {
-		return c.table.find_or_register_thread(ret_type)
 	}
 }
 
@@ -3539,9 +3520,9 @@ pub fn (mut c Checker) postfix_expr(mut node ast.PostfixExpr) ast.Type {
 	if !c.inside_unsafe && is_non_void_pointer && !node.expr.is_auto_deref_var() {
 		c.warn('pointer arithmetic is only allowed in `unsafe` blocks', node.pos)
 	}
-	if !(typ_sym.is_number() || (c.inside_unsafe && is_non_void_pointer)) {
-		c.error('invalid operation: $node.op.str() (non-numeric type `$typ_sym.name`)',
-			node.pos)
+	if !(typ_sym.is_number() || ((c.inside_unsafe || c.pref.translated) && is_non_void_pointer)) {
+		typ_str := c.table.type_to_str(typ)
+		c.error('invalid operation: $node.op.str() (non-numeric type `$typ_str`)', node.pos)
 	} else {
 		node.auto_locked, _ = c.fail_if_immutable(node.expr)
 	}
@@ -3555,6 +3536,9 @@ pub fn (mut c Checker) mark_as_referenced(mut node ast.Expr, as_interface bool) 
 				mut obj := unsafe { &node.obj }
 				if c.fn_scope != voidptr(0) {
 					obj = c.fn_scope.find_var(node.obj.name) or { obj }
+				}
+				if obj.typ == 0 {
+					return
 				}
 				type_sym := c.table.sym(obj.typ.set_nr_muls(0))
 				if obj.is_stack_obj && !type_sym.is_heap() && !c.pref.translated

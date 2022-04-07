@@ -449,6 +449,7 @@ pub fn (nn u64) hex_full() string {
 }
 
 // str returns the contents of `byte` as a zero terminated `string`.
+// See also: [`byte.ascii_str`](#byte.ascii_str)
 // Example: assert byte(111).str() == '111'
 pub fn (b byte) str() string {
 	return int(b).str_l(7)
@@ -516,7 +517,7 @@ pub fn (b byte) str_escaped() string {
 
 // is_capital returns `true`, if the byte is a Latin capital letter.
 // Example: assert `H`.is_capital() == true
-// Example: assert 'h`.is_capital() == false
+// Example: assert `h`.is_capital() == false
 [inline]
 pub fn (c byte) is_capital() bool {
 	return c >= `A` && c <= `Z`

@@ -73,9 +73,30 @@ $dec_fn_dec {
 	if (!root) {
 		const char *error_ptr = cJSON_GetErrorPtr();
 		if (error_ptr != NULL)	{
-			// fprintf(stderr, "Error in decode() for $styp error_ptr=: %s\\n", error_ptr);
-			// printf("\\nbad js=%%s\\n", js.str);
-			return (Option_$styp){.state = 2,.err = _v_error(tos2((byteptr)error_ptr)),.data = {0}};
+			const int error_pos = (int)cJSON_GetErrorPos();
+			int maxcontext_chars = 30;
+			byte *buf = vcalloc_noscan(maxcontext_chars + 10);
+			if(error_pos > 0) {
+				int backlines = 1;
+				int backchars = error_pos < maxcontext_chars-7 ? (int)error_pos : maxcontext_chars-7 ;
+				char *prevline_ptr = (char*)error_ptr;
+				while(backchars--){
+					char prevc = *(prevline_ptr - 1);
+					if(0==prevc){
+						break;
+					}
+					if(10==prevc && !backlines--){
+						break;
+					}
+					prevline_ptr--;
+					if(123==prevc) {
+						break; // stop at `{` too
+					}
+				}
+				int maxchars = vstrlen_char(prevline_ptr);
+				vmemcpy(buf, prevline_ptr, (maxchars < maxcontext_chars ? maxchars : maxcontext_chars));
+			}
+			return (Option_$styp){.state = 2,.err = _v_error(tos2(buf)),.data = {0}};
 		}
 	}
 ')

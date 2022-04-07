@@ -328,6 +328,28 @@ pub fn (mut a array) trim(index int) {
 	}
 }
 
+// drop advances the array past the first `num` elements whilst preserving spare capacity.
+// If `num` is greater than `len` the array will be emptied.
+// Example:
+// ```v
+// mut a := [1,2]
+// a << 3
+// a.drop(2)
+// assert a == [3]
+// assert a.cap > a.len
+// ```
+pub fn (mut a array) drop(num int) {
+	if num <= 0 {
+		return
+	}
+	n := if num <= a.len { num } else { a.len }
+	blen := n * a.element_size
+	a.data = unsafe { &byte(a.data) + blen }
+	a.offset += blen
+	a.len -= n
+	a.cap -= n
+}
+
 // we manually inline this for single operations for performance without -prod
 [inline; unsafe]
 fn (a array) get_unsafe(i int) voidptr {
@@ -587,7 +609,7 @@ fn (mut a array) push(val voidptr) {
 	if a.len >= a.cap {
 		a.ensure_cap(a.len + 1)
 	}
-	unsafe { vmemmove(&byte(a.data) + a.element_size * a.len, val, a.element_size) }
+	unsafe { vmemcpy(&byte(a.data) + a.element_size * a.len, val, a.element_size) }
 	a.len++
 }
 
@@ -690,7 +712,7 @@ pub fn (a array) filter(predicate fn (voidptr) bool) array
 // Example: array.any(it.name == 'Bob') // will yield `true` if any element has `.name == 'Bob'`
 pub fn (a array) any(predicate fn (voidptr) bool) bool
 
-// all tests whether all elements in the array pass the test
+// all tests whether all elements in the array pass the test.
 // Ignore the function signature. `all` does not take an actual callback. Rather, it
 // takes an `it` expression.
 // It returns `false` if any element fails the test. Otherwise,
