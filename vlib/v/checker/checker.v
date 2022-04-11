@@ -124,6 +124,7 @@ mut:
 	inside_println_arg               bool
 	inside_decl_rhs                  bool
 	inside_if_guard                  bool // true inside the guard condition of `if x := opt() {}`
+	comptime_call_pos                int  // needed for correctly checking use before decl for templates
 }
 
 pub fn new_checker(table &ast.Table, pref &pref.Preferences) &Checker {
@@ -576,8 +577,8 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	left_right_pos := left_pos.extend(right_pos)
 	if left_type.is_any_kind_of_pointer()
 		&& node.op in [.plus, .minus, .mul, .div, .mod, .xor, .amp, .pipe] {
-		if (right_type.is_any_kind_of_pointer() && node.op != .minus)
-			|| (!right_type.is_any_kind_of_pointer() && node.op !in [.plus, .minus]) {
+		if !c.pref.translated && ((right_type.is_any_kind_of_pointer() && node.op != .minus)
+			|| (!right_type.is_any_kind_of_pointer() && node.op !in [.plus, .minus])) {
 			left_name := c.table.type_to_str(left_type)
 			right_name := c.table.type_to_str(right_type)
 			c.error('invalid operator `$node.op` to `$left_name` and `$right_name`', left_right_pos)
@@ -2066,6 +2067,7 @@ fn (mut c Checker) assert_stmt(node ast.AssertStmt) {
 		c.error('assert can be used only with `bool` expressions, but found `$atype_name` instead',
 			node.pos)
 	}
+	c.fail_if_unreadable(node.expr, ast.bool_type_idx, 'assertion')
 	c.expected_type = cur_exp_typ
 }
 
@@ -3103,9 +3105,16 @@ pub fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 					return obj.typ
 				}
 				ast.Var {
-					// incase var was not marked as used yet (vweb tmpl)
-					// obj.is_used = true
-					if node.pos.pos < obj.pos.pos {
+					// inside vweb tmpl ident positions are meaningless, use the position of the comptime call.
+					// if the variable is declared before the comptime call then we can assume all is well.
+					// `node.name !in node.scope.objects && node.scope.start_pos < c.comptime_call_pos` (inherited)
+					node_pos := if c.pref.is_vweb && node.name !in node.scope.objects
+						&& node.scope.start_pos < c.comptime_call_pos {
+						c.comptime_call_pos
+					} else {
+						node.pos.pos
+					}
+					if node_pos < obj.pos.pos {
 						c.error('undefined variable `$node.name` (used before declaration)',
 							node.pos)
 					}
@@ -4189,9 +4198,25 @@ pub fn (mut c Checker) fail_if_unreadable(expr ast.Expr, typ ast.Type, what stri
 				c.fail_if_unreadable(expr.expr, expr.expr_type, what)
 			}
 		}
+		ast.CallExpr {
+			pos = expr.pos
+			if expr.is_method {
+				c.fail_if_unreadable(expr.left, expr.left_type, what)
+			}
+			return
+		}
+		ast.LockExpr {
+			// TODO: check expressions inside the lock by appending to c.(r)locked_names
+			return
+		}
 		ast.IndexExpr {
 			pos = expr.left.pos().extend(expr.pos)
 			c.fail_if_unreadable(expr.left, expr.left_type, what)
+		}
+		ast.InfixExpr {
+			pos = expr.left.pos().extend(expr.pos)
+			c.fail_if_unreadable(expr.left, expr.left_type, what)
+			c.fail_if_unreadable(expr.right, expr.right_type, what)
 		}
 		else {
 			pos = expr.pos()
