@@ -843,7 +843,8 @@ pub fn (mut f Fmt) const_decl(node ast.ConstDecl) {
 		f.write(strings.repeat(` `, align_infos[align_idx].max - field.name.len))
 		f.write('= ')
 		f.expr(field.expr)
-		if node.is_block {
+		f.comments(field.end_comments, inline: true)
+		if node.is_block && field.end_comments.len == 0 {
 			f.writeln('')
 		} else {
 			// Write out single line comments after const expr if present
@@ -952,8 +953,11 @@ fn (mut f Fmt) fn_body(node ast.FnDecl) {
 	if node.language == .v {
 		if !node.no_body {
 			f.write(' {')
+			f.comments(node.comments, inline: true)
 			if node.stmts.len > 0 || node.pos.line_nr < node.pos.last_line {
-				f.writeln('')
+				if node.comments.len == 0 {
+					f.writeln('')
+				}
 				f.stmts(node.stmts)
 			}
 			f.write('}')

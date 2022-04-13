@@ -151,7 +151,7 @@ fn (mut g Gen) array_init(node ast.ArrayInit) {
 			} else {
 				g.write('0, ')
 			}
-			if elem_type.unaliased_sym.kind == .function {
+			if elem_type.unaliased_sym.kind == .function || g.is_empty_struct(elem_type) {
 				g.write('sizeof(voidptr), ')
 			} else {
 				g.write('sizeof($elem_styp), ')
@@ -217,7 +217,7 @@ fn (mut g Gen) array_init(node ast.ArrayInit) {
 		} else {
 			g.write('0, ')
 		}
-		if elem_type.unaliased_sym.kind == .function {
+		if elem_type.unaliased_sym.kind == .function || g.is_empty_struct(elem_type) {
 			g.write('sizeof(voidptr), ')
 		} else {
 			g.write('sizeof($elem_styp), ')
@@ -251,6 +251,8 @@ fn (mut g Gen) array_init(node ast.ArrayInit) {
 	len := node.exprs.len
 	if elem_type.unaliased_sym.kind == .function {
 		g.write('new_array_from_c_array($len, $len, sizeof(voidptr), _MOV((voidptr[$len]){')
+	} else if g.is_empty_struct(elem_type) {
+		g.write('new_array_from_c_array${noscan}($len, $len, sizeof(voidptr), _MOV(($elem_styp[$len]){')
 	} else {
 		g.write('new_array_from_c_array${noscan}($len, $len, sizeof($elem_styp), _MOV(($elem_styp[$len]){')
 	}
@@ -673,11 +675,7 @@ fn (mut g Gen) gen_array_contains_methods() {
 		fn_name := '${left_type_str}_contains'
 		left_info := left_final_sym.info as ast.Array
 		mut elem_type_str := g.typ(left_info.elem_type)
-		mut elem_sym := g.table.sym(left_info.elem_type)
-		if elem_sym.kind == .alias {
-			info := elem_sym.info as ast.Alias
-			elem_sym = g.table.sym(info.parent_type)
-		}
+		elem_sym := g.table.sym(left_info.elem_type)
 		if elem_sym.kind == .function {
 			left_type_str = 'Array_voidptr'
 			elem_type_str = 'voidptr'
@@ -705,6 +703,9 @@ fn (mut g Gen) gen_array_contains_methods() {
 		} else if elem_sym.kind == .sum_type && left_info.elem_type.nr_muls() == 0 {
 			ptr_typ := g.equality_fn(left_info.elem_type)
 			fn_builder.writeln('\t\tif (${ptr_typ}_sumtype_eq((($elem_type_str*)a.data)[i], v)) {')
+		} else if elem_sym.kind == .alias && left_info.elem_type.nr_muls() == 0 {
+			ptr_typ := g.equality_fn(left_info.elem_type)
+			fn_builder.writeln('\t\tif (${ptr_typ}_alias_eq((($elem_type_str*)a.data)[i], v)) {')
 		} else {
 			fn_builder.writeln('\t\tif ((($elem_type_str*)a.data)[i] == v) {')
 		}
@@ -755,11 +756,7 @@ fn (mut g Gen) gen_array_index_methods() {
 		fn_name := '${left_type_str}_index'
 		info := final_left_sym.info as ast.Array
 		mut elem_type_str := g.typ(info.elem_type)
-		mut elem_sym := g.table.sym(info.elem_type)
-		if elem_sym.kind == .alias {
-			info_t := elem_sym.info as ast.Alias
-			elem_sym = g.table.sym(info_t.parent_type)
-		}
+		elem_sym := g.table.sym(info.elem_type)
 		if elem_sym.kind == .function {
 			left_type_str = 'Array_voidptr'
 			elem_type_str = 'voidptr'
@@ -788,6 +785,9 @@ fn (mut g Gen) gen_array_index_methods() {
 		} else if elem_sym.kind == .sum_type {
 			ptr_typ := g.equality_fn(info.elem_type)
 			fn_builder.writeln('\t\tif (${ptr_typ}_sumtype_eq(*pelem, v)) {')
+		} else if elem_sym.kind == .alias {
+			ptr_typ := g.equality_fn(info.elem_type)
+			fn_builder.writeln('\t\tif (${ptr_typ}_alias_eq(*pelem, v)) {')
 		} else {
 			fn_builder.writeln('\t\tif (*pelem == v) {')
 		}

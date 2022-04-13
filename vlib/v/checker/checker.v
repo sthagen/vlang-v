@@ -82,6 +82,7 @@ pub mut:
 	returns                   bool
 	scope_returns             bool
 	is_builtin_mod            bool // true inside the 'builtin', 'os' or 'strconv' modules; TODO: remove the need for special casing this
+	is_just_builtin_mod       bool // true only inside 'builtin'
 	is_generated              bool // true for `[generated] module xyz` .v files
 	inside_unsafe             bool // true inside `unsafe {}` blocks
 	inside_const              bool // true inside `const ( ... )` blocks
@@ -149,6 +150,7 @@ fn (mut c Checker) reset_checker_state_at_start_of_new_file() {
 	c.scope_returns = false
 	c.mod = ''
 	c.is_builtin_mod = false
+	c.is_just_builtin_mod = false
 	c.inside_unsafe = false
 	c.inside_const = false
 	c.inside_anon_fn = false
@@ -624,6 +626,29 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			if is_mismatch {
 				c.error('possible type mismatch of compared values of `$node.op` operation',
 					left_right_pos)
+			} else if left_type in ast.integer_type_idxs && right_type in ast.integer_type_idxs {
+				is_left_type_signed := left_type in ast.signed_integer_type_idxs
+				is_right_type_signed := right_type in ast.signed_integer_type_idxs
+				if !is_left_type_signed && mut node.right is ast.IntegerLiteral {
+					if node.right.val.int() < 0 && left_type in ast.int_promoted_type_idxs {
+						lt := c.table.sym(left_type).name
+						c.error('`$lt` cannot be compared with negative value', node.right.pos)
+					}
+				} else if !is_right_type_signed && mut node.left is ast.IntegerLiteral {
+					if node.left.val.int() < 0 && right_type in ast.int_promoted_type_idxs {
+						rt := c.table.sym(right_type).name
+						c.error('negative value cannot be compared with `$rt`', node.left.pos)
+					}
+				} else if is_left_type_signed != is_right_type_signed
+					&& left_type.flip_signedness() != right_type {
+					// prevent e.g. `u16(-1) == int(-1)` which is false in C
+					if (is_right_type_signed && left_type in ast.int_promoted_type_idxs)
+						|| (is_left_type_signed && right_type in ast.int_promoted_type_idxs) {
+						lt := c.table.sym(left_type).name
+						rt := c.table.sym(right_type).name
+						c.error('`$lt` cannot be compared with `$rt`', node.pos)
+					}
+				}
 			}
 		}
 		.key_in, .not_in {
@@ -1375,7 +1400,8 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 			method := c.table.find_method_with_embeds(typ_sym, imethod.name) or {
 				// >> Hack to allow old style custom error implementations
 				// TODO: remove once deprecation period for `IError` methods has ended
-				if inter_sym.name == 'IError' && (imethod.name == 'msg' || imethod.name == 'code') {
+				if inter_sym.idx == ast.error_type_idx
+					&& (imethod.name == 'msg' || imethod.name == 'code') {
 					c.note("`$styp` doesn't implement method `$imethod.name` of interface `$inter_sym.name`. The usage of fields is being deprecated in favor of methods.",
 						pos)
 					continue
@@ -1421,7 +1447,8 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 			if utyp != ast.voidptr_type {
 				// >> Hack to allow old style custom error implementations
 				// TODO: remove once deprecation period for `IError` methods has ended
-				if inter_sym.name == 'IError' && (ifield.name == 'msg' || ifield.name == 'code') {
+				if inter_sym.idx == ast.error_type_idx
+					&& (ifield.name == 'msg' || ifield.name == 'code') {
 					// do nothing, necessary warnings are already printed
 				} else {
 					// <<
@@ -1719,6 +1746,21 @@ pub fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 			}
 		}
 	}
+
+	// >> Hack to allow old style custom error implementations
+	// TODO: remove once deprecation period for `IError` methods has ended
+	if sym.idx == ast.error_type_idx && !c.is_just_builtin_mod
+		&& (field_name == 'msg' || field_name == 'code') {
+		method := c.table.find_method(sym, field_name) or {
+			c.error('invalid `IError` interface implementation: $err', node.pos)
+			return ast.void_type
+		}
+		c.note('the `.$field_name` field on `IError` is deprecated, and will be removed after 2022-06-01, use `.${field_name}()` instead.',
+			node.pos)
+		return method.return_type
+	}
+	// <<<
+
 	if has_field {
 		if sym.mod != c.mod && !field.is_pub && sym.language != .c {
 			unwrapped_sym := c.table.sym(c.unwrap_generic(typ))
@@ -1756,19 +1798,6 @@ pub fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 			c.error(suggestion.say(unknown_field_msg), node.pos)
 			return ast.void_type
 		}
-
-		// >> Hack to allow old style custom error implementations
-		// TODO: remove once deprecation period for `IError` methods has ended
-		if sym.name == 'IError' && (field_name == 'msg' || field_name == 'code') {
-			method := c.table.find_method(sym, field_name) or {
-				c.error('invalid `IError` interface implementation: $err', node.pos)
-				return ast.void_type
-			}
-			c.note('the `.$field_name` field on `IError` is deprecated, use `.${field_name}()` instead.',
-				node.pos)
-			return method.return_type
-		}
-		// <<<
 		if c.smartcast_mut_pos != token.Pos{} {
 			c.note('smartcasting requires either an immutable value, or an explicit mut keyword before the value',
 				c.smartcast_mut_pos)
@@ -2039,7 +2068,8 @@ fn (mut c Checker) stmt(node_ ast.Stmt) {
 		}
 		ast.Module {
 			c.mod = node.name
-			c.is_builtin_mod = node.name in ['builtin', 'os', 'strconv']
+			c.is_just_builtin_mod = node.name == 'builtin'
+			c.is_builtin_mod = c.is_just_builtin_mod || node.name in ['os', 'strconv']
 			c.check_valid_snake_case(node.name, 'module name', node.pos)
 		}
 		ast.Return {

@@ -2046,7 +2046,7 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 		g.write('.msg))')
 		return
 	}
-	if got_sym.kind == .none_ && exp_sym.name == 'IError' {
+	if got_sym.kind == .none_ && exp_sym.idx == ast.error_type_idx {
 		g.expr(expr)
 		return
 	}
@@ -3902,6 +3902,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 	tmpvar := g.new_tmp_var()
 	ret_typ := g.typ(g.unwrap_generic(g.fn_decl.return_type))
 	mut use_tmp_var := g.defer_stmts.len > 0 || g.defer_profile_code.len > 0
+		|| g.cur_lock.lockeds.len > 0
 	// handle promoting none/error/function returning 'Option'
 	if fn_return_is_optional {
 		optional_none := node.exprs[0] is ast.None
@@ -4367,7 +4368,8 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 	} else {
 		''
 	}
-	// should the global be initialized now
+	// should the global be initialized now, not later in `vinit()`
+	cinit := node.attrs.contains('cinit')
 	should_init := (!g.pref.use_cache && g.pref.build_mode != .build_module)
 		|| (g.pref.build_mode == .build_module && g.module_built == node.mod)
 	mut attributes := ''
@@ -4392,10 +4394,10 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 			continue
 		}
 		g.definitions.write_string('$visibility_kw$styp $attributes $field.name')
-		if field.has_expr {
+		if field.has_expr || cinit {
 			if g.pref.translated {
 				g.definitions.write_string(' = ${g.expr_string(field.expr)}')
-			} else if field.expr.is_literal() && should_init {
+			} else if (field.expr.is_literal() && should_init) || cinit {
 				// Simple literals can be initialized right away in global scope in C.
 				// e.g. `int myglobal = 10;`
 				g.definitions.write_string(' = ${g.expr_string(field.expr)}')
@@ -5487,7 +5489,7 @@ static inline __shared__$interface_name ${shared_fn_name}(__shared__$cctype* x) 
 			// >> Hack to allow old style custom error implementations
 			// TODO: remove once deprecation period for `IError` methods has ended
 			// fix MSVC not handling empty struct inits
-			if methods.len == 0 && interface_name == 'IError' {
+			if methods.len == 0 && isym.idx == ast.error_type_idx {
 				methods_struct.writeln('\t\t._method_msg = NULL,')
 				methods_struct.writeln('\t\t._method_code = NULL,')
 			}
