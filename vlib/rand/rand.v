@@ -16,7 +16,7 @@ import time
 pub interface PRNG {
 mut:
 	seed(seed_data []u32)
-	byte() byte
+	u8() u8
 	u16() u16
 	u32() u32
 	u64() u64
@@ -26,19 +26,19 @@ mut:
 
 // bytes returns a buffer of `bytes_needed` random bytes
 [inline]
-pub fn (mut rng PRNG) bytes(bytes_needed int) ?[]byte {
+pub fn (mut rng PRNG) bytes(bytes_needed int) ?[]u8 {
 	if bytes_needed < 0 {
 		return error('can not read < 0 random bytes')
 	}
 
-	mut buffer := []byte{len: bytes_needed}
+	mut buffer := []u8{len: bytes_needed}
 	read_internal(mut rng, mut buffer)
 
 	return buffer
 }
 
 // read fills in `buf` with a maximum of `buf.len` random bytes
-pub fn (mut rng PRNG) read(mut buf []byte) {
+pub fn (mut rng PRNG) read(mut buf []u8) {
 	read_internal(mut rng, mut buf)
 }
 
@@ -121,7 +121,7 @@ pub fn (mut rng PRNG) u64_in_range(min u64, max u64) ?u64 {
 // i8 returns a (possibly negative) pseudorandom 8-bit `i8`.
 [inline]
 pub fn (mut rng PRNG) i8() i8 {
-	return i8(rng.byte())
+	return i8(rng.u8())
 }
 
 // i16 returns a (possibly negative) pseudorandom 16-bit `i16`.
@@ -424,8 +424,8 @@ pub fn intn(max int) ?int {
 }
 
 // byte returns a uniformly distributed pseudorandom 8-bit unsigned positive `byte`.
-pub fn byte() byte {
-	return default_rng.byte()
+pub fn u8() u8 {
+	return default_rng.u8()
 }
 
 // int_in_range returns a uniformly distributed pseudorandom  32-bit signed int in range `[min, max)`.
@@ -490,12 +490,12 @@ pub fn f64_in_range(min f64, max f64) ?f64 {
 }
 
 // bytes returns a buffer of `bytes_needed` random bytes
-pub fn bytes(bytes_needed int) ?[]byte {
+pub fn bytes(bytes_needed int) ?[]u8 {
 	return default_rng.bytes(bytes_needed)
 }
 
 // read fills in `buf` a maximum of `buf.len` random bytes
-pub fn read(mut buf []byte) {
+pub fn read(mut buf []u8) {
 	read_internal(mut default_rng, mut buf)
 }
 

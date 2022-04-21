@@ -442,7 +442,7 @@ pub fn (mut c Checker) alias_type_decl(node ast.AliasTypeDecl) {
 		c.check_valid_pascal_case(node.name, 'type alias', node.pos)
 	}
 	c.ensure_type_exists(node.parent_type, node.type_pos) or { return }
-	typ_sym := c.table.sym(node.parent_type)
+	mut typ_sym := c.table.sym(node.parent_type)
 	if typ_sym.kind in [.placeholder, .int_literal, .float_literal] {
 		c.error('unknown type `$typ_sym.name`', node.type_pos)
 	} else if typ_sym.kind == .alias {
@@ -594,6 +594,7 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		}
 	}
 	mut return_type := left_type
+
 	if node.op != .key_is {
 		match mut node.left {
 			ast.Ident, ast.SelectorExpr {
@@ -639,15 +640,6 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 						rt := c.table.sym(right_type).name
 						c.error('negative value cannot be compared with `$rt`', node.left.pos)
 					}
-				} else if is_left_type_signed != is_right_type_signed
-					&& left_type.flip_signedness() != right_type {
-					// prevent e.g. `u16(-1) == int(-1)` which is false in C
-					if (is_right_type_signed && left_type in ast.int_promoted_type_idxs)
-						|| (is_left_type_signed && right_type in ast.int_promoted_type_idxs) {
-						lt := c.table.sym(left_type).name
-						rt := c.table.sym(right_type).name
-						c.error('`$lt` cannot be compared with `$rt`', node.pos)
-					}
 				}
 			}
 		}
@@ -690,7 +682,7 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				left_sym = c.table.sym((left_sym.info as ast.Alias).parent_type)
 			}
 			// Check if the alias type is not a primitive then allow using operator overloading for aliased `arrays` and `maps`
-			if left_sym.kind == .alias && left_sym.info is ast.Alias
+			if !c.pref.translated && left_sym.kind == .alias && left_sym.info is ast.Alias
 				&& !(c.table.sym((left_sym.info as ast.Alias).parent_type).is_primitive()) {
 				if left_sym.has_method(node.op.str()) {
 					if method := left_sym.find_method(node.op.str()) {
@@ -708,7 +700,7 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 						c.error('mismatched types `$left_name` and `$right_name`', left_right_pos)
 					}
 				}
-			} else if right_sym.kind == .alias && right_sym.info is ast.Alias
+			} else if !c.pref.translated && right_sym.kind == .alias && right_sym.info is ast.Alias
 				&& !(c.table.sym((right_sym.info as ast.Alias).parent_type).is_primitive()) {
 				if right_sym.has_method(node.op.str()) {
 					if method := right_sym.find_method(node.op.str()) {
@@ -815,6 +807,7 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				if node.op in [.div, .mod] {
 					c.check_div_mod_by_zero(node.right, node.op)
 				}
+
 				return_type = promoted_type
 			}
 		}
@@ -1012,6 +1005,10 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				op := node.op.str()
 				if typ_sym.kind == .placeholder {
 					c.error('$op: type `$typ_sym.name` does not exist', right_expr.pos())
+				}
+				if left_sym.kind == .aggregate {
+					parent_left_type := (left_sym.info as ast.Aggregate).sum_type
+					left_sym = c.table.sym(parent_left_type)
 				}
 				if left_sym.kind !in [.interface_, .sum_type] {
 					c.error('`$op` can only be used with interfaces and sum types', node.pos)
@@ -1533,14 +1530,12 @@ fn (mut c Checker) check_or_last_stmt(stmt ast.Stmt, ret_type ast.Type, expr_ret
 				if stmt.typ == ast.void_type {
 					if stmt.expr is ast.IfExpr {
 						for branch in stmt.expr.branches {
-							last_stmt := branch.stmts[branch.stmts.len - 1]
-							c.check_or_last_stmt(last_stmt, ret_type, expr_return_type)
+							c.check_or_last_stmt(branch.stmts.last(), ret_type, expr_return_type)
 						}
 						return
 					} else if stmt.expr is ast.MatchExpr {
 						for branch in stmt.expr.branches {
-							last_stmt := branch.stmts[branch.stmts.len - 1]
-							c.check_or_last_stmt(last_stmt, ret_type, expr_return_type)
+							c.check_or_last_stmt(branch.stmts.last(), ret_type, expr_return_type)
 						}
 						return
 					}
@@ -1570,14 +1565,12 @@ fn (mut c Checker) check_or_last_stmt(stmt ast.Stmt, ret_type ast.Type, expr_ret
 		match stmt.expr {
 			ast.IfExpr {
 				for branch in stmt.expr.branches {
-					last_stmt := branch.stmts[branch.stmts.len - 1]
-					c.check_or_last_stmt(last_stmt, ret_type, expr_return_type)
+					c.check_or_last_stmt(branch.stmts.last(), ret_type, expr_return_type)
 				}
 			}
 			ast.MatchExpr {
 				for branch in stmt.expr.branches {
-					last_stmt := branch.stmts[branch.stmts.len - 1]
-					c.check_or_last_stmt(last_stmt, ret_type, expr_return_type)
+					c.check_or_last_stmt(branch.stmts.last(), ret_type, expr_return_type)
 				}
 			}
 			else {
@@ -2269,7 +2262,8 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 		return
 	}
 	match node.kind {
-		'include' {
+		'include', 'insert' {
+			original_flag := node.main
 			mut flag := node.main
 			if flag.contains('@VROOT') {
 				// c.note(checker.vroot_is_deprecated_message, node.pos)
@@ -2277,13 +2271,13 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 					c.error(err.msg(), node.pos)
 					return
 				}
-				node.val = 'include $vroot'
+				node.val = '$node.kind $vroot'
 				node.main = vroot
 				flag = vroot
 			}
 			if flag.contains('@VEXEROOT') {
 				vroot := flag.replace('@VEXEROOT', os.dir(pref.vexe_path()))
-				node.val = 'include $vroot'
+				node.val = '$node.kind $vroot'
 				node.main = vroot
 				flag = vroot
 			}
@@ -2292,7 +2286,7 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 					c.error(err.msg(), node.pos)
 					return
 				}
-				node.val = 'include $vroot'
+				node.val = '$node.kind $vroot'
 				node.main = vroot
 				flag = vroot
 			}
@@ -2304,10 +2298,33 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 				node.main = env
 			}
 			flag_no_comment := flag.all_before('//').trim_space()
-			if !((flag_no_comment.starts_with('"') && flag_no_comment.ends_with('"'))
-				|| (flag_no_comment.starts_with('<') && flag_no_comment.ends_with('>'))) {
-				c.error('including C files should use either `"header_file.h"` or `<header_file.h>` quoting',
-					node.pos)
+			if node.kind == 'include' {
+				if !((flag_no_comment.starts_with('"') && flag_no_comment.ends_with('"'))
+					|| (flag_no_comment.starts_with('<') && flag_no_comment.ends_with('>'))) {
+					c.error('including C files should use either `"header_file.h"` or `<header_file.h>` quoting',
+						node.pos)
+				}
+			}
+			if node.kind == 'insert' {
+				if !(flag_no_comment.starts_with('"') && flag_no_comment.ends_with('"')) {
+					c.error('inserting .c or .h files, should use `"header_file.h"` quoting',
+						node.pos)
+				}
+				node.main = node.main.trim('"')
+				if fcontent := os.read_file(node.main) {
+					node.val = fcontent
+				} else {
+					mut missing_message := 'The file $original_flag, needed for insertion by module `$node.mod`,'
+					if os.is_file(node.main) {
+						missing_message += ' is not readable.'
+					} else {
+						missing_message += ' does not exist.'
+					}
+					if node.msg != '' {
+						missing_message += ' ${node.msg}.'
+					}
+					c.error(missing_message, node.pos)
+				}
 			}
 		}
 		'pkgconfig' {
@@ -2370,7 +2387,7 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 		}
 		else {
 			if node.kind != 'define' {
-				c.error('expected `#define`, `#flag`, `#include` or `#pkgconfig` not $node.val',
+				c.error('expected `#define`, `#flag`, `#include`, `#insert` or `#pkgconfig` not $node.val',
 					node.pos)
 			}
 		}
@@ -2621,7 +2638,7 @@ pub fn (mut c Checker) expr(node_ ast.Expr) ast.Type {
 				c.error('dump expression can not be void', node.expr.pos())
 				return ast.void_type
 			} else if etidx == ast.char_type_idx && node.expr_type.nr_muls() == 0 {
-				c.error('`char` values cannot be dumped directly, use dump(byte(x)) or dump(int(x)) instead',
+				c.error('`char` values cannot be dumped directly, use dump(u8(x)) or dump(int(x)) instead',
 					node.expr.pos())
 				return ast.void_type
 			}
@@ -2830,7 +2847,7 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 	if to_sym.language != .c {
 		c.ensure_type_exists(to_type, node.pos) or {}
 	}
-	if from_sym.kind == .byte && from_type.is_ptr() && to_sym.kind == .string && !to_type.is_ptr() {
+	if from_sym.kind == .u8 && from_type.is_ptr() && to_sym.kind == .string && !to_type.is_ptr() {
 		c.error('to convert a C string buffer pointer to a V string, use x.vstring() instead of string(x)',
 			node.pos)
 	}
@@ -2898,7 +2915,7 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 			type_name := c.table.type_to_str(to_type)
 			c.error('cannot cast struct `$from_type_name` to `$type_name`', node.pos)
 		}
-	} else if to_sym.kind == .byte && !final_from_sym.is_number() && !final_from_sym.is_pointer()
+	} else if to_sym.kind == .u8 && !final_from_sym.is_number() && !final_from_sym.is_pointer()
 		&& !from_type.is_ptr() && final_from_sym.kind !in [.char, .enum_, .bool] {
 		ft := c.table.type_to_str(from_type)
 		tt := c.table.type_to_str(to_type)
@@ -2937,7 +2954,7 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 		} else if from_type.is_real_pointer() {
 			snexpr := node.expr.str()
 			ft := c.table.type_to_str(from_type)
-			c.error('cannot cast pointer type `$ft` to string, use `&byte($snexpr).vstring()` or `cstring_to_vstring($snexpr)` instead.',
+			c.error('cannot cast pointer type `$ft` to string, use `&u8($snexpr).vstring()` or `cstring_to_vstring($snexpr)` instead.',
 				node.pos)
 		} else if from_type.is_number() {
 			snexpr := node.expr.str()
@@ -2947,8 +2964,8 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 			c.error('cannot cast type `$ft` to string, use `x.str()` instead.', node.pos)
 		} else if final_from_sym.kind == .array {
 			snexpr := node.expr.str()
-			if final_from_sym.name == '[]byte' {
-				c.error('cannot cast []byte to string, use `${snexpr}.bytestr()` or `${snexpr}.str()` instead.',
+			if final_from_sym.name == '[]u8' {
+				c.error('cannot cast []u8 to string, use `${snexpr}.bytestr()` or `${snexpr}.str()` instead.',
 					node.pos)
 			} else {
 				first_elem_idx := '[0]'
@@ -3480,7 +3497,7 @@ pub fn (mut c Checker) lock_expr(mut node ast.LockExpr) ast.Type {
 	// handle `x := rlock a { a.getval() }`
 	mut ret_type := ast.void_type
 	if node.stmts.len > 0 {
-		last_stmt := node.stmts[node.stmts.len - 1]
+		last_stmt := node.stmts.last()
 		if last_stmt is ast.ExprStmt {
 			ret_type = last_stmt.typ
 		}
@@ -4196,6 +4213,12 @@ fn (mut c Checker) ensure_type_exists(typ ast.Type, pos token.Pos) ? {
 			info := sym.info as ast.Map
 			c.ensure_type_exists(info.key_type, pos) ?
 			c.ensure_type_exists(info.value_type, pos) ?
+		}
+		.sum_type {
+			info := sym.info as ast.SumType
+			for concrete_typ in info.concrete_types {
+				c.ensure_type_exists(concrete_typ, pos) ?
+			}
 		}
 		else {}
 	}

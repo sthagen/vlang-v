@@ -143,7 +143,7 @@ fn (mut c Checker) eval_comptime_const_expr(expr ast.Expr, nlevel int) ?ast.Comp
 					ast.i64_type { return 8 }
 					//
 					ast.byte_type { return 1 }
-					ast.u8_type { return 1 }
+					// ast.u8_type { return 1 }
 					ast.u16_type { return 2 }
 					ast.u32_type { return 4 }
 					ast.u64_type { return 8 }
@@ -195,7 +195,7 @@ fn (mut c Checker) eval_comptime_const_expr(expr ast.Expr, nlevel int) ?ast.Comp
 			}
 			//
 			if expr.typ == ast.byte_type {
-				return cast_expr_value.byte() or { return none }
+				return cast_expr_value.u8() or { return none }
 			}
 			if expr.typ == ast.u16_type {
 				return cast_expr_value.u16() or { return none }
@@ -286,7 +286,7 @@ fn (mut c Checker) eval_comptime_const_expr(expr ast.Expr, nlevel int) ?ast.Comp
 					.unsigned_right_shift { return i64(u64(left) >>> right) }
 					else { return none }
 				}
-			} else if left is byte && right is byte {
+			} else if left is u8 && right is u8 {
 				match expr.op {
 					.plus { return left + right }
 					.minus { return left - right }

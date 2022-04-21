@@ -495,34 +495,49 @@ fn (mut g Gen) infix_expr_in_optimization(left ast.Expr, right ast.ArrayInit) {
 
 // infix_expr_is_op generates code for `is` and `!is`
 fn (mut g Gen) infix_expr_is_op(node ast.InfixExpr) {
-	sym := g.table.sym(node.left_type)
+	mut left_sym := g.table.sym(node.left_type)
+	is_aggregate := left_sym.kind == .aggregate
+	if is_aggregate {
+		parent_left_type := (left_sym.info as ast.Aggregate).sum_type
+		left_sym = g.table.sym(parent_left_type)
+	}
 	right_sym := g.table.sym(node.right_type)
-	if sym.kind == .interface_ && right_sym.kind == .interface_ {
+	if left_sym.kind == .interface_ && right_sym.kind == .interface_ {
 		g.gen_interface_is_op(node)
 		return
 	}
 
 	cmp_op := if node.op == .key_is { '==' } else { '!=' }
 	g.write('(')
-	g.expr(node.left)
+	if is_aggregate {
+		g.write('$node.left')
+	} else {
+		g.expr(node.left)
+	}
 	g.write(')')
 	if node.left_type.is_ptr() {
 		g.write('->')
 	} else {
 		g.write('.')
 	}
-	if sym.kind == .interface_ {
+	if left_sym.kind == .interface_ {
 		g.write('_typ $cmp_op ')
 		// `_Animal_Dog_index`
 		sub_type := match node.right {
-			ast.TypeNode { node.right.typ }
-			ast.None { g.table.type_idxs['None__'] }
-			else { ast.Type(0) }
+			ast.TypeNode {
+				g.unwrap_generic(node.right.typ)
+			}
+			ast.None {
+				g.table.type_idxs['None__']
+			}
+			else {
+				ast.Type(0)
+			}
 		}
 		sub_sym := g.table.sym(sub_type)
-		g.write('_${sym.cname}_${sub_sym.cname}_index')
+		g.write('_${left_sym.cname}_${sub_sym.cname}_index')
 		return
-	} else if sym.kind == .sum_type {
+	} else if left_sym.kind == .sum_type {
 		g.write('_typ $cmp_op ')
 	}
 	g.expr(node.right)

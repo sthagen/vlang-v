@@ -185,18 +185,60 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 	mut comments := []ast.Comment{}
 	for fna in p.attrs {
 		match fna.name {
-			'noreturn' { is_noreturn = true }
-			'manualfree' { is_manualfree = true }
-			'deprecated' { is_deprecated = true }
-			'direct_array_access' { is_direct_arr = true }
-			'keep_args_alive' { is_keep_alive = true }
-			'export' { is_exported = true }
-			'wasm_export' { is_exported = true }
-			'unsafe' { is_unsafe = true }
-			'trusted' { is_trusted = true }
-			'c2v_variadic' { is_c2v_variadic = true }
-			'use_new' { is_ctor_new = true }
-			'markused' { is_markused = true }
+			'noreturn' {
+				is_noreturn = true
+			}
+			'manualfree' {
+				is_manualfree = true
+			}
+			'deprecated' {
+				is_deprecated = true
+			}
+			'direct_array_access' {
+				is_direct_arr = true
+			}
+			'keep_args_alive' {
+				is_keep_alive = true
+			}
+			'export' {
+				is_exported = true
+			}
+			'wasm_export' {
+				is_exported = true
+			}
+			'unsafe' {
+				is_unsafe = true
+			}
+			'trusted' {
+				is_trusted = true
+			}
+			'c2v_variadic' {
+				is_c2v_variadic = true
+			}
+			'use_new' {
+				is_ctor_new = true
+			}
+			'markused' {
+				is_markused = true
+			}
+			'windows_stdcall' {
+				p.note_with_pos('the tag [windows_stdcall] has been deprecated, it will be an error after 2022-06-01, use `[callconv: stdcall]` instead',
+					p.tok.pos())
+			}
+			'_fastcall' {
+				p.note_with_pos('teh tag [_fastcall] has been deprecated, it will be an error after 2022-06-01, use `[callconv: fastcall]` instead',
+					p.tok.pos())
+			}
+			'callconv' {
+				if !fna.has_arg {
+					p.error_with_pos('callconv attribute is present but its value is missing',
+						p.prev_tok.pos())
+				}
+				if fna.arg !in ['stdcall', 'fastcall', 'cdecl'] {
+					p.error_with_pos('unsupported calling convention, supported are stdcall, fastcall and cdecl',
+						p.prev_tok.pos())
+				}
+			}
 			else {}
 		}
 	}

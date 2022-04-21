@@ -92,10 +92,10 @@ pub:
 	custom_bold_font_path string
 	ui_mode               bool // refreshes only on events to save CPU usage
 	// font bytes for embedding
-	font_bytes_normal []byte
-	font_bytes_bold   []byte
-	font_bytes_mono   []byte
-	font_bytes_italic []byte
+	font_bytes_normal []u8
+	font_bytes_bold   []u8
+	font_bytes_mono   []u8
+	font_bytes_italic []u8
 	native_rendering  bool // Cocoa on macOS/iOS, GDI+ on Windows
 	// drag&drop
 	enable_dragndrop             bool // enable file dropping (drag'n'drop), default is false
@@ -128,7 +128,7 @@ pub mut:
 	ui_mode     bool // do not redraw everything 60 times/second, but only when the user requests
 	frame       u64  // the current frame counted from the start of the application; always increasing
 	//
-	mbtn_mask     byte
+	mbtn_mask     u8
 	mouse_buttons MouseButtons // typed version of mbtn_mask; easier to use for user programs
 	mouse_pos_x   int
 	mouse_pos_y   int
@@ -268,12 +268,12 @@ fn gg_event_fn(ce voidptr, user_data voidptr) {
 	}
 	if e.typ == .mouse_down {
 		bitplace := int(e.mouse_button)
-		ctx.mbtn_mask |= byte(1 << bitplace)
+		ctx.mbtn_mask |= u8(1 << bitplace)
 		ctx.mouse_buttons = MouseButtons(ctx.mbtn_mask)
 	}
 	if e.typ == .mouse_up {
 		bitplace := int(e.mouse_button)
-		ctx.mbtn_mask &= ~(byte(1 << bitplace))
+		ctx.mbtn_mask &= ~(u8(1 << bitplace))
 		ctx.mouse_buttons = MouseButtons(ctx.mbtn_mask)
 	}
 	if e.typ == .mouse_move && e.mouse_button == .invalid {

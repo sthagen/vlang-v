@@ -181,6 +181,9 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 				c.error('invalid use of reserved type `$param.name` as a parameter name',
 					param.pos)
 			}
+			if param.typ.has_flag(.optional) {
+				c.error('optional type argument is not supported currently', param.type_pos)
+			}
 			if !param.typ.is_ptr() { // value parameter, i.e. on stack - check for `[heap]`
 				arg_typ_sym := c.table.sym(param.typ)
 				if arg_typ_sym.kind == .struct_ {
@@ -299,7 +302,7 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 	// c.table.cur_fn = node
 	// Add return if `fn(...) ? {...}` have no return at end
 	if node.return_type != ast.void_type && node.return_type.has_flag(.optional)
-		&& (node.stmts.len == 0 || node.stmts[node.stmts.len - 1] !is ast.Return) {
+		&& (node.stmts.len == 0 || node.stmts.last() !is ast.Return) {
 		sym := c.table.sym(node.return_type)
 		if sym.kind == .void {
 			node.stmts << ast.Return{
@@ -705,8 +708,8 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 	}
 	if node.concrete_types.len > 0 && func.generic_names.len > 0
 		&& node.concrete_types.len != func.generic_names.len {
-		desc := if node.concrete_types.len > func.generic_names.len { 'many' } else { 'little' }
-		c.error('too $desc generic parameters got $node.concrete_types.len, expected $func.generic_names.len',
+		plural := if func.generic_names.len == 1 { '' } else { 's' }
+		c.error('expected $func.generic_names.len generic parameter$plural, got $node.concrete_types.len',
 			node.concrete_list_pos)
 	}
 	for concrete_type in node.concrete_types {
@@ -778,6 +781,7 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 		if func.params.len == 0 {
 			continue
 		}
+
 		param := if func.is_variadic && i >= func.params.len - 1 {
 			func.params[func.params.len - 1]
 		} else {
@@ -1228,12 +1232,8 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 		}
 		if node.concrete_types.len > 0 && method.generic_names.len > 0
 			&& node.concrete_types.len != method.generic_names.len {
-			desc := if node.concrete_types.len > method.generic_names.len {
-				'many'
-			} else {
-				'little'
-			}
-			c.error('too $desc generic parameters got $node.concrete_types.len, expected $method.generic_names.len',
+			plural := if method.generic_names.len == 1 { '' } else { 's' }
+			c.error('expected $method.generic_names.len generic parameter$plural, got $node.concrete_types.len',
 				node.concrete_list_pos)
 		}
 		for concrete_type in node.concrete_types {
@@ -1274,6 +1274,7 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 			}
 			exp_arg_sym := c.table.sym(exp_arg_typ)
 			c.expected_type = exp_arg_typ
+
 			mut got_arg_typ := c.check_expr_opt_call(arg.expr, c.expr(arg.expr))
 			node.args[i].typ = got_arg_typ
 			if no_type_promotion {
@@ -1892,6 +1893,17 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 		node.return_type = ast.void_type
 	} else if method_name == 'contains' {
 		// c.warn('use `value in arr` instead of `arr.contains(value)`', node.pos)
+		if node.args.len != 1 {
+			c.error('`.contains()` expected 1 argument, but got $node.args.len', node.pos)
+		} else {
+			arg_typ := ast.mktyp(c.expr(node.args[0].expr))
+			elem_typ_str := c.table.type_to_str(elem_typ)
+			arg_typ_str := c.table.type_to_str(arg_typ)
+			if !left_sym.has_method('contains') && elem_typ_str != arg_typ_str {
+				c.error('`.contains()` expected `$elem_typ_str` argument, but got `$arg_typ_str`',
+					node.pos)
+			}
+		}
 		node.return_type = ast.bool_type
 	} else if method_name == 'index' {
 		node.return_type = ast.int_type

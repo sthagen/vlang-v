@@ -1290,6 +1290,7 @@ pub fn (mut f Fmt) alias_type_decl(node ast.AliasTypeDecl) {
 }
 
 pub fn (mut f Fmt) fn_type_decl(node ast.FnTypeDecl) {
+	f.attrs(node.attrs)
 	if node.is_pub {
 		f.write('pub ')
 	}
@@ -1577,7 +1578,7 @@ pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
 		f.indent--
 	}
 	f.write(']')
-	// `[100]byte`
+	// `[100]u8`
 	if node.is_fixed {
 		if node.has_val {
 			f.write('!')

@@ -2884,7 +2884,7 @@ fn (mut p Parser) string_expr() ast.Expr {
 	mut precisions := []int{}
 	mut visible_pluss := []bool{}
 	mut fills := []bool{}
-	mut fmts := []byte{}
+	mut fmts := []u8{}
 	mut fposs := []token.Pos{}
 	// Handle $ interpolation
 	p.inside_str_interp = true
@@ -3364,6 +3364,10 @@ fn (mut p Parser) global_decl() ast.GlobalDecl {
 	mut comments := []ast.Comment{}
 	for {
 		comments = p.eat_comments()
+		is_volatile := p.tok.kind == .key_volatile
+		if is_volatile {
+			p.next()
+		}
 		if is_block && p.tok.kind == .eof {
 			p.error('unexpected eof, expecting `)`')
 			return ast.GlobalDecl{}
@@ -3416,6 +3420,7 @@ fn (mut p Parser) global_decl() ast.GlobalDecl {
 			typ: typ
 			comments: comments
 			is_markused: is_markused
+			is_volatile: is_volatile
 		}
 		fields << field
 		p.table.global_scope.register(field)
@@ -3579,6 +3584,8 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 		p.table.sym(fn_type).is_pub = is_pub
 		type_pos = type_pos.extend(p.tok.pos())
 		comments = p.eat_comments(same_line: true)
+		attrs := p.attrs
+		p.attrs = []
 		return ast.FnTypeDecl{
 			name: fn_name
 			is_pub: is_pub
@@ -3586,6 +3593,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 			pos: decl_pos
 			type_pos: type_pos
 			comments: comments
+			attrs: attrs
 		}
 	}
 	sum_variants << p.parse_sum_type_variants()
