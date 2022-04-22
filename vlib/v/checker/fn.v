@@ -895,6 +895,16 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 			if param.typ.has_flag(.generic) {
 				continue
 			}
+			if param_typ_sym.kind == .array && arg_typ_sym.kind == .array {
+				param_info := param_typ_sym.info as ast.Array
+				param_elem_type := c.table.unaliased_type(param_info.elem_type)
+				arg_info := arg_typ_sym.info as ast.Array
+				arg_elem_type := c.table.unaliased_type(arg_info.elem_type)
+				if param.typ.nr_muls() == arg_typ.nr_muls()
+					&& param_info.nr_dims == arg_info.nr_dims && param_elem_type == arg_elem_type {
+					continue
+				}
+			}
 			if c.pref.translated || c.file.is_translated {
 				// TODO duplicated logic in check_types() (check_types.v)
 				// Allow enums to be used as ints and vice versa in translated code
@@ -1389,6 +1399,19 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 				// if arg_typ_sym.kind == .string && typ_sym.has_method('str') {
 				// continue
 				// }
+				param_typ_sym := c.table.sym(exp_arg_typ)
+				arg_typ_sym := c.table.sym(got_arg_typ)
+				if param_typ_sym.kind == .array && arg_typ_sym.kind == .array {
+					param_info := param_typ_sym.info as ast.Array
+					param_elem_type := c.table.unaliased_type(param_info.elem_type)
+					arg_info := arg_typ_sym.info as ast.Array
+					arg_elem_type := c.table.unaliased_type(arg_info.elem_type)
+					if exp_arg_typ.nr_muls() == got_arg_typ.nr_muls()
+						&& param_info.nr_dims == arg_info.nr_dims
+						&& param_elem_type == arg_elem_type {
+						continue
+					}
+				}
 				if got_arg_typ != ast.void_type {
 					c.error('$err.msg() in argument ${i + 1} to `${left_sym.name}.$method_name`',
 						arg.pos)
@@ -1743,6 +1766,9 @@ fn (mut c Checker) map_builtin_method_call(mut node ast.CallExpr, left_type ast.
 	mut ret_type := ast.void_type
 	match method_name {
 		'clone', 'move' {
+			if node.args.len != 0 {
+				c.error('`.${method_name}()` does not have any arguments', node.args[0].pos)
+			}
 			if method_name[0] == `m` {
 				c.fail_if_immutable(node.left)
 			}
@@ -1754,6 +1780,9 @@ fn (mut c Checker) map_builtin_method_call(mut node ast.CallExpr, left_type ast.
 			ret_type = ret_type.clear_flag(.shared_f)
 		}
 		'keys' {
+			if node.args.len != 0 {
+				c.error('`.keys()` does not have any arguments', node.args[0].pos)
+			}
 			info := left_sym.info as ast.Map
 			typ := c.table.find_or_register_array(info.key_type)
 			ret_type = ast.Type(typ)
@@ -1878,6 +1907,9 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 		c.check_map_and_filter(false, elem_typ, node)
 		node.return_type = ast.bool_type
 	} else if method_name == 'clone' {
+		if node.args.len != 0 {
+			c.error('`.clone()` does not have any arguments', node.args[0].pos)
+		}
 		// need to return `array_xxx` instead of `array`
 		// in ['clone', 'str'] {
 		node.receiver_type = left_type.ref()
@@ -1908,6 +1940,9 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 	} else if method_name == 'index' {
 		node.return_type = ast.int_type
 	} else if method_name in ['first', 'last', 'pop'] {
+		if node.args.len != 0 {
+			c.error('`.${method_name}()` does not have any arguments', node.args[0].pos)
+		}
 		node.return_type = array_info.elem_type
 		if method_name == 'pop' {
 			c.fail_if_immutable(node.left)
