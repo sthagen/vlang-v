@@ -702,8 +702,13 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				&& c.table.sym((left_sym.info as ast.Alias).parent_type).is_primitive() {
 				left_sym = c.table.sym((left_sym.info as ast.Alias).parent_type)
 			}
+			if c.pref.translated && node.op in [.plus, .minus, .mul]
+				&& left_type.is_any_kind_of_pointer()
+				&& (right_type.is_any_kind_of_pointer() || right_type.is_int()) {
+				return_type = left_type
+			}
 			// Check if the alias type is not a primitive then allow using operator overloading for aliased `arrays` and `maps`
-			if !c.pref.translated && left_sym.kind == .alias && left_sym.info is ast.Alias
+			else if !c.pref.translated && left_sym.kind == .alias && left_sym.info is ast.Alias
 				&& !(c.table.sym((left_sym.info as ast.Alias).parent_type).is_primitive()) {
 				if left_sym.has_method(node.op.str()) {
 					if method := left_sym.find_method(node.op.str()) {
@@ -3775,7 +3780,9 @@ fn (mut c Checker) check_index(typ_sym &ast.TypeSymbol, index ast.Expr, index_ty
 	// if typ_sym.kind == .array && (!(ast.type_idx(index_type) in ast.number_type_idxs) &&
 	// index_type_sym.kind != .enum_) {
 	if typ_sym.kind in [.array, .array_fixed, .string] {
-		if !(index_type.is_int() || index_type_sym.kind == .enum_) {
+		if !(index_type.is_int() || index_type_sym.kind == .enum_
+			|| (index_type_sym.kind == .alias
+			&& (index_type_sym.info as ast.Alias).parent_type.is_int())) {
 			type_str := if typ_sym.kind == .string {
 				'non-integer string index `$index_type_sym.name`'
 			} else {
