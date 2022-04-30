@@ -1087,7 +1087,7 @@ pub mut:
 	expr_type Type // from type
 }
 
-// an enum value, like OS.macos or .macos
+// An enum value, like OS.macos or .macos
 pub struct EnumVal {
 pub:
 	enum_name string
@@ -1487,7 +1487,8 @@ pub mut:
 pub enum OrKind {
 	absent
 	block
-	propagate
+	propagate_option
+	propagate_result
 }
 
 // `or { ... }`
