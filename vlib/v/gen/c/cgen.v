@@ -32,6 +32,7 @@ const (
 	// when operands are switched
 	cmp_rev        = ['eq', 'ne', 'lt', 'gt', 'le', 'ge']
 	result_name    = '_result'
+	option_name    = '_option'
 )
 
 fn string_array_to_map(a []string) map[string]bool {
@@ -972,7 +973,7 @@ fn (mut g Gen) expr_string_surround(prepend string, expr ast.Expr, append string
 // if one location changes
 fn (mut g Gen) optional_type_name(t ast.Type) (string, string) {
 	base := g.base_type(t)
-	mut styp := 'Option_$base'
+	mut styp := '_option_$base'
 	if t.is_ptr() {
 		styp = styp.replace('*', '_ptr')
 	}
@@ -1187,11 +1188,11 @@ fn (mut g Gen) write_chan_push_optional_fns() {
 		done << styp
 		g.register_optional(ast.void_type.set_flag(.optional))
 		g.channel_definitions.writeln('
-static inline Option_void __Option_${styp}_pushval($styp ch, $el_type e) {
+static inline ${c.option_name}_void __Option_${styp}_pushval($styp ch, $el_type e) {
 	if (sync__Channel_try_push_priv(ch, &e, false)) {
-		return (Option_void){ .state = 2, .err = _v_error(_SLIT("channel closed")), .data = {EMPTY_STRUCT_INITIALIZATION} };
+		return (${c.option_name}_void){ .state = 2, .err = _v_error(_SLIT("channel closed")), .data = {EMPTY_STRUCT_INITIALIZATION} };
 	}
-	return (Option_void){0};
+	return (${c.option_name}_void){0};
 }')
 	}
 }
@@ -1563,9 +1564,9 @@ fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) {
 								styp = 'f64'
 							}
 						}
-						g.write('opt_ok(&($styp[]) { ')
+						g.write('opt_ok2(&($styp[]) { ')
 						g.stmt(stmt)
-						g.writeln(' }, (Option*)(&$tmp_var), sizeof($styp));')
+						g.writeln(' }, ($c.option_name*)(&$tmp_var), sizeof($styp));')
 					}
 				}
 			} else {
@@ -2879,7 +2880,7 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 			g.expr(node.expr)
 		}
 		ast.ArrayInit {
-			g.array_init(node)
+			g.array_init(node, '')
 		}
 		ast.AsCast {
 			g.as_cast(node)
@@ -4011,11 +4012,11 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 	ret_typ := g.typ(g.unwrap_generic(g.fn_decl.return_type))
 	mut use_tmp_var := g.defer_stmts.len > 0 || g.defer_profile_code.len > 0
 		|| g.cur_lock.lockeds.len > 0
-	// handle promoting none/error/function returning 'Option'
+	// handle promoting none/error/function returning _option'
 	if fn_return_is_optional {
 		optional_none := node.exprs[0] is ast.None
 		ftyp := g.typ(node.types[0])
-		mut is_regular_option := ftyp == 'Option'
+		mut is_regular_option := ftyp == '_option'
 		if optional_none || is_regular_option || node.types[0] == ast.error_type_idx {
 			if !isnil(g.fn_decl) && g.fn_decl.is_test {
 				test_error_var := g.new_tmp_var()
@@ -4085,7 +4086,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 		if fn_return_is_optional || fn_return_is_result {
 			g.writeln('$ret_typ $tmpvar;')
 			styp = g.base_type(g.fn_decl.return_type)
-			g.write('opt_ok(&($styp/*X*/[]) { ')
+			g.write('opt_ok2(&($styp/*X*/[]) { ')
 		} else {
 			if use_tmp_var {
 				g.write('$ret_typ $tmpvar = ')
@@ -4154,7 +4155,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 		}
 		g.write('}')
 		if fn_return_is_optional || fn_return_is_result {
-			g.writeln(' }, (Option*)(&$tmpvar), sizeof($styp));')
+			g.writeln(' }, ($c.option_name*)(&$tmpvar), sizeof($styp));')
 			g.write_defer_stmts_when_needed()
 			g.write('return $tmpvar')
 		}
@@ -4187,10 +4188,10 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 				node.types[0].has_flag(.optional)
 			}
 		}
-		if fn_return_is_optional && !expr_type_is_opt && return_sym.name != 'Option' {
+		if fn_return_is_optional && !expr_type_is_opt && return_sym.name != c.option_name {
 			styp := g.base_type(g.fn_decl.return_type)
 			g.writeln('$ret_typ $tmpvar;')
-			g.write('opt_ok(&($styp[]) { ')
+			g.write('opt_ok2(&($styp[]) { ')
 			if !g.fn_decl.return_type.is_ptr() && node.types[0].is_ptr() {
 				if !(node.exprs[0] is ast.Ident && !g.is_amp) {
 					g.write('*')
@@ -4202,7 +4203,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 					g.write(', ')
 				}
 			}
-			g.writeln(' }, (Option*)(&$tmpvar), sizeof($styp));')
+			g.writeln(' }, ($c.option_name*)(&$tmpvar), sizeof($styp));')
 			g.write_defer_stmts_when_needed()
 			g.autofree_scope_vars(node.pos.pos - 1, node.pos.line_nr, true)
 			g.writeln('return $tmpvar;')
@@ -4377,7 +4378,7 @@ fn (mut g Gen) const_decl(node ast.ConstDecl) {
 				if field.is_simple_define_const() {
 					// "Simple" expressions are not going to need multiple statements,
 					// only the ones which are inited later, so it's safe to use expr_string
-					g.const_decl_simple_define(name, g.expr_string(field_expr))
+					g.const_decl_simple_define(field.name, g.expr_string(field_expr))
 				} else {
 					g.const_decl_init_later(field.mod, name, field.expr, field.typ, false)
 				}
@@ -4479,7 +4480,17 @@ fn (mut g Gen) const_decl_simple_define(name string, val string) {
 	// so that we don't pollute the binary with unnecessary global vars
 	// Do not do this when building a module, otherwise the consts
 	// will not be accessible.
-	g.definitions.write_string('#define _const_$name ')
+	mut x := util.no_dots(name)
+	if g.pref.translated && !g.is_builtin_mod && !util.module_is_builtin(name.all_before_last('.')) {
+		// Don't prepend "_const" to translated C consts,
+		// but only in user code, continue prepending "_const" to builtin consts.
+		if x.starts_with('main__') {
+			x = x['main__'.len..]
+		}
+	} else {
+		x = '_const_$x'
+	}
+	g.definitions.write_string('#define $x ')
 	g.definitions.writeln(val)
 }
 
@@ -4724,7 +4735,7 @@ fn (mut g Gen) write_init_function() {
 }
 
 const (
-	builtins = ['string', 'array', 'DenseArray', 'map', 'Error', 'IError', 'Option', result_name]
+	builtins = ['string', 'array', 'DenseArray', 'map', 'Error', 'IError', option_name, result_name]
 )
 
 fn (mut g Gen) write_builtin_types() {
@@ -4801,6 +4812,7 @@ fn (mut g Gen) write_types(symbols []&ast.TypeSymbol) {
 					}
 				}
 
+				is_minify := sym.info.is_minify
 				g.type_definitions.writeln(pre_pragma)
 
 				if sym.info.is_union {
@@ -4835,7 +4847,26 @@ fn (mut g Gen) write_types(symbols []&ast.TypeSymbol) {
 						type_name := g.typ(field.typ)
 						field_name := c_name(field.name)
 						volatile_prefix := if field.is_volatile { 'volatile ' } else { '' }
-						g.type_definitions.writeln('\t$volatile_prefix$type_name $field_name;')
+						mut size_suffix := ''
+						if is_minify && !g.is_cc_msvc {
+							if field.typ == ast.bool_type_idx {
+								size_suffix = ' : 1'
+							} else {
+								field_sym := g.table.sym(field.typ)
+								if field_sym.info is ast.Enum {
+									if !field_sym.info.is_flag && !field_sym.info.uses_exprs {
+										mut bits_needed := 0
+										mut l := field_sym.info.vals.len
+										for l > 0 {
+											bits_needed++
+											l >>= 1
+										}
+										size_suffix = ' : $bits_needed'
+									}
+								}
+							}
+						}
+						g.type_definitions.writeln('\t$volatile_prefix$type_name $field_name$size_suffix;')
 					}
 				} else {
 					g.type_definitions.writeln('\tEMPTY_STRUCT_DECLARATION;')

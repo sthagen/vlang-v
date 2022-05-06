@@ -416,8 +416,9 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 	}
 	for attr in node.attrs {
 		if attr.name == 'export' {
+			weak := if node.attrs.any(it.name == 'weak') { 'VWEAK ' } else { '' }
 			g.writeln('// export alias: $attr.arg -> $name')
-			export_alias := '$type_name $fn_attrs${attr.arg}($arg_str)'
+			export_alias := '$weak$type_name $fn_attrs${attr.arg}($arg_str)'
 			g.definitions.writeln('VV_EXPORTED_SYMBOL $export_alias; // exported fn $node.name')
 			g.writeln('$export_alias {')
 			g.write('\treturn ${name}(')
@@ -492,7 +493,8 @@ fn (mut g Gen) gen_anon_fn(mut node ast.AnonFn) {
 	g.indent--
 	ps := g.table.pointer_size
 	is_big_cutoff := if g.pref.os == .windows || g.pref.arch == .arm32 { ps } else { ps * 2 }
-	is_big := g.table.type_size(node.decl.return_type) > is_big_cutoff
+	rt_size, _ := g.table.type_size(node.decl.return_type)
+	is_big := rt_size > is_big_cutoff
 	g.write('}, sizeof($ctx_struct)))')
 
 	mut sb := strings.new_builder(512)
@@ -1042,6 +1044,8 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	} else if final_left_sym.kind == .map {
 		if node.name == 'keys' {
 			name = 'map_keys'
+		} else if node.name == 'values' {
+			name = 'map_values'
 		}
 	}
 	if g.pref.obfuscate && g.cur_mod.name == 'main' && name.starts_with('main__')
@@ -1280,7 +1284,7 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 			g.call_args(node)
 			g.writeln(');')
 			tmp2 = g.new_tmp_var()
-			g.writeln('Option_$typ $tmp2 = ${fn_name}($json_obj);')
+			g.writeln('${option_name}_$typ $tmp2 = ${fn_name}($json_obj);')
 		}
 		if !g.is_autofree {
 			g.write('cJSON_Delete($json_obj); // del')
@@ -1796,7 +1800,7 @@ fn (mut g Gen) go_expr(node ast.GoExpr) {
 	if node.call_expr.return_type == ast.void_type {
 		gohandle_name = if is_opt { '__v_thread_Option_void' } else { '__v_thread' }
 	} else {
-		opt := if is_opt { 'Option_' } else { '' }
+		opt := if is_opt { '${option_name}_' } else { '' }
 		gohandle_name = '__v_thread_$opt${g.table.sym(g.unwrap_generic(node.call_expr.return_type)).cname}'
 	}
 	if g.pref.os == .windows {
@@ -2142,6 +2146,10 @@ fn (mut g Gen) write_fn_attrs(attrs []ast.Attr) string {
 				g.write('__NOINLINE ')
 			}
 			'weak' {
+				if attrs.any(it.name == 'export') {
+					// only the exported wrapper should be weak; otherwise x86_64-w64-mingw32-gcc complains
+					continue
+				}
 				// a `[weak]` tag tells the C compiler, that the next declaration will be weak, i.e. when linking,
 				// if there is another declaration of a symbol with the same name (a 'strong' one), it should be
 				// used instead, *without linker errors about duplicate symbols*.

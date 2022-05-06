@@ -14,6 +14,7 @@ import v.errors
 import os
 import hash.fnv1a
 
+[minify]
 pub struct Parser {
 	pref &pref.Preferences
 mut:
@@ -459,7 +460,7 @@ pub fn (p &Parser) peek_token(n int) token.Token {
 }
 
 // peek token in if guard `if x,y := opt()` after var_list `x,y`
-pub fn (p &Parser) peek_token_after_var_list() token.Token {
+fn (p &Parser) peek_token_after_var_list() token.Token {
 	mut n := 0
 	mut tok := p.tok
 	for {
@@ -477,6 +478,27 @@ pub fn (p &Parser) peek_token_after_var_list() token.Token {
 		}
 	}
 	return tok
+}
+
+fn (p &Parser) is_array_type() bool {
+	mut i := 1
+	mut tok := p.tok
+	line_nr := p.tok.line_nr
+
+	for {
+		tok = p.peek_token(i)
+		if tok.line_nr != line_nr {
+			return false
+		}
+		if tok.kind in [.name, .amp] {
+			return true
+		}
+		i++
+		if tok.kind == .lsbr || tok.kind != .rsbr {
+			continue
+		}
+	}
+	return false
 }
 
 pub fn (mut p Parser) open_scope() {
@@ -3480,6 +3502,7 @@ fn (mut p Parser) enum_decl() ast.EnumDecl {
 	mut vals := []string{}
 	// mut default_exprs := []ast.Expr{}
 	mut fields := []ast.EnumField{}
+	mut uses_exprs := false
 	for p.tok.kind != .eof && p.tok.kind != .rcbr {
 		pos := p.tok.pos()
 		val := p.check_name()
@@ -3491,6 +3514,7 @@ fn (mut p Parser) enum_decl() ast.EnumDecl {
 			p.next()
 			expr = p.expr(0)
 			has_expr = true
+			uses_exprs = true
 		}
 		fields << ast.EnumField{
 			name: val
@@ -3538,6 +3562,7 @@ fn (mut p Parser) enum_decl() ast.EnumDecl {
 			vals: vals
 			is_flag: is_flag
 			is_multi_allowed: is_multi_allowed
+			uses_exprs: uses_exprs
 		}
 		is_pub: is_pub
 	})

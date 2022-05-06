@@ -9,7 +9,7 @@ import v.cflag
 import v.token
 import v.util
 
-[heap]
+[heap; minify]
 pub struct Table {
 mut:
 	parsing_type string // name of the type to enable recursive type parsing
@@ -86,6 +86,7 @@ pub fn (t &Table) panic(message string) {
 	t.panic_handler(t, message)
 }
 
+[minify]
 pub struct Fn {
 pub:
 	is_variadic     bool
@@ -126,6 +127,7 @@ fn (f &Fn) method_equals(o &Fn) bool {
 		&& f.name == o.name
 }
 
+[minify]
 pub struct Param {
 pub:
 	pos         token.Pos
@@ -995,7 +997,7 @@ pub fn (t &Table) thread_cname(return_type Type) string {
 	}
 	return_type_sym := t.sym(return_type)
 	suffix := if return_type.is_ptr() { '_ptr' } else { '' }
-	prefix := if return_type.has_flag(.optional) { 'Option_' } else { '' }
+	prefix := if return_type.has_flag(.optional) { '_option_' } else { '' }
 	return '__v_thread_$prefix$return_type_sym.cname$suffix'
 }
 

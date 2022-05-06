@@ -54,7 +54,7 @@ fn all_valid_comptime_idents() []string {
 	return res
 }
 
-[heap]
+[heap; minify]
 pub struct Checker {
 	pref &pref.Preferences // Preferences shared from V struct
 pub mut:
@@ -644,11 +644,12 @@ pub fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				} else if is_left_type_signed != is_right_type_signed
 					&& left_type != ast.int_literal_type_idx
 					&& right_type != ast.int_literal_type_idx {
-					ls := c.table.type_size(left_type)
-					rs := c.table.type_size(right_type)
+					ls, _ := c.table.type_size(left_type)
+					rs, _ := c.table.type_size(right_type)
 					// prevent e.g. `u32 == i16` but not `u16 == i32` as max_u16 fits in i32
 					// TODO u32 == i32, change < to <=
-					if (is_left_type_signed && ls < rs) || (is_right_type_signed && rs < ls) {
+					if !c.pref.translated && ((is_left_type_signed && ls < rs)
+						|| (is_right_type_signed && rs < ls)) {
 						lt := c.table.sym(left_type).name
 						rt := c.table.sym(right_type).name
 						c.error('`$lt` cannot be compared with `$rt`', node.pos)
@@ -1186,7 +1187,9 @@ fn (mut c Checker) fail_if_immutable(expr_ ast.Expr) (string, token.Pos) {
 					}
 				}
 			} else if expr.obj is ast.ConstField && expr.name in c.const_names {
-				if !c.inside_unsafe {
+				if !c.inside_unsafe && !c.pref.translated {
+					// TODO fix this in c2v, do not allow modification of all consts
+					// in translated code
 					c.error('cannot modify constant `$expr.name`', expr.pos)
 				}
 			}
@@ -2660,34 +2663,14 @@ pub fn (mut c Checker) expr(node_ ast.Expr) ast.Type {
 			return c.comptime_call(mut node)
 		}
 		ast.ComptimeSelector {
-			node.left_type = c.unwrap_generic(c.expr(node.left))
-			expr_type := c.unwrap_generic(c.expr(node.field_expr))
-			expr_sym := c.table.sym(expr_type)
-			if expr_type != ast.string_type {
-				c.error('expected `string` instead of `$expr_sym.name` (e.g. `field.name`)',
-					node.field_expr.pos())
-			}
-			if mut node.field_expr is ast.SelectorExpr {
-				left_pos := node.field_expr.expr.pos()
-				if c.comptime_fields_type.len == 0 {
-					c.error('compile time field access can only be used when iterating over `T.fields`',
-						left_pos)
-				}
-				expr_name := node.field_expr.expr.str()
-				if expr_name in c.comptime_fields_type {
-					return c.comptime_fields_type[expr_name]
-				}
-				c.error('unknown `\$for` variable `$expr_name`', left_pos)
-			} else {
-				c.error('expected selector expression e.g. `$(field.name)`', node.field_expr.pos())
-			}
-			return ast.void_type
+			return c.comptime_selector(mut node)
 		}
 		ast.ConcatExpr {
 			return c.concat_expr(mut node)
 		}
 		ast.DumpExpr {
 			node.expr_type = c.expr(node.expr)
+			c.check_expr_opt_call(node.expr, node.expr_type)
 			etidx := node.expr_type.idx()
 			if etidx == ast.void_type_idx {
 				c.error('dump expression can not be void', node.expr.pos())
@@ -3719,6 +3702,16 @@ pub fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) ast.Type {
 		if mut node.right is ast.PrefixExpr {
 			if node.right.op == .amp {
 				c.error('unexpected `&`, expecting expression', node.right.pos)
+			}
+		} else if mut node.right is ast.SelectorExpr {
+			right_sym := c.table.sym(right_type)
+			expr_sym := c.table.sym(node.right.expr_type)
+			if expr_sym.kind == .struct_ && (expr_sym.info as ast.Struct).is_minify
+				&& (node.right.typ == ast.bool_type_idx || (right_sym.kind == .enum_
+				&& !(right_sym.info as ast.Enum).is_flag
+				&& !(right_sym.info as ast.Enum).uses_exprs)) {
+				c.error('cannot take address of field in struct `${c.table.type_to_str(node.right.expr_type)}`, which is tagged as `[minify]`',
+					node.pos.extend(node.right.pos))
 			}
 		}
 	}
