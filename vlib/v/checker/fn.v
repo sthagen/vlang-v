@@ -959,10 +959,10 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 					continue
 				}
 				// Allow `[32]i8` as `&i8` etc
-				if (arg_typ_sym.kind == .array_fixed && (param_is_number
-					|| param.typ.is_any_kind_of_pointer()))
-					|| (param_typ_sym.kind == .array_fixed && (typ_is_number
-					|| arg_typ.is_any_kind_of_pointer())) {
+				if ((arg_typ_sym.kind == .array_fixed || arg_typ_sym.kind == .array)
+					&& (param_is_number || param.typ.is_any_kind_of_pointer()))
+					|| ((param_typ_sym.kind == .array_fixed || param_typ_sym.kind == .array)
+					&& (typ_is_number || arg_typ.is_any_kind_of_pointer())) {
 					continue
 				}
 				// Allow `int` as `&i8`
@@ -1223,7 +1223,8 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 		rec_sym := c.table.sym(node.left_type)
 		rec_is_generic := left_type.has_flag(.generic)
 		if rec_sym.info is ast.Struct {
-			if rec_is_generic && node.concrete_types.len == 0 {
+			if rec_is_generic && node.concrete_types.len == 0
+				&& method.generic_names.len == rec_sym.info.generic_types.len {
 				node.concrete_types = rec_sym.info.generic_types
 			} else if !rec_is_generic && rec_sym.info.concrete_types.len > 0
 				&& node.concrete_types.len > 0
