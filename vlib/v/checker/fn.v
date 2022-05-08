@@ -496,8 +496,7 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 			}
 		}
 		panic('unreachable')
-	}
-	if fn_name == 'json.encode' {
+	} else if fn_name == 'json.encode' {
 	} else if fn_name == 'json.decode' && node.args.len > 0 {
 		if node.args.len != 2 {
 			c.error("json.decode expects 2 arguments, a type and a string (e.g `json.decode(T, '')`)",
@@ -506,12 +505,20 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 		}
 		expr := node.args[0].expr
 		if expr is ast.TypeNode {
-			sym := c.table.sym(expr.typ)
-			if !c.table.known_type(sym.name) {
+			sym := c.table.sym(c.unwrap_generic(expr.typ))
+			if c.table.known_type(sym.name) && sym.kind != .placeholder {
+				mut kind := sym.kind
+				if sym.info is ast.Alias {
+					kind = c.table.sym(sym.info.parent_type).kind
+				}
+				if kind !in [.struct_, .sum_type, .map, .array] {
+					c.error('json.decode: expected sum type, struct, map or array, found $kind',
+						expr.pos)
+				}
+			} else {
 				c.error('json.decode: unknown type `$sym.name`', node.pos)
 			}
 		} else {
-			// if expr !is ast.TypeNode {
 			typ := expr.type_name()
 			c.error('json.decode: first argument needs to be a type, got `$typ`', node.pos)
 			return ast.void_type
@@ -1222,7 +1229,9 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 		// x is Bar<T>, x.foo() -> x.foo<T>()
 		rec_sym := c.table.sym(node.left_type)
 		rec_is_generic := left_type.has_flag(.generic)
+		mut rec_concrete_types := []ast.Type{}
 		if rec_sym.info is ast.Struct {
+			rec_concrete_types = rec_sym.info.concrete_types.clone()
 			if rec_is_generic && node.concrete_types.len == 0
 				&& method.generic_names.len == rec_sym.info.generic_types.len {
 				node.concrete_types = rec_sym.info.generic_types
@@ -1304,11 +1313,7 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 				no_type_promotion = true
 			}
 		}
-		// if method_name == 'clone' {
-		// println('CLONE nr args=$method.args.len')
-		// }
-		// node.args << method.args[0].typ
-		// node.exp_arg_types << method.args[0].typ
+
 		for i, mut arg in node.args {
 			if i > 0 || exp_arg_typ == ast.Type(0) {
 				exp_arg_typ = if method.is_variadic && i >= method.params.len - 1 {
@@ -1341,8 +1346,13 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 				final_arg_sym = c.table.sym(final_arg_typ)
 			}
 			if exp_arg_typ.has_flag(.generic) {
+				method_concrete_types := if method.generic_names.len == rec_concrete_types.len {
+					rec_concrete_types
+				} else {
+					concrete_types
+				}
 				if exp_utyp := c.table.resolve_generic_to_concrete(exp_arg_typ, method.generic_names,
-					concrete_types)
+					method_concrete_types)
 				{
 					exp_arg_typ = exp_utyp
 				} else {
@@ -1351,7 +1361,7 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 
 				if got_arg_typ.has_flag(.generic) {
 					if got_utyp := c.table.resolve_generic_to_concrete(got_arg_typ, method.generic_names,
-						concrete_types)
+						method_concrete_types)
 					{
 						got_arg_typ = got_utyp
 					} else {

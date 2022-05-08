@@ -2238,7 +2238,8 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 		deref_sym := g.table.sym(got_deref_type)
 		deref_will_match := expected_type in [got_type, got_deref_type, deref_sym.parent_idx]
 		got_is_opt := got_type.has_flag(.optional)
-		if deref_will_match || got_is_opt || expr.is_auto_deref_var() {
+		if deref_will_match || got_is_opt || expr.is_auto_deref_var()
+			|| expected_type.has_flag(.generic) {
 			g.write('*')
 		}
 	}
@@ -5133,9 +5134,7 @@ fn (mut g Gen) or_block(var_name string, or_block ast.OrExpr, return_type ast.Ty
 					g.inside_opt_data = true
 					g.expr_with_cast(expr_stmt.expr, expr_stmt.typ, return_type.clear_flag(.optional))
 					g.inside_opt_data = old_inside_opt_data
-					if g.inside_ternary == 0 {
-						g.writeln(';')
-					}
+					g.writeln(';')
 					g.stmt_path_pos.delete_last()
 				} else {
 					g.stmt(stmt)
