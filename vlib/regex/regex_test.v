@@ -165,6 +165,12 @@ match_test_suite = [
     TestItem{"aba", r"a*(b*)*a",0,3},
     TestItem{"/*x*/", r"/\**(.*)\**/",0,5},
     TestItem{"/*x*/", r"/*(.*)*/",0,5},
+
+    // test last IST check
+    TestItem{"refs/remotes/origin/mastep", r"refs/remotes/origin/(.*)",0,26},
+    TestItem{"refs/remotes/origin/master", r"refs/remotes/origin/(.*)",0,26},
+    TestItem{"refs/remotes/origin/mastep", r"refs/remotes/origin/(\w*)",0,26},
+    TestItem{"refs/remotes/origin/master", r"refs/remotes/origin/(\w*)",0,26},
 ]
 )
 
@@ -248,7 +254,7 @@ cgroups_test_suite = [
 		"http://www.ciao.mondo/hello/pippo12_/pera.html",
 		r"(?P<format>https?)|(?P<format>ftps?)://(?P<token>[\w_]+.)+",0,46,
 		[8, 0, 0, 4, 1, 7, 11, 1, 11, 16, 1, 16, 22, 1, 22, 28, 1, 28, 37, 1, 37, 42, 1, 42, 46]
-		//[8, 0, 0, 4, 1, 7, 10, 1, 11, 15, 1, 16, 21, 1, 22, 27, 1, 28, 36, 1, 37, 41, 1, 42, 46],		
+		//[8, 0, 0, 4, 1, 7, 10, 1, 11, 15, 1, 16, 21, 1, 22, 27, 1, 28, 36, 1, 37, 41, 1, 42, 46],
 		{'format':int(0),'token':1}
 	},
 	TestItemCGroup{

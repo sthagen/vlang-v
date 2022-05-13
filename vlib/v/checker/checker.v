@@ -491,8 +491,31 @@ pub fn (mut c Checker) sum_type_decl(node ast.SumTypeDecl) {
 		} else if sym.kind == .interface_ && sym.language != .js {
 			c.error('sum type cannot hold an interface', variant.pos)
 		} else if sym.kind == .struct_ && sym.language == .js {
-			c.error('sum type cannot hold an JS struct', variant.pos)
+			c.error('sum type cannot hold a JS struct', variant.pos)
+		} else if mut sym.info is ast.Struct {
+			if sym.info.is_generic {
+				if !variant.typ.has_flag(.generic) {
+					c.error('generic struct `$sym.name` must specify generic type names, e.g. Foo<T>',
+						variant.pos)
+				}
+				if node.generic_types.len == 0 {
+					c.error('generic sumtype `$node.name` must specify generic type names, e.g. Foo<T>',
+						node.name_pos)
+				} else {
+					for typ in sym.info.generic_types {
+						if typ !in node.generic_types {
+							sumtype_type_names := node.generic_types.map(c.table.type_to_str(it)).join(', ')
+							generic_sumtype_name := '$node.name<$sumtype_type_names>'
+							variant_type_names := sym.info.generic_types.map(c.table.type_to_str(it)).join(', ')
+							generic_variant_name := '$sym.name<$variant_type_names>'
+							c.error('generic type name `${c.table.sym(typ).name}` of generic struct `$generic_variant_name` is not mentioned in sumtype `$generic_sumtype_name`',
+								variant.pos)
+						}
+					}
+				}
+			}
 		}
+
 		if sym.name.trim_string_left(sym.mod + '.') == node.name {
 			c.error('sum type cannot hold itself', variant.pos)
 		}
@@ -3020,6 +3043,9 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 			ft := c.table.type_to_str(from_type)
 			c.error('cannot cast sumtype `$ft` to string, use `${snexpr}.str()` instead.',
 				node.pos)
+		} else if final_from_sym.kind == .function {
+			fnexpr := node.expr.str()
+			c.error('cannot cast function `$fnexpr` to string', node.pos)
 		} else if to_type != ast.string_type && from_type == ast.string_type
 			&& (!(to_sym.kind == .alias && final_to_sym.name == 'string')) {
 			mut error_msg := 'cannot cast a string to a type `$final_to_sym.name`, that is not an alias of string'
@@ -3838,40 +3864,25 @@ pub fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 	mut typ := c.expr(node.left)
 	mut typ_sym := c.table.final_sym(typ)
 	node.left_type = typ
-	for {
-		match typ_sym.kind {
-			.map {
-				node.is_map = true
-				break
-			}
-			.array {
-				node.is_array = true
-				if node.or_expr.kind != .absent && node.index is ast.RangeExpr {
-					c.error('custom error handling on range expressions for arrays is not supported yet.',
-						node.or_expr.pos)
-				}
-				break
-			}
-			.array_fixed {
-				node.is_farray = true
-				break
-			}
-			.any {
-				gname := typ_sym.name
-				typ = c.unwrap_generic(typ)
-				node.left_type = typ
-				typ_sym = c.table.final_sym(typ)
-				if typ.is_ptr() {
-					continue
-				} else {
-					c.error('generic type $gname does not support indexing, pass an array, or a reference instead, e.g. []$gname or &$gname',
-						node.pos)
-				}
-			}
-			else {
-				break
+	match typ_sym.kind {
+		.map {
+			node.is_map = true
+		}
+		.array {
+			node.is_array = true
+			if node.or_expr.kind != .absent && node.index is ast.RangeExpr {
+				c.error('custom error handling on range expressions for arrays is not supported yet.',
+					node.or_expr.pos)
 			}
 		}
+		.array_fixed {
+			node.is_farray = true
+		}
+		.any {
+			typ = c.unwrap_generic(typ)
+			typ_sym = c.table.final_sym(typ)
+		}
+		else {}
 	}
 	if typ_sym.kind !in [.array, .array_fixed, .string, .map] && !typ.is_ptr()
 		&& typ !in [ast.byteptr_type, ast.charptr_type] && !typ.has_flag(.variadic) {
@@ -4258,20 +4269,20 @@ fn (mut c Checker) ensure_type_exists(typ ast.Type, pos token.Pos) ? {
 			}
 		}
 		.array {
-			c.ensure_type_exists((sym.info as ast.Array).elem_type, pos) ?
+			c.ensure_type_exists((sym.info as ast.Array).elem_type, pos)?
 		}
 		.array_fixed {
-			c.ensure_type_exists((sym.info as ast.ArrayFixed).elem_type, pos) ?
+			c.ensure_type_exists((sym.info as ast.ArrayFixed).elem_type, pos)?
 		}
 		.map {
 			info := sym.info as ast.Map
-			c.ensure_type_exists(info.key_type, pos) ?
-			c.ensure_type_exists(info.value_type, pos) ?
+			c.ensure_type_exists(info.key_type, pos)?
+			c.ensure_type_exists(info.value_type, pos)?
 		}
 		.sum_type {
 			info := sym.info as ast.SumType
 			for concrete_typ in info.concrete_types {
-				c.ensure_type_exists(concrete_typ, pos) ?
+				c.ensure_type_exists(concrete_typ, pos)?
 			}
 		}
 		else {}
