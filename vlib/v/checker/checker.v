@@ -1850,6 +1850,27 @@ pub fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 		node.typ = field.typ
 		return field.typ
 	}
+	if mut method := c.table.find_method(sym, field_name) {
+		receiver := method.params[0].typ
+		if receiver.nr_muls() > 0 {
+			if !c.inside_unsafe {
+				rec_sym := c.table.sym(receiver.set_nr_muls(0))
+				if !rec_sym.is_heap() {
+					suggestion := if rec_sym.kind == .struct_ {
+						'declaring `$rec_sym.name` as `[heap]`'
+					} else {
+						'wrapping the `$rec_sym.name` object in a `struct` declared as `[heap]`'
+					}
+					c.error('method `${c.table.type_to_str(receiver.idx())}.$method.name` cannot be used as a variable outside `unsafe` blocks as its receiver might refer to an object stored on stack. Consider ${suggestion}.',
+						node.expr.pos().extend(node.pos))
+				}
+			}
+		}
+		method.params = method.params[1..]
+		fn_type := ast.new_type(c.table.find_or_register_fn_type(c.mod, method, false,
+			true))
+		return fn_type
+	}
 	if sym.kind !in [.struct_, .aggregate, .interface_, .sum_type] {
 		if sym.kind != .placeholder {
 			unwrapped_sym := c.table.sym(c.unwrap_generic(typ))
@@ -3375,7 +3396,21 @@ pub fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 			c.note('`[if $node.name]` is deprecated. Use `[if $node.name?]` instead',
 				node.pos)
 		} else {
-			c.error('undefined ident: `$node.name`', node.pos)
+			cname_mod := node.name.all_before('.')
+			if cname_mod.len != node.name.len {
+				mut const_names_in_mod := []string{}
+				for _, so in c.table.global_scope.objects {
+					if so is ast.ConstField {
+						if so.mod == cname_mod {
+							const_names_in_mod << so.name
+						}
+					}
+				}
+				c.error(util.new_suggestion(node.name, const_names_in_mod).say('undefined ident: `$node.name`'),
+					node.pos)
+			} else {
+				c.error('undefined ident: `$node.name`', node.pos)
+			}
 		}
 	}
 	if c.table.known_type(node.name) {
@@ -3537,6 +3572,7 @@ pub fn (mut c Checker) select_expr(mut node ast.SelectExpr) ast.Type {
 }
 
 pub fn (mut c Checker) lock_expr(mut node ast.LockExpr) ast.Type {
+	expected_type := c.expected_type
 	if c.rlocked_names.len > 0 || c.locked_names.len > 0 {
 		c.error('nested `lock`/`rlock` not allowed', node.pos)
 	}
@@ -3560,16 +3596,17 @@ pub fn (mut c Checker) lock_expr(mut node ast.LockExpr) ast.Type {
 		}
 	}
 	c.stmts(node.stmts)
-	c.rlocked_names = []
-	c.locked_names = []
 	// handle `x := rlock a { a.getval() }`
 	mut ret_type := ast.void_type
 	if node.stmts.len > 0 {
 		last_stmt := node.stmts.last()
 		if last_stmt is ast.ExprStmt {
-			ret_type = last_stmt.typ
+			c.expected_type = expected_type
+			ret_type = c.expr(last_stmt.expr)
 		}
 	}
+	c.rlocked_names = []
+	c.locked_names = []
 	if ret_type != ast.void_type {
 		node.is_expr = true
 	}

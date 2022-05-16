@@ -13,7 +13,6 @@ name: Sanitized CI
 
 on:
   push:
-    branches: [master]
     paths:
       - '!**'
       - 'cmd/tools/vtest*'
@@ -73,24 +72,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  code-formatting-before-regression:
-    runs-on: ubuntu-20.04
-    timeout-minutes: 15
-    env:
-      VFLAGS: -cc gcc
-    steps:
-      - uses: actions/checkout@v2
-      - name: Environment info
-        run: echo $VFLAGS $GITHUB_SHA $GITHUB_REF
-      - name: Build local v
-        run: make -j4
-      - name: v test-cleancode
-        run: ./v test-cleancode
-      - name: v test-fmt
-        run: ./v test-fmt
-
   tests-sanitize-undefined-clang:
-    needs: [code-formatting-before-regression]
     runs-on: ubuntu-20.04
     timeout-minutes: 180
     env:
@@ -109,14 +91,15 @@ jobs:
           sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libgl-dev
           sudo apt-get install clang
       - name: Build V
-        run: make -j4 && ./v -cg -cstrict -o v cmd/v
+        run: make && ./v -cg -cstrict -o v cmd/v
+      - name: Ensure code is well formatted
+        run: ./v test-cleancode
       - name: Self tests (-fsanitize=undefined)
         run: ./v -cflags "-fsanitize=undefined" -o v2 cmd/v && ./v2 -cflags -fsanitize=undefined test-self
       - name: Build examples (V compiled with -fsanitize=undefined)
         run: ./v2 build-examples
 
   tests-sanitize-undefined-gcc:
-    needs: [code-formatting-before-regression]
     runs-on: ubuntu-20.04
     timeout-minutes: 180
     env:
@@ -134,14 +117,15 @@ jobs:
           sudo apt-get install --quiet -y postgresql libpq-dev libssl-dev sqlite3 libsqlite3-dev valgrind
           sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libgl-dev
       - name: Build V
-        run: make -j4 && ./v -cg -cstrict -o v cmd/v
+        run: make && ./v -cg -cstrict -o v cmd/v
+      - name: Ensure code is well formatted
+        run: ./v test-cleancode
       - name: Self tests (-fsanitize=undefined)
         run: ./v -cflags "-fsanitize=undefined" -o v2 cmd/v && ./v2 -cflags -fsanitize=undefined test-self
       - name: Build examples (V compiled with -fsanitize=undefined)
         run: ./v2 build-examples
 
   tests-sanitize-address-clang:
-    needs: [code-formatting-before-regression]
     runs-on: ubuntu-20.04
     timeout-minutes: 180
     env:
@@ -160,7 +144,9 @@ jobs:
           sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libgl-dev
           sudo apt-get install clang
       - name: Build V
-        run: make -j4 && ./v -cg -cstrict -o v cmd/v
+        run: make && ./v -cg -cstrict -o v cmd/v
+      - name: Ensure code is well formatted
+        run: ./v test-cleancode
       - name: Self tests (-fsanitize=address)
         run: ASAN_OPTIONS=detect_leaks=0 ./v -cflags "-fsanitize=address,pointer-compare,pointer-subtract" test-self
       - name: Self tests (V compiled with -fsanitize=address)
@@ -171,7 +157,6 @@ jobs:
         run: ASAN_OPTIONS=detect_leaks=0 ./v build-examples
 
   tests-sanitize-address-msvc:
-    needs: [code-formatting-before-regression]
     runs-on: windows-2019
     timeout-minutes: 180
     env:
@@ -189,7 +174,11 @@ jobs:
           echo $VFLAGS
           .\make.bat -msvc
           .\v.exe self
-          .\v.exe test-cleancode
+      - name: Ensure code is well formatted
+        run: |
+          .\v.exe fmt -verify vlib/builtin/ vlib/v/scanner/ vlib/v/parser/ vlib/v/gen/
+      ## TODO: check to see why `v test-cleancode` does not work with msvc on windows
+
       ##      - name: Install dependencies
       ##        run: |
       ##          .\v.exe setup-freetype
@@ -199,7 +188,6 @@ jobs:
       ##          .\v.exe -cflags "/fsanitize=address" test-self
 
   tests-sanitize-address-gcc:
-    needs: [code-formatting-before-regression]
     runs-on: ubuntu-20.04
     timeout-minutes: 180
     env:
@@ -218,7 +206,9 @@ jobs:
           sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libgl-dev
           sudo apt-get install clang
       - name: Build V
-        run: make -j4 && ./v -cg -cstrict -o v cmd/v &&
+        run: make && ./v -cg -cstrict -o v cmd/v
+      - name: Ensure code is well formatted
+        run: ./v test-cleancode
       - name: Self tests (-fsanitize=address)
         run: ASAN_OPTIONS=detect_leaks=0 ./v -cflags -fsanitize=address test-self
       - name: Self tests (V compiled with -fsanitize=address)
@@ -229,7 +219,6 @@ jobs:
         run: ASAN_OPTIONS=detect_leaks=0 ./v build-examples
 
   tests-sanitize-memory-clang:
-    needs: [code-formatting-before-regression]
     runs-on: ubuntu-20.04
     timeout-minutes: 180
     env:
@@ -248,11 +237,14 @@ jobs:
           sudo apt-get install --quiet -y libfreetype6-dev  libxi-dev libxcursor-dev libgl-dev
           sudo apt-get install clang
       - name: Build V
-        run: make -j4 && ./v -cc clang -cg -cstrict -o v cmd/v
+        run: make && ./v -cc clang -cg -cstrict -o v cmd/v
+      - name: Ensure code is well formatted
+        run: ./v test-cleancode
       - name: Self tests (-fsanitize=memory)
         run: ./v -cflags -fsanitize=memory test-self
       - name: Self tests (V compiled with -fsanitize=memory)
-        run:
-          ./v -cflags -fsanitize=memory -o v cmd/v && ./v -cc tcc test-self -msan-compiler
+        run: |
+          ./v -cflags -fsanitize=memory -o v cmd/v
+          ./v -cc tcc test-self -msan-compiler
       - name: Build examples (V compiled with -fsanitize=memory)
         run: ./v build-examples
