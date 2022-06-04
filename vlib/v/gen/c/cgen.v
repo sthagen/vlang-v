@@ -212,6 +212,7 @@ mut:
 	autofree_methods       map[int]bool
 	generated_free_methods map[int]bool
 	autofree_scope_stmts   []string
+	use_segfault_handler   bool = true
 }
 
 pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
@@ -267,6 +268,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		field_data_type: ast.Type(table.find_type_idx('FieldData'))
 		init: strings.new_builder(100)
 		is_cc_msvc: pref.ccompiler == 'msvc'
+		use_segfault_handler: !('no_segfault_handler' in pref.compile_defines || pref.os == .wasm32)
 	}
 	// anon fn may include assert and thus this needs
 	// to be included before any test contents are written
@@ -429,6 +431,9 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 
 	mut b := strings.new_builder(640000)
 	b.write_string(g.hashes())
+	if g.use_segfault_handler {
+		b.writeln('\n#define V_USE_SIGNAL_H')
+	}
 	b.writeln('\n// V comptime_definitions:')
 	b.write_string(g.comptime_definitions.str())
 	b.writeln('\n// V typedefs:')
@@ -575,6 +580,7 @@ fn cgen_process_one_file_cb(p &pool.PoolProcessor, idx int, wid int) &Gen {
 		is_autofree: global_g.pref.autofree
 		referenced_fns: global_g.referenced_fns
 		is_cc_msvc: global_g.is_cc_msvc
+		use_segfault_handler: global_g.use_segfault_handler
 	}
 	g.gen_file()
 	return g
@@ -781,7 +787,9 @@ pub fn (mut g Gen) init() {
 	// we know that this is being called before the multi-threading starts
 	// and this is being called in the main thread, so we can mutate the table
 	mut muttable := unsafe { &ast.Table(g.table) }
-	muttable.used_fns['v_segmentation_fault_handler'] = true
+	if g.use_segfault_handler {
+		muttable.used_fns['v_segmentation_fault_handler'] = true
+	}
 	muttable.used_fns['eprintln'] = true
 	muttable.used_fns['print_backtrace'] = true
 	muttable.used_fns['exit'] = true
@@ -801,12 +809,7 @@ pub fn (mut g Gen) finish() {
 	if g.pref.is_livemain || g.pref.is_liveshared {
 		g.generate_hotcode_reloader_code()
 	}
-	if g.embedded_files.len > 0 {
-		if g.embed_file_is_prod_mode() {
-			g.gen_embedded_data()
-		}
-		g.gen_embedded_metadata()
-	}
+	g.handle_embedded_files_finish()
 	if g.pref.is_test {
 		g.gen_c_main_for_tests()
 	} else {
@@ -2676,6 +2679,10 @@ fn (mut g Gen) autofree_scope_vars2(scope &ast.Scope, start_pos int, end_pos int
 }
 
 fn (mut g Gen) autofree_variable(v ast.Var) {
+	// filter out invalid variables
+	if v.typ == 0 {
+		return
+	}
 	sym := g.table.sym(v.typ)
 	// if v.name.contains('output2') {
 	if g.is_autofree {
@@ -4626,6 +4633,7 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 	}
 	// should the global be initialized now, not later in `vinit()`
 	cinit := node.attrs.contains('cinit')
+	cextern := node.attrs.contains('c_extern')
 	should_init := (!g.pref.use_cache && g.pref.build_mode != .build_module)
 		|| (g.pref.build_mode == .build_module && g.module_built == node.mod)
 	mut attributes := ''
@@ -4649,8 +4657,13 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 			g.definitions.writeln('$fn_type_name = ${g.table.sym(field.typ).name}; // global2')
 			continue
 		}
+		extern := if cextern { 'extern ' } else { '' }
 		modifier := if field.is_volatile { ' volatile ' } else { '' }
-		g.definitions.write_string('$visibility_kw$modifier$styp $attributes $field.name')
+		g.definitions.write_string('$extern$visibility_kw$modifier$styp $attributes $field.name')
+		if cextern {
+			g.definitions.writeln('; // global5')
+			continue
+		}
 		if field.has_expr || cinit {
 			if g.pref.translated {
 				g.definitions.write_string(' = ${g.expr_string(field.expr)}')
@@ -4739,7 +4752,7 @@ fn (mut g Gen) write_init_function() {
 	// ___argv is declared as voidptr here, because that unifies the windows/unix logic
 	g.writeln('void _vinit(int ___argc, voidptr ___argv) {')
 
-	if 'no_segfault_handler' !in g.pref.compile_defines || g.pref.os == .wasm32 {
+	if g.use_segfault_handler {
 		// 11 is SIGSEGV. It is hardcoded here, to avoid FreeBSD compilation errors for trivial examples.
 		g.writeln('#if __STDC_HOSTED__ == 1\n\tsignal(11, v_segmentation_fault_handler);\n#endif')
 	}
@@ -5067,7 +5080,7 @@ fn (mut g Gen) sort_structs(typesa []&ast.TypeSymbol) []&ast.TypeSymbol {
 		mut field_deps := []string{}
 		match sym.info {
 			ast.ArrayFixed {
-				dep := g.table.sym(sym.info.elem_type).name
+				dep := g.table.final_sym(sym.info.elem_type).name
 				if dep in type_names {
 					field_deps << dep
 				}
