@@ -3925,8 +3925,8 @@ fn (mut g Gen) ident(node ast.Ident) {
 			// `p_mobjthinker` => `P_MobjThinker`
 			if f := g.table.find_fn(node.name) {
 				// TODO PERF fn lookup for each fn call in translated mode
-				if f.attrs.contains('c') {
-					name = f.attrs[0].arg
+				if cattr := f.attrs.find_first('c') {
+					name = cattr.arg
 				}
 			}
 		}
@@ -3970,8 +3970,8 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 			// TODO handle the type in fn casts, not just exprs
 			/*
 			info := sym.info as ast.FnType
-			if info.func.attrs.contains('c') {
-				// name = f.attrs[0].arg
+			if cattr := info.func.attrs.find_first('c') {
+				name = cattr.arg
 			}
 			*/
 		}
@@ -4398,11 +4398,11 @@ fn (mut g Gen) const_decl(node ast.ConstDecl) {
 			}
 		}
 		name := c_name(field.name)
-		const_name := if node.attrs.contains('export') && !g.is_builtin_mod {
-			// TODO this only works for the first const in the group for now
-			node.attrs[0].arg
-		} else {
-			'_const_' + name
+		mut const_name := '_const_' + name
+		if !g.is_builtin_mod {
+			if cattr := node.attrs.find_first('export') {
+				const_name = cattr.arg
+			}
 		}
 		field_expr := field.expr
 		match field.expr {
@@ -5486,8 +5486,9 @@ fn (mut g Gen) enum_val(node ast.EnumVal) {
 	// && g.inside_switch
 	if g.pref.translated && node.typ.is_number() {
 		// Mostly in translated code, when C enums are used as ints in switches
-		sym := g.table.sym(node.typ)
-		g.write('/* $node enum val is_number $node.mod styp=$styp sym=$sym*/_const_main__$node.val')
+		// sym := g.table.sym(node.typ)
+		// g.write('/* $node enum val is_number $node.mod styp=$styp sym=$sym*/_const_main__$node.val')
+		g.write('_const_main__$node.val')
 	} else {
 		g.write('${styp}__$node.val')
 	}
@@ -5742,7 +5743,7 @@ static inline __shared__$interface_name ${shared_fn_name}(__shared__$cctype* x) 
 
 			for method in methods {
 				mut name := method.name
-				if inter_info.parent_type.has_flag(.generic) {
+				if method.generic_names.len > 0 && inter_info.parent_type.has_flag(.generic) {
 					parent_sym := g.table.sym(inter_info.parent_type)
 					match parent_sym.info {
 						ast.Struct, ast.Interface, ast.SumType {
@@ -5759,7 +5760,7 @@ static inline __shared__$interface_name ${shared_fn_name}(__shared__$cctype* x) 
 				}
 				// .speak = Cat_speak
 				if st_sym.info is ast.Struct {
-					if st_sym.info.parent_type.has_flag(.generic) {
+					if method.generic_names.len > 0 && st_sym.info.parent_type.has_flag(.generic) {
 						name = g.generic_fn_name(st_sym.info.concrete_types, method.name,
 							false)
 					}
