@@ -340,6 +340,9 @@ pub fn user_os() string {
 	$if android {
 		return 'android'
 	}
+	$if termux {
+		return 'termux'
+	}
 	$if solaris {
 		return 'solaris'
 	}
@@ -351,6 +354,9 @@ pub fn user_os() string {
 	}
 	$if vinix {
 		return 'vinix'
+	}
+	if getenv('TERMUX_VERSION') != '' {
+		return 'termux'
 	}
 	return 'unknown'
 }
