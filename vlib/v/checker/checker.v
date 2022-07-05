@@ -1124,6 +1124,7 @@ pub fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 		// This means that the field has an undefined type.
 		// This error was handled before.
 		// c.error('`void` type has no fields', node.pos)
+		node.expr_type = ast.void_type
 		return ast.void_type
 	}
 	node.expr_type = typ
@@ -2211,6 +2212,12 @@ pub fn (mut c Checker) expr(node_ ast.Expr) ast.Type {
 		}
 		ast.MatchExpr {
 			return c.match_expr(mut node)
+		}
+		ast.Nil {
+			if !c.inside_unsafe {
+				c.error('`nil` is only allowed in `unsafe` code', node.pos)
+			}
+			return ast.nil_type
 		}
 		ast.PostfixExpr {
 			return c.postfix_expr(mut node)
