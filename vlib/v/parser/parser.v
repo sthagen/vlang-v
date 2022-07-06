@@ -91,6 +91,7 @@ mut:
 	if_cond_comments          []ast.Comment
 	script_mode               bool
 	script_mode_start_token   token.Token
+	anon_struct_counter       int
 pub mut:
 	scanner    &scanner.Scanner
 	errors     []errors.Error
@@ -99,7 +100,7 @@ pub mut:
 	vet_errors []vet.Error
 }
 
-__global codegen_files = []&ast.File{}
+__global codegen_files = unsafe { []&ast.File{} }
 
 // for tests
 pub fn parse_stmt(text string, table &ast.Table, scope &ast.Scope) ast.Stmt {
@@ -425,17 +426,19 @@ pub fn parse_files(paths []string, table &ast.Table, pref &pref.Preferences) []&
 		}
 		*/
 	}
-	mut files := []&ast.File{cap: paths.len}
-	for path in paths {
-		timers.start('parse_file $path')
-		files << parse_file(path, table, .skip_comments, pref)
-		timers.show('parse_file $path')
+	unsafe {
+		mut files := []&ast.File{cap: paths.len}
+		for path in paths {
+			timers.start('parse_file $path')
+			files << parse_file(path, table, .skip_comments, pref)
+			timers.show('parse_file $path')
+		}
+		if codegen_files.len > 0 {
+			files << codegen_files
+			codegen_files.clear()
+		}
+		return files
 	}
-	if codegen_files.len > 0 {
-		files << codegen_files
-		codegen_files.clear()
-	}
-	return files
 }
 
 // codegen allows you to generate V code, so that it can be parsed,
@@ -620,7 +623,7 @@ pub fn (mut p Parser) top_stmt() ast.Stmt {
 						return p.fn_decl()
 					}
 					.key_struct, .key_union {
-						return p.struct_decl()
+						return p.struct_decl(false)
 					}
 					.key_interface {
 						return p.interface_decl()
@@ -662,7 +665,7 @@ pub fn (mut p Parser) top_stmt() ast.Stmt {
 				return p.fn_decl()
 			}
 			.key_struct {
-				return p.struct_decl()
+				return p.struct_decl(false)
 			}
 			.dollar {
 				if p.peek_tok.kind == .eof {
@@ -689,7 +692,7 @@ pub fn (mut p Parser) top_stmt() ast.Stmt {
 				return p.enum_decl()
 			}
 			.key_union {
-				return p.struct_decl()
+				return p.struct_decl(false)
 			}
 			.comment {
 				return p.comment_stmt()
