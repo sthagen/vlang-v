@@ -1751,7 +1751,11 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 			// }
 			if g.inside_ternary == 0 && !g.inside_if_optional && !g.inside_match_optional
 				&& !node.is_expr && node.expr !is ast.IfExpr {
-				g.writeln(';')
+				if node.expr is ast.MatchExpr {
+					g.writeln('')
+				} else {
+					g.writeln(';')
+				}
 			}
 		}
 		ast.FnDecl {
@@ -5386,8 +5390,13 @@ fn (mut g Gen) type_default(typ_ ast.Type) string {
 			}
 			if has_none_zero {
 				init_str += '}'
-				type_name := g.typ(typ)
-				init_str = '($type_name)' + init_str
+				type_name := if info.is_anon {
+					// No name needed for anon structs, C figures it out on its own.
+					''
+				} else {
+					'(${g.typ(typ)})'
+				}
+				init_str = type_name + init_str
 			} else {
 				init_str += '0}'
 			}

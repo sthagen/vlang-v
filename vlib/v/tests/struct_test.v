@@ -415,12 +415,19 @@ fn test_struct_update() {
 
 // Test anon structs
 struct Book {
-	x Foo
-	title string
-	author struct {
+	x      Foo
+	author struct  {
 		name string
-		age int
+		age  int
 	}
+
+	title string
 }
 
-fn test_anon() {}
+fn test_anon() {
+	empty_book := Book{} // author:struct{'sdf', 23}}
+	assert empty_book.author.age == 0
+	assert empty_book.author.name == ''
+
+	println(empty_book.author.age)
+}
