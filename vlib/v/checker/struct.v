@@ -320,7 +320,7 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 	}
 	if type_sym.name.len == 1 && !isnil(c.table.cur_fn) && c.table.cur_fn.generic_names.len == 0 {
 		c.error('unknown struct `$type_sym.name`', node.pos)
-		return 0
+		return ast.void_type
 	}
 	match type_sym.kind {
 		.placeholder {
@@ -457,7 +457,7 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 					if mut field.expr is ast.Ident {
 						if mut field.expr.obj is ast.Var {
 							mut obj := unsafe { &field.expr.obj }
-							if c.fn_scope != voidptr(0) {
+							if c.fn_scope != unsafe { nil } {
 								obj = c.fn_scope.find_var(obj.name) or { obj }
 							}
 							if obj.is_stack_obj && !c.inside_unsafe {

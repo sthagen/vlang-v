@@ -4691,7 +4691,6 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 				mod: node.mod
 				def: '$fn_type_name = ${g.table.sym(field.typ).name}; // global2'
 				order: -1
-				// line: node.pos.line_nr
 			}
 			continue
 		}
@@ -4706,7 +4705,6 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 				mod: node.mod
 				def: def_builder.str()
 				order: -1
-				// line: node.pos.line_nr
 			}
 			continue
 		}
@@ -4739,7 +4737,6 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 			def: def_builder.str()
 			init: init
 			dep_names: g.table.dependent_names_in_expr(field.expr)
-			// line: node.pos.line_nr
 		}
 	}
 }
@@ -5077,9 +5074,25 @@ fn (mut g Gen) sort_structs(typesa []&ast.TypeSymbol) []&ast.TypeSymbol {
 		mut field_deps := []string{}
 		match sym.info {
 			ast.ArrayFixed {
-				dep := g.table.final_sym(sym.info.elem_type).name
-				if dep in type_names {
-					field_deps << dep
+				mut skip := false
+				// allow: `struct Node{ children [4]&Node }`
+				// skip adding the struct as a dependency to the fixed array: [4]&Node -> Node
+				// the struct must depend on the fixed array for definition order: Node -> [4]&Node
+				// NOTE: Is there is a simpler way to do this?
+				elem_sym := g.table.final_sym(sym.info.elem_type)
+				if elem_sym.info is ast.Struct && sym.info.elem_type.is_ptr() {
+					for field in elem_sym.info.fields {
+						if sym.idx == field.typ.idx() {
+							skip = true
+							break
+						}
+					}
+				}
+				if !skip {
+					dep := g.table.final_sym(sym.info.elem_type).name
+					if dep in type_names {
+						field_deps << dep
+					}
 				}
 			}
 			ast.Struct {
@@ -5783,7 +5796,7 @@ static inline __shared__$interface_name ${shared_fn_name}(__shared__$cctype* x) 
 						...params[0]
 						typ: st.set_nr_muls(1)
 					}
-					fargs, _, _ := g.fn_decl_params(params, voidptr(0), false)
+					fargs, _, _ := g.fn_decl_params(params, unsafe { nil }, false)
 					mut parameter_name := g.out.cut_last(g.out.len - params_start_pos)
 
 					if st.is_ptr() {
