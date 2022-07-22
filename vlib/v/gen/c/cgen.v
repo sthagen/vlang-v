@@ -272,7 +272,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		module_built: module_built
 		timers_should_print: timers_should_print
 		timers: util.new_timers(should_print: timers_should_print, label: 'global_cgen')
-		inner_loop: &ast.EmptyStmt{}
+		inner_loop: &ast.empty_stmt
 		field_data_type: ast.Type(table.find_type_idx('FieldData'))
 		is_cc_msvc: pref.ccompiler == 'msvc'
 		use_segfault_handler: !('no_segfault_handler' in pref.compile_defines || pref.os == .wasm32)
@@ -411,14 +411,14 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	// to make sure type idx's are the same in cached mods
 	if g.pref.build_mode == .build_module {
 		for idx, sym in g.table.type_symbols {
-			if idx == 0 {
+			if idx in [0, 30] {
 				continue
 			}
 			g.definitions.writeln('int _v_type_idx_${sym.cname}();')
 		}
 	} else if g.pref.use_cache {
 		for idx, sym in g.table.type_symbols {
-			if idx == 0 {
+			if idx in [0, 30] {
 				continue
 			}
 			g.definitions.writeln('int _v_type_idx_${sym.cname}() { return $idx; };')
@@ -576,7 +576,7 @@ fn cgen_process_one_file_cb(p &pool.PoolProcessor, idx int, wid int) &Gen {
 			should_print: global_g.timers_should_print
 			label: 'cgen_process_one_file_cb idx: $idx, wid: $wid'
 		)
-		inner_loop: &ast.EmptyStmt{}
+		inner_loop: &ast.empty_stmt
 		field_data_type: ast.Type(global_g.table.find_type_idx('FieldData'))
 		array_sort_fn: global_g.array_sort_fn
 		waiter_fns: global_g.waiter_fns
@@ -3704,7 +3704,7 @@ fn (mut g Gen) select_expr(node ast.SelectExpr) {
 	mut is_push := []bool{cap: n_channels}
 	mut has_else := false
 	mut has_timeout := false
-	mut timeout_expr := ast.empty_expr()
+	mut timeout_expr := ast.empty_expr
 	mut exception_branch := -1
 	for j, branch in node.branches {
 		if branch.is_else {
@@ -3727,7 +3727,7 @@ fn (mut g Gen) select_expr(node ast.SelectExpr) {
 						elem_types << ''
 					} else {
 						// must be evaluated to tmp var before real `select` is performed
-						objs << ast.empty_expr()
+						objs << ast.empty_expr
 						tmp_obj := g.new_tmp_var()
 						tmp_objs << tmp_obj
 						el_stype := g.typ(ast.mktyp(expr.right_type))
@@ -4709,10 +4709,21 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 			continue
 		}
 		if field.has_expr || cinit {
+			// `__global x = unsafe { nil }` should still use the simple direct initialisation, `g_main_argv` needs it.
+			mut is_simple_unsafe_expr := false
+			if field.expr is ast.UnsafeExpr {
+				if field.expr.expr is ast.Nil {
+					is_simple_unsafe_expr = true
+				}
+				if field.expr.expr.is_literal() {
+					is_simple_unsafe_expr = true
+				}
+			}
 			if g.pref.translated {
 				def_builder.write_string(' = ${g.expr_string(field.expr)}')
 			} else if (field.expr.is_literal() && should_init) || cinit
-				|| (field.expr is ast.ArrayInit && (field.expr as ast.ArrayInit).is_fixed) {
+				|| (field.expr is ast.ArrayInit && (field.expr as ast.ArrayInit).is_fixed)
+				|| (is_simple_unsafe_expr && should_init) {
 				// Simple literals can be initialized right away in global scope in C.
 				// e.g. `int myglobal = 10;`
 				def_builder.write_string(' = ${g.expr_string(field.expr)}')
