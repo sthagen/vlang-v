@@ -1272,6 +1272,9 @@ val2 := arr[333]?
 println(val2)
 ```
 
+Maps are ordered by insertion, like dictionaries in Python. The order is a
+guaranteed language feature. This may change in the future.
+
 ## Module imports
 
 For information about creating a module, see [Modules](#modules).
@@ -5798,7 +5801,7 @@ or
 ```shell
 v -os linux .
 ```
-NB: Cross-compiling a windows binary on a linux machine requires the GNU C compiler for 
+NB: Cross-compiling a windows binary on a linux machine requires the GNU C compiler for
 MinGW-w64 (targeting Win64) to first be installed.
 
 ```shell
