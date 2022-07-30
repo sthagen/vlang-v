@@ -26,7 +26,7 @@ const (
 		'short', 'signed', 'sizeof', 'static', 'string', 'struct', 'switch', 'typedef', 'typename',
 		'union', 'unix', 'unsigned', 'void', 'volatile', 'while', 'template', 'true', 'small',
 		'stdout', 'stdin', 'stderr']
-	c_reserved_map = string_array_to_map(c_reserved)
+	c_reserved_chk = token.new_keywords_matcher_from_array_trie(c_reserved)
 	// same order as in token.Kind
 	cmp_str        = ['eq', 'ne', 'gt', 'lt', 'ge', 'le']
 	// when operands are switched
@@ -1527,13 +1527,20 @@ fn is_noreturn_callexpr(expr ast.Expr) bool {
 	return false
 }
 
-// tmp_var is used in `if` expressions only
-fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) {
+// stmts_with_tmp_var is used in `if` or `match` branches.
+// It returns true, if the last statement was a `return`
+fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) bool {
 	g.indent++
 	if g.inside_ternary > 0 {
 		g.write('(')
 	}
+	mut last_stmt_was_return := false
 	for i, stmt in stmts {
+		if i == stmts.len - 1 {
+			if stmt is ast.Return {
+				last_stmt_was_return = true
+			}
+		}
 		if i == stmts.len - 1 && tmp_var != '' {
 			// Handle if expressions, set the value of the last expression to the temp var.
 			if g.inside_if_optional || g.inside_match_optional {
@@ -1605,7 +1612,7 @@ fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) {
 				// Do not autofree if the position is 0, since the correct scope won't be found.
 				// Report a bug, since position shouldn't be 0 for most nodes.
 				if stmt is ast.Module {
-					return
+					return last_stmt_was_return
 				}
 				if stmt is ast.ExprStmt {
 					// For some reason ExprStmt.pos is 0 when ExprStmt.expr is comp if expr
@@ -1616,12 +1623,13 @@ fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) {
 					$if trace_autofree ? {
 						println('autofree: first stmt pos = 0. $stmt.type_name()')
 					}
-					return
+					return last_stmt_was_return
 				}
 			}
 			g.autofree_scope_vars(stmt_pos.pos - 1, stmt_pos.line_nr, false)
 		}
 	}
+	return last_stmt_was_return
 }
 
 [inline]
@@ -5322,7 +5330,7 @@ fn (mut g Gen) or_block(var_name string, or_block ast.OrExpr, return_type ast.Ty
 [inline]
 fn c_name(name_ string) string {
 	name := util.no_dots(name_)
-	if name in c.c_reserved_map {
+	if c.c_reserved_chk.matches(name) {
 		return '_v_$name'
 	}
 	return name

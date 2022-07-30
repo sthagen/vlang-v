@@ -1202,7 +1202,7 @@ pub fn (mut f Fmt) interface_field(field ast.StructField) {
 
 pub fn (mut f Fmt) interface_method(method ast.FnDecl) {
 	f.write('\t')
-	f.write(method.stringify(f.table, f.cur_mod, f.mod2alias).after('fn '))
+	f.write(method.stringify(f.table, f.cur_mod, f.mod2alias).all_after_first('fn '))
 	f.comments(method.comments, inline: true, has_nl: false, level: .indent)
 	f.writeln('')
 	f.comments(method.next_comments, inline: false, has_nl: true, level: .indent)
@@ -1841,13 +1841,15 @@ pub fn (mut f Fmt) comptime_call(node ast.ComptimeCall) {
 			} else {
 				'${node.method_name}($inner_args)'
 			}
-			f.write('${node.left}.$$method_expr')
+			f.expr(node.left)
+			f.write('.$$method_expr')
 		}
 	}
 }
 
 pub fn (mut f Fmt) comptime_selector(node ast.ComptimeSelector) {
-	f.write('${node.left}.\$($node.field_expr)')
+	f.expr(node.left)
+	f.write('.\$($node.field_expr)')
 }
 
 pub fn (mut f Fmt) concat_expr(node ast.ConcatExpr) {

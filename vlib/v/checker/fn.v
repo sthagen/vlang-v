@@ -185,7 +185,7 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 		// Make sure all types are valid
 		for mut param in node.params {
 			c.ensure_type_exists(param.typ, param.type_pos) or { return }
-			if param.name in reserved_type_names {
+			if reserved_type_names_chk.matches(param.name) {
 				c.error('invalid use of reserved type `$param.name` as a parameter name',
 					param.pos)
 			}
@@ -1154,7 +1154,7 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 	}
 	// TODO: remove this for actual methods, use only for compiler magic
 	// FIXME: Argument count != 1 will break these
-	if left_sym.kind == .array && method_name in array_builtin_methods {
+	if left_sym.kind == .array && array_builtin_methods_chk.matches(method_name) {
 		return c.array_builtin_method_call(mut node, left_type, c.table.sym(left_type))
 	} else if (left_sym.kind == .map || final_left_sym.kind == .map)
 		&& method_name in ['clone', 'keys', 'values', 'move', 'delete'] {
@@ -1594,6 +1594,42 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 				targ := c.check_expr_opt_call(arg.expr, c.expr(arg.expr))
 				arg.typ = targ
 				earg_types << targ
+
+				param := if info.func.is_variadic && i >= info.func.params.len - 1 {
+					info.func.params.last()
+				} else {
+					info.func.params[i]
+				}
+				param_share := param.typ.share()
+				if param_share == .shared_t && (c.locked_names.len > 0 || c.rlocked_names.len > 0) {
+					c.error('method with `shared` arguments cannot be called inside `lock`/`rlock` block',
+						arg.pos)
+				}
+				if arg.is_mut {
+					to_lock, pos := c.fail_if_immutable(arg.expr)
+					if !param.is_mut {
+						tok := arg.share.str()
+						c.error('`$node.name` parameter `$param.name` is not `$tok`, `$tok` is not needed`',
+							arg.expr.pos())
+					} else {
+						if param_share != arg.share {
+							c.error('wrong shared type `$arg.share.str()`, expected: `$param_share.str()`',
+								arg.expr.pos())
+						}
+						if to_lock != '' && param_share != .shared_t {
+							c.error('$to_lock is `shared` and must be `lock`ed to be passed as `mut`',
+								pos)
+						}
+					}
+				} else {
+					if param.is_mut {
+						tok := arg.share.str()
+						c.error('method `$node.name` parameter `$param.name` is `$tok`, so use `$tok $arg.expr` instead',
+							arg.expr.pos())
+					} else {
+						c.fail_if_unreadable(arg.expr, targ, 'argument')
+					}
+				}
 
 				if i < info.func.params.len {
 					exp_arg_typ := info.func.params[i].typ
