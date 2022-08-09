@@ -2049,7 +2049,9 @@ pub fn (mut c Checker) expr(node_ ast.Expr) ast.Type {
 			c.error('incorrect use of compile-time type', node.pos)
 		}
 		ast.EmptyExpr {
-			print_backtrace()
+			if c.pref.is_verbose {
+				print_backtrace()
+			}
 			c.error('checker.expr(): unhandled EmptyExpr', token.Pos{})
 			return ast.void_type
 		}
@@ -2166,8 +2168,9 @@ pub fn (mut c Checker) expr(node_ ast.Expr) ast.Type {
 				return ast.void_type
 			}
 
-			tsym := c.table.sym(node.expr_type)
-			c.table.dumps[int(node.expr_type)] = tsym.cname
+			unwrapped_expr_type := c.unwrap_generic(node.expr_type)
+			tsym := c.table.sym(unwrapped_expr_type)
+			c.table.dumps[int(unwrapped_expr_type)] = tsym.cname
 			node.cname = tsym.cname
 			return node.expr_type
 		}
