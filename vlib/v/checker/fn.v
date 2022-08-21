@@ -674,7 +674,15 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 					node.fn_var_type = typ
 				}
 				ast.Var {
-					typ = if obj.smartcasts.len != 0 { obj.smartcasts.last() } else { obj.typ }
+					if obj.smartcasts.len != 0 {
+						typ = obj.smartcasts.last()
+					} else {
+						if obj.typ == 0 {
+							typ = c.expr(obj.expr)
+						} else {
+							typ = obj.typ
+						}
+					}
 					node.is_fn_var = true
 					node.fn_var_type = typ
 				}
@@ -950,8 +958,14 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 				param_elem_type := c.table.unaliased_type(param_info.elem_type)
 				arg_info := arg_typ_sym.info as ast.Array
 				arg_elem_type := c.table.unaliased_type(arg_info.elem_type)
-				if param.typ.nr_muls() == arg_typ.nr_muls()
-					&& param_info.nr_dims == arg_info.nr_dims && param_elem_type == arg_elem_type {
+				param_nr_muls := param.typ.nr_muls()
+				arg_nr_muls := if call_arg.is_mut {
+					arg_typ.nr_muls() + 1
+				} else {
+					arg_typ.nr_muls()
+				}
+				if param_nr_muls == arg_nr_muls && param_info.nr_dims == arg_info.nr_dims
+					&& param_elem_type == arg_elem_type {
 					continue
 				}
 			}
@@ -1149,6 +1163,10 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 		if method_name == 'type_idx' {
 			return ast.int_type
 		}
+	}
+	if !c.is_builtin_mod && !c.inside_unsafe && method_name == 'free' {
+		c.warn('manual memory management with `free()` is only allowed in unsafe code',
+			node.pos)
 	}
 	if left_type == ast.void_type {
 		// No need to print this error, since this means that the variable is unknown,

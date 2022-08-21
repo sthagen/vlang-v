@@ -52,6 +52,7 @@ struct Gen {
 mut:
 	out                       strings.Builder
 	cheaders                  strings.Builder
+	preincludes               strings.Builder // allows includes to go before `definitions`
 	includes                  strings.Builder // all C #includes required by V modules
 	typedefs                  strings.Builder
 	enum_typedefs             strings.Builder // enum types
@@ -244,6 +245,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		out: strings.new_builder(512000)
 		cheaders: strings.new_builder(15000)
 		includes: strings.new_builder(100)
+		preincludes: strings.new_builder(100)
 		typedefs: strings.new_builder(100)
 		enum_typedefs: strings.new_builder(100)
 		type_definitions: strings.new_builder(100)
@@ -301,6 +303,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 			global_g.embedded_files << g.embedded_files
 			global_g.out.write(g.out) or { panic(err) }
 			global_g.cheaders.write(g.cheaders) or { panic(err) }
+			global_g.preincludes.write(g.preincludes) or { panic(err) }
 			global_g.includes.write(g.includes) or { panic(err) }
 			global_g.typedefs.write(g.typedefs) or { panic(err) }
 			global_g.type_definitions.write(g.type_definitions) or { panic(err) }
@@ -387,8 +390,6 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	}
 
 	global_g.gen_jsons()
-	global_g.write_optionals()
-	global_g.write_results()
 	global_g.dump_expr_definitions() // this uses global_g.get_str_fn, so it has to go before the below for loop
 	for i := 0; i < global_g.str_types.len; i++ {
 		global_g.final_gen_str(global_g.str_types[i])
@@ -403,6 +404,8 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	global_g.gen_array_index_methods()
 	global_g.gen_equality_fns()
 	global_g.gen_free_methods()
+	global_g.write_results()
+	global_g.write_optionals()
 	global_g.sort_globals_consts()
 	global_g.timers.show('cgen unification')
 
@@ -443,6 +446,8 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 	b.write_string(g.comptime_definitions.str())
 	b.writeln('\n// V typedefs:')
 	b.write_string(g.typedefs.str())
+	b.writeln('\n // V preincludes:')
+	b.write_string(g.preincludes.str())
 	b.writeln('\n// V cheaders:')
 	b.write_string(g.cheaders.str())
 	if g.pcs_declarations.len > 0 {
@@ -668,6 +673,7 @@ pub fn (mut g Gen) init() {
 // tcc does not support has_include properly yet, turn it off completely
 #undef __has_include
 #endif'
+			g.preincludes.writeln(tcc_undef_has_include)
 			g.cheaders.writeln(tcc_undef_has_include)
 			g.includes.writeln(tcc_undef_has_include)
 			if g.pref.os == .freebsd {
@@ -1004,7 +1010,7 @@ fn (g Gen) result_type_text(styp string, base string) string {
 	ret := 'struct $styp {
 	bool is_error;
 	IError err;
-	byte data[sizeof($size) > 0 ? sizeof($size) : 1];
+	byte data[sizeof($size) > 1 ? sizeof($size) : 1];
 }'
 	return ret
 }
@@ -1434,6 +1440,7 @@ pub fn (mut g Gen) write_fn_typesymbol_declaration(sym ast.TypeSymbol) {
 }
 
 pub fn (mut g Gen) write_multi_return_types() {
+	start_pos := g.type_definitions.len
 	g.typedefs.writeln('\n// BEGIN_multi_return_typedefs')
 	g.type_definitions.writeln('\n// BEGIN_multi_return_structs')
 	for sym in g.table.type_symbols {
@@ -1451,6 +1458,22 @@ pub fn (mut g Gen) write_multi_return_types() {
 		g.type_definitions.writeln('struct $sym.cname {')
 		for i, mr_typ in info.types {
 			type_name := g.typ(mr_typ)
+			if mr_typ.has_flag(.optional) {
+				// optional in multi_return
+				// Dont use g.typ() here because it will register
+				// optional and we dont want that
+				styp, base := g.optional_type_name(mr_typ)
+				lock g.done_optionals {
+					if base !in g.done_optionals {
+						g.done_optionals << base
+						last_text := g.type_definitions.after(start_pos).clone()
+						g.type_definitions.go_back_to(start_pos)
+						g.typedefs.writeln('typedef struct $styp $styp;')
+						g.type_definitions.writeln('${g.optional_type_text(styp, base)};')
+						g.type_definitions.write_string(last_text)
+					}
+				}
+			}
 			g.type_definitions.writeln('\t$type_name arg$i;')
 		}
 		g.type_definitions.writeln('};\n')
@@ -1887,6 +1910,45 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 						g.includes.writeln('#endif // \$if $ct_condition')
 					}
 					g.includes.writeln('\n')
+				}
+			} else if node.kind == 'preinclude' {
+				mut missing_message := 'Header file $node.main, needed for module `$node.mod` was not found.'
+				if node.msg != '' {
+					missing_message += ' ${node.msg}.'
+				} else {
+					missing_message += ' Please install the corresponding development headers.'
+				}
+				mut guarded_include := get_guarded_include_text(node.main, missing_message)
+				if node.main == '<errno.h>' {
+					// fails with musl-gcc and msvc; but an unguarded include works:
+					guarded_include = '#include $node.main'
+				}
+				if node.main.contains('.m') {
+					// Might need to support '#preinclude' for .m files as well but for the moment
+					// this does the same as '#include' for them
+					g.definitions.writeln('\n')
+					if ct_condition.len > 0 {
+						g.definitions.writeln('#if $ct_condition')
+					}
+					// Objective C code import, include it after V types, so that e.g. `string` is
+					// available there
+					g.definitions.writeln('// added by module `$node.mod`, file: ${os.file_name(node.source_file)}:$line_nr:')
+					g.definitions.writeln(guarded_include)
+					if ct_condition.len > 0 {
+						g.definitions.writeln('#endif // \$if $ct_condition')
+					}
+					g.definitions.writeln('\n')
+				} else {
+					g.preincludes.writeln('\n')
+					if ct_condition.len > 0 {
+						g.preincludes.writeln('#if $ct_condition')
+					}
+					g.preincludes.writeln('// added by module `$node.mod`, file: ${os.file_name(node.source_file)}:$line_nr:')
+					g.preincludes.writeln(guarded_include)
+					if ct_condition.len > 0 {
+						g.preincludes.writeln('#endif // \$if $ct_condition')
+					}
+					g.preincludes.writeln('\n')
 				}
 			} else if node.kind == 'insert' {
 				if ct_condition.len > 0 {
@@ -2886,7 +2948,7 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 				node.return_type.clear_flag(.optional)
 			}
 			mut shared_styp := ''
-			if g.is_shared && !ret_type.has_flag(.shared_f) {
+			if g.is_shared && !ret_type.has_flag(.shared_f) && !g.inside_or_block {
 				ret_sym := g.table.sym(ret_type)
 				shared_typ := ret_type.set_flag(.shared_f)
 				shared_styp = g.typ(shared_typ)
@@ -2915,7 +2977,7 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 				g.strs_to_free0 = []
 				// println('pos=$node.pos.pos')
 			}
-			if g.is_shared && !ret_type.has_flag(.shared_f) {
+			if g.is_shared && !ret_type.has_flag(.shared_f) && !g.inside_or_block {
 				g.writeln('}, sizeof($shared_styp))')
 			}
 			// if g.autofree && node.autofree_pregen != '' { // g.strs_to_free0.len != 0 {
@@ -4351,8 +4413,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 		}
 		// free := g.is_autofree && !g.is_builtin_mod // node.exprs[0] is ast.CallExpr
 		// Create a temporary variable for the return expression
-		use_tmp_var = use_tmp_var || !g.is_builtin_mod // node.exprs[0] is ast.CallExpr
-		if use_tmp_var {
+		if use_tmp_var || !g.is_builtin_mod {
 			// `return foo(a, b, c)`
 			// `tmp := foo(a, b, c); free(a); free(b); free(c); return tmp;`
 			// Save return value in a temp var so that all args (a,b,c) can be freed
@@ -4360,10 +4421,10 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 			// Just in case of defer statements exists, that the return values cannot
 			// be modified.
 			if node.exprs[0] !is ast.Ident || use_tmp_var {
+				use_tmp_var = true
 				g.write('$ret_typ $tmpvar = ')
 			} else {
 				use_tmp_var = false
-				g.write_defer_stmts_when_needed()
 				if !g.is_builtin_mod {
 					g.autofree_scope_vars(node.pos.pos - 1, node.pos.line_nr, true)
 				}
@@ -5222,9 +5283,9 @@ fn (mut g Gen) or_block(var_name string, or_block ast.OrExpr, return_type ast.Ty
 			mr_styp = 'voidptr'
 		}
 		if return_type.has_flag(.result) {
-			g.writeln('if (${cvar_name}.is_error) { /*or block*/ ')
+			g.writeln('if (${cvar_name}.is_error) {') // /*or block*/ ')
 		} else {
-			g.writeln('if (${cvar_name}.state != 0) { /*or block*/ ')
+			g.writeln('if (${cvar_name}.state != 0) {') // /*or block*/ ')
 		}
 	}
 	if or_block.kind == .block {
