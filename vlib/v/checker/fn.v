@@ -63,8 +63,15 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 			}
 		}
 		if need_generic_names {
-			c.error('generic function declaration must specify generic type names, e.g. foo<T>',
-				node.pos)
+			if node.is_method {
+				c.add_error_detail('use `fn (r SomeType<T>) foo<T>() {`, not just `fn (r SomeType<T>) foo() {`')
+				c.error('generic method declaration must specify generic type names',
+					node.pos)
+			} else {
+				c.add_error_detail('use `fn foo<T>(x T) {`, not just `fn foo(x T) {`')
+				c.error('generic function declaration must specify generic type names',
+					node.pos)
+			}
 		}
 	}
 	if node.language == .v && !c.is_builtin_mod && !node.is_anon {
@@ -307,8 +314,9 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 		}
 
 		if node.return_type != ast.void_type_idx
-			&& node.return_type.clear_flag(.optional) != ast.void_type_idx {
-			c.error('test functions should either return nothing at all, or be marked to return `?`',
+			&& node.return_type.clear_flag(.optional) != ast.void_type_idx
+			&& node.return_type.clear_flag(.result) != ast.void_type_idx {
+			c.error('test functions should either return nothing at all, or be marked to return `?` or `!`',
 				node.pos)
 		}
 	}
@@ -563,6 +571,18 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 		ret_type := typ.typ.set_flag(.optional)
 		node.return_type = ret_type
 		return ret_type
+	} else if fn_name == '__addr' {
+		if !c.inside_unsafe {
+			c.error('`__addr` must be called from an unsafe block', node.pos)
+		}
+		if node.args.len != 1 {
+			c.error('`__addr` requires 1 argument', node.pos)
+			return ast.void_type
+		}
+		typ := c.expr(node.args[0].expr)
+		node.args[0].typ = typ
+		node.return_type = typ.ref()
+		return node.return_type
 	}
 	// look for function in format `mod.fn` or `fn` (builtin)
 	mut func := ast.Fn{}
@@ -597,6 +617,8 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 			if elem_sym.info is ast.FnType {
 				func = elem_sym.info.func
 				found = true
+				node.is_fn_var = true
+				node.fn_var_type = sym.info.elem_type
 			} else {
 				c.error('cannot call the element of the array, it is not a function',
 					node.pos)
@@ -606,6 +628,8 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 			if value_sym.info is ast.FnType {
 				func = value_sym.info.func
 				found = true
+				node.is_fn_var = true
+				node.fn_var_type = sym.info.value_type
 			} else {
 				c.error('cannot call the value of the map, it is not a function', node.pos)
 			}
@@ -614,6 +638,8 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 			if elem_sym.info is ast.FnType {
 				func = elem_sym.info.func
 				found = true
+				node.is_fn_var = true
+				node.fn_var_type = sym.info.elem_type
 			} else {
 				c.error('cannot call the element of the array, it is not a function',
 					node.pos)
@@ -749,7 +775,7 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 		}
 	}
 	if !func.is_pub && func.language == .v && func.name.len > 0 && func.mod.len > 0
-		&& func.mod != c.mod {
+		&& func.mod != c.mod && !c.pref.is_test {
 		c.error('function `$func.name` is private', node.pos)
 	}
 	if !isnil(c.table.cur_fn) && !c.table.cur_fn.is_deprecated && func.is_deprecated {
@@ -851,6 +877,15 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 			if param_sym.kind == .array {
 				info := param_sym.array_info()
 				c.expected_type = info.elem_type
+			}
+			typ := c.expr(call_arg.expr)
+			if i == node.args.len - 1 && c.table.sym(typ).kind == .array
+				&& call_arg.expr !is ast.ArrayDecompose && !param.typ.has_flag(.generic)
+				&& c.expected_type != typ {
+				styp := c.table.type_to_str(typ)
+				elem_styp := c.table.type_to_str(c.expected_type)
+				c.error('to pass `$call_arg.expr` ($styp) to `$func.name` (which accepts type `...$elem_styp`), use `...$call_arg.expr`',
+					node.pos)
 			}
 		} else {
 			c.expected_type = param.typ
@@ -1164,10 +1199,6 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 			return ast.int_type
 		}
 	}
-	if !c.is_builtin_mod && !c.inside_unsafe && method_name == 'free' {
-		c.warn('manual memory management with `free()` is only allowed in unsafe code',
-			node.pos)
-	}
 	if left_type == ast.void_type {
 		// No need to print this error, since this means that the variable is unknown,
 		// and there already was an error before.
@@ -1318,6 +1349,7 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 		}
 		node.is_noreturn = method.is_noreturn
 		node.is_ctor_new = method.is_ctor_new
+		node.return_type = method.return_type
 		if !method.is_pub && !c.pref.is_test && method.mod != c.mod {
 			// If a private method is called outside of the module
 			// its receiver type is defined in, show an error.
@@ -1558,13 +1590,17 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 		} else {
 			node.return_type = method.return_type
 		}
-		if node.concrete_types.len > 0 && method.return_type != 0 && !isnil(c.table.cur_fn)
-			&& c.table.cur_fn.generic_names.len == 0 {
+
+		if node.concrete_types.len > 0 && node.concrete_types.all(!it.has_flag(.generic))
+			&& method.return_type.has_flag(.generic) && method.generic_names.len > 0
+			&& method.generic_names.len == node.concrete_types.len {
 			if typ := c.table.resolve_generic_to_concrete(method.return_type, method.generic_names,
 				concrete_types)
 			{
 				node.return_type = typ
-				return typ
+			} else {
+				node.return_type = c.table.unwrap_generic_type(method.return_type, method.generic_names,
+					concrete_types)
 			}
 		}
 		if node.concrete_types.len > 0 && method.generic_names.len == 0 {
@@ -1578,9 +1614,8 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 					}
 				}
 			}
-			return node.return_type
 		}
-		return method.return_type
+		return node.return_type
 	}
 	// TODO: str methods
 	if method_name == 'str' {
@@ -1597,6 +1632,10 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 		c.fail_if_unreadable(node.left, left_type, 'receiver')
 		return ast.string_type
 	} else if method_name == 'free' {
+		if !c.is_builtin_mod && !c.inside_unsafe && !method.is_unsafe {
+			c.warn('manual memory management with `free()` is only allowed in unsafe code',
+				node.pos)
+		}
 		return ast.void_type
 	}
 	// call struct field fn type
@@ -1794,6 +1833,10 @@ fn (mut c Checker) check_map_and_filter(is_map bool, elem_typ ast.Type, node ast
 	arg_expr := node.args[0].expr
 	match arg_expr {
 		ast.AnonFn {
+			if arg_expr.decl.return_type.has_flag(.optional) {
+				c.error('optional needs to be unwrapped before using it in map/filter',
+					node.args[0].pos)
+			}
 			if arg_expr.decl.params.len > 1 {
 				c.error('function needs exactly 1 argument', arg_expr.decl.pos)
 			} else if is_map && (arg_expr.decl.return_type == ast.void_type
@@ -1811,6 +1854,10 @@ fn (mut c Checker) check_map_and_filter(is_map bool, elem_typ ast.Type, node ast
 					c.error('$arg_expr.name does not exist', arg_expr.pos)
 					return
 				}
+				if func.return_type.has_flag(.optional) {
+					c.error('optional needs to be unwrapped before using it in map/filter',
+						node.pos)
+				}
 				if func.params.len > 1 {
 					c.error('function needs exactly 1 argument', node.pos)
 				} else if is_map
@@ -1827,6 +1874,10 @@ fn (mut c Checker) check_map_and_filter(is_map bool, elem_typ ast.Type, node ast
 					expr := arg_expr.obj.expr
 					if expr is ast.AnonFn {
 						// copied from above
+						if expr.decl.return_type.has_flag(.optional) {
+							c.error('optional needs to be unwrapped before using it in map/filter',
+								arg_expr.pos)
+						}
 						if expr.decl.params.len > 1 {
 							c.error('function needs exactly 1 argument', expr.decl.pos)
 						} else if is_map && (expr.decl.return_type == ast.void_type

@@ -542,7 +542,7 @@ pub fn (mut c Checker) expand_iface_embeds(idecl &ast.InterfaceDecl, level int, 
 	mut ares := []ast.InterfaceEmbedding{}
 	for ie in iface_embeds {
 		if iface_decl := c.table.interfaces[ie.typ] {
-			mut list := iface_decl.embeds
+			mut list := iface_decl.embeds.clone()
 			if !iface_decl.are_embeds_expanded {
 				list = c.expand_iface_embeds(idecl, level + 1, iface_decl.embeds)
 				c.table.interfaces[ie.typ].embeds = list
@@ -931,6 +931,9 @@ pub fn (mut c Checker) check_expr_opt_call(expr ast.Expr, ret_type ast.Type) ast
 		} else if expr.or_block.kind == .propagate_option {
 			c.error('unexpected `?`, the function `$expr.name` does not return an optional',
 				expr.or_block.pos)
+		} else if expr.or_block.kind == .propagate_result {
+			c.error('unexpected `!`, the function `$expr.name` does not return an optional',
+				expr.or_block.pos)
 		}
 	} else if expr is ast.IndexExpr {
 		if expr.or_expr.kind != .absent {
@@ -1252,8 +1255,7 @@ pub fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 	}
 	if mut method := c.table.find_method(sym, field_name) {
 		if c.expected_type != 0 && c.expected_type != ast.none_type {
-			fn_type := ast.new_type(c.table.find_or_register_fn_type(c.mod, method, false,
-				true))
+			fn_type := ast.new_type(c.table.find_or_register_fn_type(method, false, true))
 			// if the expected type includes the receiver, don't hide it behind a closure
 			if c.check_types(fn_type, c.expected_type) {
 				return fn_type
@@ -1277,8 +1279,7 @@ pub fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 		method.params = method.params[1..]
 		node.has_hidden_receiver = true
 		method.name = ''
-		fn_type := ast.new_type(c.table.find_or_register_fn_type(c.mod, method, false,
-			true))
+		fn_type := ast.new_type(c.table.find_or_register_fn_type(method, false, true))
 		return fn_type
 	}
 	if sym.kind !in [.struct_, .aggregate, .interface_, .sum_type] {
@@ -1654,6 +1655,9 @@ fn (mut c Checker) global_decl(mut node ast.GlobalDecl) {
 		c.check_valid_snake_case(field.name, 'global name', field.pos)
 		if field.name in c.global_names {
 			c.error('duplicate global `$field.name`', field.pos)
+		}
+		if '${c.mod}.$field.name' in c.const_names {
+			c.error('duplicate global and const `$field.name`', field.pos)
 		}
 		sym := c.table.sym(field.typ)
 		if sym.kind == .placeholder {
@@ -2122,6 +2126,9 @@ pub fn (mut c Checker) expr(node_ ast.Expr) ast.Type {
 				} else if node.or_block.kind == .propagate_option {
 					c.error('unexpected `?`, the function `$node.name` does neither return an optional nor a result',
 						node.or_block.pos)
+				} else if node.or_block.kind == .propagate_result {
+					c.error('unexpected `!`, the function `$node.name` does neither return an optional nor a result',
+						node.or_block.pos)
 				}
 			}
 			if node.or_block.kind != .absent {
@@ -2363,7 +2370,7 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 	from_sym := c.table.sym(from_type)
 	final_from_sym := c.table.final_sym(from_type)
 
-	mut to_type := node.typ
+	mut to_type := c.unwrap_generic(node.typ)
 	mut to_sym := c.table.sym(to_type) // type to be used as cast
 	mut final_to_sym := c.table.final_sym(to_type)
 
@@ -2425,6 +2432,16 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 		} else {
 			ft := c.table.type_to_str(from_type)
 			c.error('cannot cast `$ft` to struct', node.pos)
+		}
+	} else if to_sym.kind == .struct_ && to_type.is_ptr() {
+		if from_sym.kind == .alias {
+			from_type = (from_sym.info as ast.Alias).parent_type.derive_add_muls(from_type)
+		}
+		if !from_type.is_int() && final_from_sym.kind != .enum_ && !from_type.is_pointer()
+			&& !from_type.is_ptr() {
+			ft := c.table.type_to_str(from_type)
+			tt := c.table.type_to_str(to_type)
+			c.error('cannot cast `$ft` to `$tt`', node.pos)
 		}
 	} else if to_sym.kind == .interface_ {
 		if c.type_implements(from_type, to_type, node.pos) {
@@ -2583,8 +2600,8 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 			}
 		}
 	}
-	node.typname = c.table.sym(to_type).name
-	return to_type
+	node.typname = c.table.sym(node.typ).name
+	return node.typ
 }
 
 fn (mut c Checker) at_expr(mut node ast.AtExpr) ast.Type {
@@ -2628,6 +2645,9 @@ fn (mut c Checker) at_expr(mut node ast.AtExpr) ast.Type {
 		}
 		.line_nr {
 			node.val = (node.pos.line_nr + 1).str()
+		}
+		.file_path_line_nr {
+			node.val = os.file_name(c.file.path) + ':' + (node.pos.line_nr + 1).str()
 		}
 		.column_nr {
 			node.val = (node.pos.col + 1).str()
@@ -2719,12 +2739,14 @@ pub fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 		if mut obj := node.scope.find(node.name) {
 			match mut obj {
 				ast.GlobalField {
-					node.kind = .global
-					node.info = ast.IdentVar{
-						typ: obj.typ
+					if node.mod == '' {
+						node.kind = .global
+						node.info = ast.IdentVar{
+							typ: obj.typ
+						}
+						node.obj = obj
+						return obj.typ
 					}
-					node.obj = obj
-					return obj.typ
 				}
 				ast.Var {
 					// inside vweb tmpl ident positions are meaningless, use the position of the comptime call.
@@ -2845,8 +2867,7 @@ pub fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 		}
 		// Non-anon-function object (not a call), e.g. `onclick(my_click)`
 		if func := c.table.find_fn(name) {
-			fn_type := ast.new_type(c.table.find_or_register_fn_type(node.mod, func, false,
-				true))
+			fn_type := ast.new_type(c.table.find_or_register_fn_type(func, false, true))
 			node.name = name
 			node.kind = .function
 			node.info = ast.IdentFn{
@@ -3742,11 +3763,12 @@ fn (mut c Checker) warn_or_error(message string, pos token.Pos, warn bool) {
 	}
 	if !warn {
 		if c.pref.fatal_errors {
-			ferror := util.formatted_error('error:', message, c.file.path, pos)
-			eprintln(ferror)
-			if details.len > 0 {
-				eprintln('Details: $details')
-			}
+			util.show_compiler_message('error:', errors.CompilerMessage{
+				pos: pos
+				file_path: c.file.path
+				message: message
+				details: details
+			})
 			exit(1)
 		}
 		c.nr_errors++
@@ -3825,6 +3847,13 @@ fn (mut c Checker) ensure_type_exists(typ ast.Type, pos token.Pos) ? {
 				}
 				c.error(msg, pos)
 				return
+			}
+		}
+		.function {
+			fn_info := sym.info as ast.FnType
+			c.ensure_type_exists(fn_info.func.return_type, fn_info.func.return_type_pos)?
+			for param in fn_info.func.params {
+				c.ensure_type_exists(param.typ, param.type_pos)?
 			}
 		}
 		.array {

@@ -644,6 +644,7 @@ pub:
 	is_arg          bool // fn args should not be autofreed
 	is_auto_deref   bool
 	is_inherited    bool
+	has_inherited   bool
 pub mut:
 	expr       Expr
 	typ        Type
@@ -1047,14 +1048,15 @@ pub:
 	val_is_mut bool // `for mut val in vals {` means that modifying `val` will modify the array
 	// and the array cannot be indexed inside the loop
 pub mut:
-	cond      Expr
-	key_type  Type
-	val_type  Type
-	cond_type Type
-	high_type Type
-	kind      Kind   // array/map/string
-	label     string // `label: for {`
-	scope     &Scope
+	val_is_ref bool // `for val in &arr {` means that value of `val` will be the reference of the value in `arr`
+	cond       Expr
+	key_type   Type
+	val_type   Type
+	cond_type  Type
+	high_type  Type
+	kind       Kind   // array/map/string
+	label      string // `label: for {`
+	scope      &Scope
 }
 
 pub struct ForCStmt {
@@ -1710,6 +1712,7 @@ pub struct SqlStmt {
 pub:
 	pos     token.Pos
 	db_expr Expr // `db` in `sql db {`
+	or_expr OrExpr
 pub mut:
 	lines []SqlStmtLine
 }
@@ -1730,7 +1733,6 @@ pub mut:
 
 pub struct SqlExpr {
 pub:
-	typ        Type
 	is_count   bool
 	has_where  bool
 	has_order  bool
@@ -1738,8 +1740,10 @@ pub:
 	has_offset bool
 	has_desc   bool
 	is_array   bool
+	or_expr    OrExpr
 	pos        token.Pos
 pub mut:
+	typ         Type
 	db_expr     Expr // `db` in `sql db {`
 	where_expr  Expr
 	order_expr  Expr
@@ -1873,26 +1877,6 @@ pub fn (e &Expr) is_lockable() bool {
 			return false
 		}
 	}
-}
-
-// check if stmt can be an expression in C
-pub fn (stmt Stmt) check_c_expr() ? {
-	match stmt {
-		AssignStmt {
-			return
-		}
-		ForCStmt, ForInStmt, ForStmt {
-			return
-		}
-		ExprStmt {
-			if stmt.expr.is_expr() {
-				return
-			}
-			return error('unsupported statement (`$stmt.expr.type_name()`)')
-		}
-		else {}
-	}
-	return error('unsupported statement (`$stmt.type_name()`)')
 }
 
 // CTempVar is used in cgen only, to hold nodes for temporary variables

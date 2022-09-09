@@ -310,7 +310,6 @@ pub fn group_by<K, V>(list []V, grouping_op fn (v V) K) map[K][]V {
 // Example: arrays.concat([1, 2, 3], 4, 5, 6) == [1, 2, 3, 4, 5, 6] // => true
 // Example: arrays.concat([1, 2, 3], ...[4, 5, 6]) == [1, 2, 3, 4, 5, 6] // => true
 // Example: arr << [4, 5, 6] // does what you need if arr is mutable
-[deprecated]
 pub fn concat<T>(a []T, b ...T) []T {
 	mut m := []T{cap: a.len + b.len}
 
@@ -569,4 +568,13 @@ fn can_copy_bits<T>() bool {
 		return true
 	}
 	return false
+}
+
+// carray_to_varray copies a C byte array into a V array of type `T`.
+// See also: `cstring_to_vstring`
+[unsafe]
+pub fn carray_to_varray<T>(c_array voidptr, c_array_len int) []T {
+	mut v_array := []T{len: c_array_len}
+	unsafe { vmemcpy(v_array.data, c_array, c_array_len * int(sizeof(T))) }
+	return v_array
 }

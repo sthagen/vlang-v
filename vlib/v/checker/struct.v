@@ -68,21 +68,16 @@ pub fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 							field.type_pos)
 					}
 				}
-				field_sym := c.table.sym(field.typ)
-				if field_sym.kind == .function {
-					fn_info := field_sym.info as ast.FnType
-					c.ensure_type_exists(fn_info.func.return_type, fn_info.func.return_type_pos) or {
-						return
-					}
-					for param in fn_info.func.params {
-						c.ensure_type_exists(param.typ, param.type_pos) or { return }
-					}
-				}
 			}
 			if sym.kind == .struct_ {
 				info := sym.info as ast.Struct
 				if info.is_heap && !field.typ.is_ptr() {
 					struct_sym.info.is_heap = true
+				}
+				if info.generic_types.len > 0 && !field.typ.has_flag(.generic)
+					&& info.concrete_types.len == 0 {
+					c.error('field `$field.name` type is generic struct, must specify the generic type names, e.g. Foo<T>, Foo<int>',
+						field.type_pos)
 				}
 			}
 			if sym.kind == .multi_return {
@@ -260,6 +255,10 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 					}
 				}
 			}
+		}
+		if node.generic_types.len > 0 && struct_sym.info.generic_types.len == 0 {
+			c.error('a non generic struct `$node.typ_str` used like a generic struct',
+				node.name_pos)
 		}
 		if node.generic_types.len > 0 && struct_sym.info.generic_types.len == node.generic_types.len
 			&& struct_sym.info.generic_types != node.generic_types {

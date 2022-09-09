@@ -46,18 +46,7 @@ pub fn (mut c Checker) match_expr(mut node ast.MatchExpr) ast.Type {
 		c.smartcast_mut_pos = token.Pos{}
 		c.smartcast_cond_pos = token.Pos{}
 		if node.is_expr {
-			if branch.stmts.len > 0 {
-				// ignore last statement - workaround
-				// currently the last statement in a match branch does not have an
-				// expected value set, so e.g. IfExpr.is_expr is not set.
-				// probably any mismatch will be caught by not producing a value instead
-				for st in branch.stmts[..branch.stmts.len - 1] {
-					// must not contain C statements
-					st.check_c_expr() or {
-						c.error('`match` expression branch has $err.msg()', st.pos)
-					}
-				}
-			} else if ret_type != ast.void_type {
+			if branch.stmts.len == 0 && ret_type != ast.void_type {
 				c.error('`match` expression requires an expression as the last statement of every branch',
 					branch.branch_pos)
 			}
@@ -72,6 +61,7 @@ pub fn (mut c Checker) match_expr(mut node ast.MatchExpr) ast.Type {
 				expr_type := c.expr(stmt.expr)
 				if first_iteration {
 					if node.is_expr && (node.expected_type.has_flag(.optional)
+						|| node.expected_type.has_flag(.result)
 						|| c.table.type_kind(node.expected_type) in [.sum_type, .multi_return]) {
 						ret_type = node.expected_type
 					} else {

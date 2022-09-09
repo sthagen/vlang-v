@@ -178,7 +178,7 @@ fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
 				// instead of
 				// `int* val = ((int**)arr.data)[i];`
 				// right := if node.val_is_mut { styp } else { styp + '*' }
-				right := if node.val_is_mut {
+				right := if node.val_is_mut || node.val_is_ref {
 					'(($styp)$cond_var${op_field}data) + $i'
 				} else {
 					'(($styp*)$cond_var${op_field}data)[$i]'
@@ -295,7 +295,7 @@ fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
 			} else {
 				val_styp := g.typ(node.val_type)
 				if node.val_type.is_ptr() {
-					if node.val_is_mut {
+					if node.val_is_mut || node.val_is_ref {
 						g.write('$val_styp ${c_name(node.val_var)} = &(*($val_styp)')
 					} else {
 						g.write('$val_styp ${c_name(node.val_var)} = (*($val_styp*)')
@@ -346,8 +346,7 @@ fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
 		receiver_sym := g.table.sym(receiver_typ)
 		if receiver_sym.info is ast.Struct {
 			if receiver_sym.info.concrete_types.len > 0 {
-				fn_name = g.generic_fn_name(receiver_sym.info.concrete_types, fn_name,
-					false)
+				fn_name = g.generic_fn_name(receiver_sym.info.concrete_types, fn_name)
 			}
 		}
 		g.write('\t${g.typ(ret_typ)} $t_var = ${fn_name}(')

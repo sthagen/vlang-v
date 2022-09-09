@@ -137,26 +137,41 @@ fn stringify_fn_after_name(node &FnDecl, mut f strings.Builder, t &Table, cur_mo
 			f.write_string(arg.typ.share().str() + ' ')
 		}
 		f.write_string(arg.name)
-		mut s := t.type_to_str(arg.typ.clear_flag(.shared_f))
-		if arg.is_mut {
-			arg_sym := t.sym(arg.typ)
-			if s.starts_with('&') && ((!arg_sym.is_number() && arg_sym.kind != .bool)
-				|| node.language != .v) {
-				s = s[1..]
+		arg_sym := t.sym(arg.typ)
+		if arg_sym.kind == .struct_ && (arg_sym.info as Struct).is_anon {
+			f.write_string(' struct {')
+			struct_ := arg_sym.info as Struct
+			for field in struct_.fields {
+				f.write_string(' $field.name ${t.type_to_str(field.typ)}')
+				if field.has_default_expr {
+					f.write_string(' = $field.default_expr')
+				}
 			}
-		}
-		s = util.no_cur_mod(s, cur_mod)
-		for mod, alias in m2a {
-			s = s.replace(mod, alias)
-		}
-		if should_add_type {
-			if !is_type_only {
+			if struct_.fields.len > 0 {
 				f.write_string(' ')
 			}
-			if node.is_variadic && is_last_arg {
-				f.write_string('...')
+			f.write_string('}')
+		} else {
+			mut s := t.type_to_str(arg.typ.clear_flag(.shared_f))
+			if arg.is_mut {
+				if s.starts_with('&') && ((!arg_sym.is_number() && arg_sym.kind != .bool)
+					|| node.language != .v) {
+					s = s[1..]
+				}
 			}
-			f.write_string(s)
+			s = util.no_cur_mod(s, cur_mod)
+			for mod, alias in m2a {
+				s = s.replace(mod, alias)
+			}
+			if should_add_type {
+				if !is_type_only {
+					f.write_string(' ')
+				}
+				if node.is_variadic && is_last_arg {
+					f.write_string('...')
+				}
+				f.write_string(s)
+			}
 		}
 		if !is_last_arg {
 			f.write_string(', ')
@@ -164,12 +179,42 @@ fn stringify_fn_after_name(node &FnDecl, mut f strings.Builder, t &Table, cur_mo
 	}
 	f.write_string(')')
 	if node.return_type != void_type {
-		mut rs := util.no_cur_mod(t.type_to_str(node.return_type), cur_mod)
-		for mod, alias in m2a {
-			rs = rs.replace(mod, alias)
-		}
-		f.write_string(' ' + rs)
+		sreturn_type := util.no_cur_mod(t.type_to_str(node.return_type), cur_mod)
+		short_sreturn_type := shorten_full_name_based_on_aliases(sreturn_type, m2a)
+		f.write_string(' ' + short_sreturn_type)
 	}
+}
+
+struct StringifyModReplacement {
+	mod    string
+	alias  string
+	weight int
+}
+
+fn shorten_full_name_based_on_aliases(input string, m2a map[string]string) string {
+	// Shorten the full names to their aliases, but replace the longer mods first, so that:
+	//   `import user.project`
+	//   `import user.project.routes`
+	// will lead to replacing `user.project.routes` first to `routes`, NOT `user.project.routes` to `project.routes`.
+	// Also take into account the nesting level, so `a.e.c.d` will be shortened before `a.xyz.b`, even though they are the same length.
+	mut replacements := []StringifyModReplacement{cap: m2a.len}
+	for mod, alias in m2a {
+		if input.contains(mod) {
+			replacements << StringifyModReplacement{
+				mod: mod
+				alias: alias
+				weight: mod.count('.') * 100 + mod.len
+			}
+		}
+	}
+	mut res := input.clone()
+	if replacements.len > 0 {
+		replacements.sort(a.weight > b.weight)
+		for r in replacements {
+			res = res.replace(r.mod, r.alias)
+		}
+	}
+	return res
 }
 
 // Expressions in string interpolations may have to be put in braces if they

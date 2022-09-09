@@ -7,7 +7,7 @@ import v.ast
 
 fn (mut g Gen) need_tmp_var_in_if(node ast.IfExpr) bool {
 	if node.is_expr && g.inside_ternary == 0 {
-		if g.is_autofree || node.typ.has_flag(.optional) {
+		if g.is_autofree || node.typ.has_flag(.optional) || node.typ.has_flag(.result) {
 			return true
 		}
 		for branch in node.branches {
@@ -31,34 +31,96 @@ fn (mut g Gen) need_tmp_var_in_expr(expr ast.Expr) bool {
 	if is_noreturn_callexpr(expr) {
 		return true
 	}
-	if expr is ast.MatchExpr {
-		return true
-	}
-	if expr is ast.CallExpr {
-		if expr.is_method {
-			left_sym := g.table.sym(expr.receiver_type)
-			if left_sym.kind in [.array, .array_fixed, .map] {
+	match expr {
+		ast.IfExpr {
+			if g.need_tmp_var_in_if(expr) {
 				return true
 			}
 		}
-		if expr.or_block.kind != .absent {
+		ast.MatchExpr {
 			return true
 		}
-	}
-	if expr is ast.CastExpr {
-		return g.need_tmp_var_in_expr(expr.expr)
-	}
-	if expr is ast.ParExpr {
-		return g.need_tmp_var_in_expr(expr.expr)
-	}
-	if expr is ast.ConcatExpr {
-		for val in expr.vals {
-			if val is ast.CallExpr {
-				if val.return_type.has_flag(.optional) {
+		ast.CallExpr {
+			if expr.is_method {
+				left_sym := g.table.sym(expr.receiver_type)
+				if left_sym.kind in [.array, .array_fixed, .map] {
+					return true
+				}
+			}
+			if expr.or_block.kind != .absent {
+				return true
+			}
+			for arg in expr.args {
+				if g.need_tmp_var_in_expr(arg.expr) {
 					return true
 				}
 			}
 		}
+		ast.CastExpr {
+			return g.need_tmp_var_in_expr(expr.expr)
+		}
+		ast.ParExpr {
+			return g.need_tmp_var_in_expr(expr.expr)
+		}
+		ast.ConcatExpr {
+			for val in expr.vals {
+				if val is ast.CallExpr {
+					if val.return_type.has_flag(.optional) {
+						return true
+					}
+				}
+			}
+		}
+		ast.IndexExpr {
+			if expr.or_expr.kind != .absent {
+				return true
+			}
+			if g.need_tmp_var_in_expr(expr.index) {
+				return true
+			}
+		}
+		ast.ArrayInit {
+			if g.need_tmp_var_in_expr(expr.len_expr) {
+				return true
+			}
+			if g.need_tmp_var_in_expr(expr.cap_expr) {
+				return true
+			}
+			if g.need_tmp_var_in_expr(expr.default_expr) {
+				return true
+			}
+			for elem_expr in expr.exprs {
+				if g.need_tmp_var_in_expr(elem_expr) {
+					return true
+				}
+			}
+		}
+		ast.MapInit {
+			for key in expr.keys {
+				if g.need_tmp_var_in_expr(key) {
+					return true
+				}
+			}
+			for val in expr.vals {
+				if g.need_tmp_var_in_expr(val) {
+					return true
+				}
+			}
+		}
+		ast.StructInit {
+			if g.need_tmp_var_in_expr(expr.update_expr) {
+				return true
+			}
+			for field in expr.fields {
+				if g.need_tmp_var_in_expr(field.expr) {
+					return true
+				}
+			}
+		}
+		ast.SelectorExpr {
+			return g.need_tmp_var_in_expr(expr.expr)
+		}
+		else {}
 	}
 	return false
 }
@@ -80,6 +142,8 @@ fn (mut g Gen) if_expr(node ast.IfExpr) {
 	if needs_tmp_var {
 		if node.typ.has_flag(.optional) {
 			g.inside_if_optional = true
+		} else if node.typ.has_flag(.result) {
+			g.inside_if_result = true
 		}
 		styp := g.typ(node.typ)
 		cur_line = g.go_before_stmt(0)
@@ -263,5 +327,7 @@ fn (mut g Gen) if_expr(node ast.IfExpr) {
 	}
 	if node.typ.has_flag(.optional) {
 		g.inside_if_optional = false
+	} else if node.typ.has_flag(.result) {
+		g.inside_if_result = false
 	}
 }
