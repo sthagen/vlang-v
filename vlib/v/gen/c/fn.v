@@ -1342,7 +1342,16 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 			if obj := node.scope.find(node.name) {
 				match obj {
 					ast.Var {
-						if obj.smartcasts.len > 0 {
+						// Temp fix generate call fn error when the struct type of sumtype
+						// has the fn field and is same to the struct name.
+						mut is_cast_needed := true
+						if node.left_type != 0 {
+							left_sym := g.table.sym(node.left_type)
+							if left_sym.kind == .struct_ && node.name == obj.name {
+								is_cast_needed = false
+							}
+						}
+						if obj.smartcasts.len > 0 && is_cast_needed {
 							for _ in obj.smartcasts {
 								g.write('(*')
 							}
@@ -1585,6 +1594,23 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 		if is_variadic && i == expected_types.len - 1 {
 			break
 		}
+		if arg.expr is ast.Ident {
+			if arg.expr.obj is ast.Var {
+				if arg.expr.obj.smartcasts.len > 0 {
+					exp_sym := g.table.sym(expected_types[i])
+					orig_sym := g.table.sym(arg.expr.obj.orig_type)
+					if orig_sym.kind != .interface_ && (exp_sym.kind != .sum_type
+						|| (exp_sym.kind == .sum_type
+						&& expected_types[i] != arg.expr.obj.orig_type)) {
+						expected_types[i] = g.unwrap_generic(arg.expr.obj.smartcasts.last())
+						cast_sym := g.table.sym(expected_types[i])
+						if cast_sym.info is ast.Aggregate {
+							expected_types[i] = cast_sym.info.types[g.aggregate_type_idx]
+						}
+					}
+				}
+			}
+		}
 		use_tmp_var_autofree := g.is_autofree && arg.typ == ast.string_type && arg.is_tmp_autofree
 			&& !g.inside_const && !g.is_builtin_mod
 		// g.write('/* af=$arg.is_tmp_autofree */')
@@ -1709,7 +1735,7 @@ fn (mut g Gen) go_expr(node ast.GoExpr) {
 	}
 	if expr.is_method {
 		receiver_sym := g.table.sym(expr.receiver_type)
-		name = receiver_sym.name + '_' + name
+		name = receiver_sym.cname + '_' + name
 	} else if mut expr.left is ast.AnonFn {
 		if expr.left.inherited_vars.len > 0 {
 			fn_var := g.fn_var_signature(expr.left.decl.return_type, expr.left.decl.params.map(it.typ),

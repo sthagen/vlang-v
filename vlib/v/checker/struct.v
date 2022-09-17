@@ -244,7 +244,7 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 				&& node.generic_types.len != struct_sym.info.generic_types.len {
 				c.error('generic struct init expects $struct_sym.info.generic_types.len generic parameter, but got $node.generic_types.len',
 					node.pos)
-			} else if node.generic_types.len > 0 && !isnil(c.table.cur_fn) {
+			} else if node.generic_types.len > 0 && c.table.cur_fn != unsafe { nil } {
 				for gtyp in node.generic_types {
 					gtyp_name := c.table.sym(gtyp).name
 					if gtyp_name !in c.table.cur_fn.generic_names {
@@ -276,7 +276,7 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 		}
 	}
 	// register generic struct type when current fn is generic fn
-	if !isnil(c.table.cur_fn) && c.table.cur_fn.generic_names.len > 0 {
+	if c.table.cur_fn != unsafe { nil } && c.table.cur_fn.generic_names.len > 0 {
 		c.table.unwrap_generic_type(node.typ, c.table.cur_fn.generic_names, c.table.cur_concrete_types)
 	}
 	c.ensure_type_exists(node.typ, node.pos) or {}
@@ -321,7 +321,8 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 				'it cannot be initialized with `$type_sym.name{}`', node.pos)
 		}
 	}
-	if type_sym.name.len == 1 && !isnil(c.table.cur_fn) && c.table.cur_fn.generic_names.len == 0 {
+	if type_sym.name.len == 1 && c.table.cur_fn != unsafe { nil }
+		&& c.table.cur_fn.generic_names.len == 0 {
 		c.error('unknown struct `$type_sym.name`', node.pos)
 		return ast.void_type
 	}
@@ -481,12 +482,23 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 				}
 			}
 			// Check uninitialized refs/sum types
-			for i, field in info.fields {
+			// The variable `fields` contains two parts, the first part is the same as info.fields,
+			// and the second part is all fields embedded in the structure
+			// If the return value data composition form in `c.table.struct_fields()` is modified,
+			// need to modify here accordingly.
+			fields := c.table.struct_fields(type_sym)
+			mut checked_structs := []ast.Type{}
+			for i, field in fields {
 				if field.name in inited_fields {
 					continue
 				}
+				sym := c.table.sym(field.typ)
+				if field.name.len > 0 && field.name[0].is_capital() && sym.info is ast.Struct
+					&& sym.language == .v {
+					continue
+				}
 				if field.has_default_expr {
-					if field.default_expr_typ == 0 {
+					if i < info.fields.len && field.default_expr_typ == 0 {
 						if field.default_expr is ast.StructInit {
 							idx := c.table.find_type_idx(field.default_expr.typ_str)
 							if idx != 0 {
@@ -502,11 +514,15 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 				}
 				if field.typ.is_ptr() && !field.typ.has_flag(.shared_f) && !node.has_update_expr
 					&& !c.pref.translated && !c.file.is_translated {
-					c.error('reference field `${type_sym.name}.$field.name` must be initialized',
+					c.warn('reference field `${type_sym.name}.$field.name` must be initialized',
 						node.pos)
+					continue
+				}
+				if sym.kind == .struct_ && !(sym.info as ast.Struct).is_typedef {
+					c.check_ref_fields_initialized(sym, mut checked_structs, '${type_sym.name}.$field.name',
+						node)
 				}
 				// Do not allow empty uninitialized interfaces
-				sym := c.table.sym(field.typ)
 				mut has_noinit := false
 				for attr in field.attrs {
 					if attr.name == 'noinit' {
@@ -548,7 +564,7 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 	if node.has_update_expr {
 		update_type := c.expr(node.update_expr)
 		node.update_expr_type = update_type
-		if c.table.type_kind(update_type) != .struct_ {
+		if c.table.sym(update_type).kind != .struct_ {
 			s := c.table.type_to_str(update_type)
 			c.error('expected struct, found `$s`', node.update_expr.pos())
 		} else if update_type != node.typ {
@@ -564,4 +580,33 @@ pub fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 		}
 	}
 	return node.typ
+}
+
+// Recursively check whether the struct type field is initialized
+fn (mut c Checker) check_ref_fields_initialized(struct_sym &ast.TypeSymbol, mut checked_structs []ast.Type, linked_name string, node &ast.StructInit) {
+	if c.pref.translated || c.file.is_translated {
+		return
+	}
+	fields := c.table.struct_fields(struct_sym)
+	for field in fields {
+		sym := c.table.sym(field.typ)
+		if field.name.len > 0 && field.name[0].is_capital() && sym.info is ast.Struct
+			&& sym.language == .v {
+			continue
+		}
+		if field.typ.is_ptr() && !field.typ.has_flag(.shared_f) && !field.has_default_expr {
+			c.warn('reference field `${linked_name}.$field.name` must be initialized',
+				node.pos)
+			continue
+		}
+		if sym.kind == .struct_ {
+			info := sym.info as ast.Struct
+			if info.is_typedef || field.typ in checked_structs {
+				continue
+			}
+			checked_structs << field.typ
+			c.check_ref_fields_initialized(sym, mut checked_structs, '${linked_name}.$field.name',
+				node)
+		}
+	}
 }

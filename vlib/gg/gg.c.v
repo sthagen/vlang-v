@@ -123,7 +123,7 @@ pub mut:
 	timage_pip  sgl.Pipeline
 	config      Config
 	user_data   voidptr
-	ft          &FT
+	ft          &FT = unsafe { nil }
 	font_inited bool
 	ui_mode     bool // do not redraw everything 60 times/second, but only when the user requests
 	frame       u64  // the current frame counted from the start of the application; always increasing
@@ -421,7 +421,7 @@ pub fn new_context(cfg Config) &Context {
 		ui_mode: cfg.ui_mode
 		native_rendering: cfg.native_rendering
 	}
-	if isnil(cfg.user_data) {
+	if cfg.user_data == unsafe { nil } {
 		ctx.user_data = ctx
 	}
 	ctx.set_bg_color(cfg.bg_color)

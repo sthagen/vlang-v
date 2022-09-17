@@ -1,0 +1,24 @@
+struct ContainsRef {
+	a &int = unsafe { nil }
+	b &int
+}
+
+struct Outer {
+	c ContainsRef
+}
+
+struct Ref {}
+
+struct EmbedStruct {
+	ref1 &Ref = unsafe { nil }
+	ref2 &Ref
+}
+
+struct Struct {
+	EmbedStruct
+}
+
+fn main() {
+	_ := Outer{}
+	_ := Struct{}
+}
