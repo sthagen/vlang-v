@@ -358,10 +358,16 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 	}
 	node.source_file = c.file
 
-	if c.table.known_fn(node.name) && node.name != 'main.main' {
+	if node.name in c.table.fns && node.name != 'main.main' {
 		mut dep_names := []string{}
 		for stmt in node.stmts {
-			dep_names << c.table.dependent_names_in_stmt(stmt)
+			dnames := c.table.dependent_names_in_stmt(stmt)
+			for dname in dnames {
+				if dname in dep_names {
+					continue
+				}
+				dep_names << dname
+			}
 		}
 		if dep_names.len > 0 {
 			c.table.fns[node.name].dep_names = dep_names
@@ -460,13 +466,24 @@ pub fn (mut c Checker) call_expr(mut node ast.CallExpr) ast.Type {
 	c.expected_or_type = node.return_type.clear_flag(.optional)
 	c.stmts_ending_with_expression(node.or_block.stmts)
 	c.expected_or_type = ast.void_type
-	if node.or_block.kind == .propagate_option && c.table.cur_fn != unsafe { nil }
-		&& !c.table.cur_fn.return_type.has_flag(.optional) && !c.inside_const {
-		if !c.table.cur_fn.is_main {
+
+	if !c.inside_const && c.table.cur_fn != unsafe { nil } && !c.table.cur_fn.is_main
+		&& !c.table.cur_fn.is_test {
+		// TODO: use just `if node.or_block.kind == .propagate_result && !c.table.cur_fn.return_type.has_flag(.result) {` after the deprecation for ?!Type
+		if node.or_block.kind == .propagate_result && !c.table.cur_fn.return_type.has_flag(.result)
+			&& !c.table.cur_fn.return_type.has_flag(.optional) {
+			c.add_instruction_for_result_type()
+			c.error('to propagate the result call, `$c.table.cur_fn.name` must return a result',
+				node.or_block.pos)
+		}
+		if node.or_block.kind == .propagate_option
+			&& !c.table.cur_fn.return_type.has_flag(.optional) {
+			c.add_instruction_for_optional_type()
 			c.error('to propagate the optional call, `$c.table.cur_fn.name` must return an optional',
 				node.or_block.pos)
 		}
 	}
+
 	return typ
 }
 
@@ -1926,6 +1943,12 @@ fn (mut c Checker) check_map_and_filter(is_map bool, elem_typ ast.Type, node ast
 		ast.StringLiteral, ast.StringInterLiteral {
 			if !is_map {
 				c.error('type mismatch, should use e.g. `${node.name}(it > 2)`', arg_expr.pos)
+			}
+		}
+		ast.InfixExpr {
+			if arg_expr.op == .left_shift && arg_expr.is_stmt
+				&& c.table.final_sym(arg_expr.left_type).kind == .array {
+				c.error('array append cannot be used in an expression', arg_expr.pos)
 			}
 		}
 		else {}

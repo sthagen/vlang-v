@@ -1,7 +1,7 @@
 module websocket
 
 import net
-import net.openssl
+import net.ssl
 import log
 import time
 import rand
@@ -9,7 +9,9 @@ import rand
 // Server represents a websocket server connection
 pub struct Server {
 mut:
-	logger                  &log.Logger      = unsafe { nil } // logger used to log
+	logger &log.Logger = &log.Logger(&log.Log{
+	level: .info
+})
 	ls                      &net.TcpListener = unsafe { nil } // listener used to get incoming connection to socket
 	accept_client_callbacks []AcceptClientFn      // accept client callback functions
 	message_callbacks       []MessageEventHandler // new message callback functions
@@ -167,7 +169,7 @@ fn (mut s Server) accept_new_client() ?&Client {
 	c := &Client{
 		is_server: true
 		conn: new_conn
-		ssl_conn: openssl.new_ssl_conn()
+		ssl_conn: ssl.new_ssl_conn()?
 		logger: s.logger
 		state: .open
 		last_pong_ut: time.now().unix

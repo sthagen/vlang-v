@@ -115,6 +115,7 @@ To do so, run the command `v up`.
     * [sizeof and __offsetof](#sizeof-and-__offsetof)
     * [Calling C from V](#calling-c-from-v)
     * [Calling V from C](#calling-v-from-c)
+    * [Export to shared library](#export-to-shared-library)
 	* [Atomics](#atomics)
 	* [Global Variables](#global-variables)
     * [Debugging](#debugging)
@@ -127,6 +128,7 @@ To do so, run the command `v up`.
     * [Hot code reloading](#hot-code-reloading)
     * [Cross compilation](#cross-compilation)
     * [Cross-platform shell scripts in V](#cross-platform-shell-scripts-in-v)
+	* [Vsh scripts with no extension](#vsh-scripts-with-no-extension)
     * [Attributes](#attributes)
     * [Goto](#goto)
 * [Appendices](#appendices)
@@ -138,7 +140,7 @@ To do so, run the command `v up`.
 
 <!--
 NB: there are several special keywords, which you can put after the code fences for v:
-compile, cgen, live, ignore, failcompile, oksyntax, badsyntax, wip, nofmt
+compile, cgen, live, ignore, failcompile, okfmt, oksyntax, badsyntax, wip, nofmt
 For more details, do: `v check-md`
 -->
 
@@ -640,6 +642,8 @@ age := 12
 println('age = $age')
 ```
 
+See all methods of [string](https://modules.vlang.io/index.html#string)
+
 ### Runes
 
 A `rune` represents a single Unicode character and is an alias for `u32`. To denote them, use `
@@ -1023,6 +1027,8 @@ There are further built-in methods for arrays:
 * `a.join(joiner)` concatenates an array of strings into one string
   using `joiner` string as a separator
 
+See all methods of [array](https://modules.vlang.io/index.html#array)
+
 See also [vlib/arrays](https://modules.vlang.io/arrays.html).
 
 ##### Sorting Arrays
@@ -1298,6 +1304,8 @@ print(m)
 
 Maps are ordered by insertion, like dictionaries in Python. The order is a
 guaranteed language feature. This may change in the future.
+
+See all methods of [map](https://modules.vlang.io/index.html#map)
 
 ## Module imports
 
@@ -2136,6 +2144,52 @@ book := Book{
 }
 assert book.author.name == 'Samantha Black'
 assert book.author.age == 24
+```
+
+### `[noinit]` structs
+
+V supports `[noinit]` structs, which are structs that cannot be initialised outside the module
+they are defined in. They are either meant to be used internally or they can be used externally
+through _factory functions_.
+
+For an example, consider the following source in a directory `sample`:
+
+```v oksyntax
+module sample
+
+[noinit]
+pub struct Information {
+pub:
+	data string
+}
+
+pub fn new_information(data string) !Information {
+	if data.len == 0 || data.len > 100 {
+		return error('data must be between 1 and 100 characters')
+	}
+	return Information{
+		data: data
+	}
+}
+```
+
+Note that `new_information` is a _factory_ function. Now when we want to use this struct
+outside the module:
+
+```v okfmt
+import sample
+
+fn main() {
+	// This doesn't work when the [noinit] attribute is present:
+	// info := sample.Information{
+	// 	data: 'Sample information.'
+	// }
+
+	// Use this instead:
+	info := sample.new_information('Sample information.')!
+
+	println(info)
+}
 ```
 
 ### Methods
@@ -4960,7 +5014,13 @@ fn main() {
 
 ## Calling V from C
 
-Since V can compile to C, calling V code from C is very easy.
+Since V can compile to C, calling V code from C is very easy, once you know how.
+
+Use `v -o file.c your_file.v` to generate a C file, corresponding to the V code.
+
+More details in [call_v_from_c example](../examples/call_v_from_c).
+
+## Export to shared library
 
 By default all V functions have the following naming scheme in C: `[module name]__[fn_name]`.
 
@@ -5757,8 +5817,11 @@ For more examples, see [github.com/vlang/v/tree/master/vlib/v/tests/assembly/asm
 
 ## Translating C to V
 
-V can translate your C code to human readable V code and generate V wrappers on top of C libraries.
+V can translate your C code to human readable V code, and generating V wrappers
+on top of C libraries.
 
+C2V currently uses Clang's AST to generate V, so to translate a C file to V
+you need to have Clang installed on your machine.
 
 Let's create a simple program `test.c` first:
 
@@ -5946,6 +6009,18 @@ Or just run it more like a traditional Bash script:
 On Unix-like platforms, the file can be run directly after making it executable using `chmod +x`:
 `./deploy.vsh`
 
+## Vsh scripts with no extension
+
+Whilst V does normally not allow vsh scripts without the designated file extension, there is a way
+to circumvent this rule and have a file with a fully custom name and shebang. Whilst this feature
+exists it is only recommended for specific usecases like scripts that will be put in the path and
+should **not** be used for things like build or deploy scripts. To access this feature start the
+file with `#!/usr/bin/env -S v -raw-vsh-tmp-prefix tmp` where `tmp` is the prefix for
+the built executable. This will run in crun mode so it will only rebuild if changes to the script
+were made and keep the binary as `tmp.<scriptfilename>`. **Caution**: if this filename already
+exists the file will be overriden. If you want to rebuild each time and not keep this binary instead
+use `#!/usr/bin/env -S v -raw-vsh-tmp-prefix tmp run`.
+
 ## Attributes
 
 V has several attributes that modify the behavior of functions and structs.
@@ -6100,9 +6175,11 @@ fn C.DefWindowProc(hwnd int, msg int, lparam int, wparam int)
 type FastFn = fn (int) bool
 
 // Windows only:
-// If a default graphics library is imported (ex. gg, ui), then the graphical window takes
-// priority and no console window is created, effectively disabling println() statements.
-// Use to explicitly create console window. Valid before main() only.
+// Without this attribute all graphical apps will have the following behavior on Windows:
+// If run from a console or terminal; keep the terminal open so all (e)println statements can be viewed.
+// If run from e.g. Explorer, by double-click; app is opened, but no terminal is opened, and no (e)println output can be seen.
+// Use it to force-open a terminal to view output in, even if the app is started from Explorer.
+// Valid before main() only.
 [console]
 fn main() {
 }

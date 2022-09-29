@@ -128,7 +128,7 @@ mut:
 	inside_comptime_for_field bool
 	inside_cast_in_heap       int // inside cast to interface type in heap (resolve recursive calls)
 	inside_const              bool
-	inside_const_optional     bool
+	inside_const_opt_or_res   bool
 	inside_lambda             bool
 	loop_depth                int
 	ternary_names             map[string]string
@@ -279,7 +279,8 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) string {
 		inner_loop: &ast.empty_stmt
 		field_data_type: ast.Type(table.find_type_idx('FieldData'))
 		is_cc_msvc: pref.ccompiler == 'msvc'
-		use_segfault_handler: !('no_segfault_handler' in pref.compile_defines || pref.os == .wasm32)
+		use_segfault_handler: !('no_segfault_handler' in pref.compile_defines
+			|| pref.os in [.wasm32, .wasm32_emscripten])
 	}
 	// anon fn may include assert and thus this needs
 	// to be included before any test contents are written
@@ -4323,32 +4324,26 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 		for i, expr in node.exprs {
 			// Check if we are dealing with a multi return and handle it seperately
 			if g.expr_is_multi_return_call(expr) {
-				c := expr as ast.CallExpr
-				expr_sym := g.table.sym(c.return_type)
-				// Create a tmp for this call
+				call_expr := expr as ast.CallExpr
+				expr_sym := g.table.sym(call_expr.return_type)
 				mut tmp := g.new_tmp_var()
-				if !c.return_type.has_flag(.optional) {
-					s := g.go_before_stmt(0)
-					expr_styp := g.typ(c.return_type)
+				if !call_expr.return_type.has_flag(.optional)
+					&& !call_expr.return_type.has_flag(.result) {
+					line := g.go_before_stmt(0)
+					expr_styp := g.typ(call_expr.return_type)
 					g.write('$expr_styp $tmp=')
 					g.expr(expr)
 					g.writeln(';')
 					multi_unpack += g.go_before_stmt(0)
-					g.write(s)
+					g.write(line)
 				} else {
-					s := g.go_before_stmt(0)
-					// TODO
-					// I (emily) am sorry for doing this
-					// I cant find another way to do this so right now
-					// this will have to do.
+					line := g.go_before_stmt(0)
 					g.tmp_count--
 					g.expr(expr)
 					multi_unpack += g.go_before_stmt(0)
-					g.write(s)
-					// modify tmp so that it is the opt deref
-					// TODO copy-paste from cgen.v:2397
-					expr_styp := g.base_type(c.return_type)
-					tmp = ('/*opt*/(*($expr_styp*)${tmp}.data)')
+					g.write(line)
+					expr_styp := g.base_type(call_expr.return_type)
+					tmp = ('(*($expr_styp*)${tmp}.data)')
 				}
 				expr_types := expr_sym.mr_info().types
 				for j, _ in expr_types {
@@ -4569,14 +4564,15 @@ fn (mut g Gen) const_decl(node ast.ConstDecl) {
 				}
 			}
 			ast.CallExpr {
-				if field.expr.return_type.has_flag(.optional) {
-					g.inside_const_optional = true
-					unwrap_option := field.expr.or_block.kind != .absent
-					g.const_decl_init_later(field.mod, name, field.expr, field.typ, unwrap_option)
+				if field.expr.return_type.has_flag(.optional)
+					|| field.expr.return_type.has_flag(.result) {
+					g.inside_const_opt_or_res = true
+					unwrap_opt_res := field.expr.or_block.kind != .absent
+					g.const_decl_init_later(field.mod, name, field.expr, field.typ, unwrap_opt_res)
 				} else {
 					g.const_decl_init_later(field.mod, name, field.expr, field.typ, false)
 				}
-				g.inside_const_optional = false
+				g.inside_const_opt_or_res = false
 			}
 			else {
 				// Note: -usecache uses prebuilt modules, each compiled with:
@@ -5107,19 +5103,19 @@ fn (mut g Gen) write_types(symbols []&ast.TypeSymbol) {
 				// ast.Alias { TODO
 			}
 			ast.Thread {
-				if g.pref.os == .windows {
-					if name == '__v_thread' {
-						g.thread_definitions.writeln('typedef HANDLE $name;')
+				if !g.pref.is_bare && !g.pref.no_builtin {
+					if g.pref.os == .windows {
+						if name == '__v_thread' {
+							g.thread_definitions.writeln('typedef HANDLE $name;')
+						} else {
+							// Windows can only return `u32` (no void*) from a thread, so the
+							// V gohandle must maintain a pointer to the return value
+							g.thread_definitions.writeln('typedef struct {')
+							g.thread_definitions.writeln('\tvoid* ret_ptr;')
+							g.thread_definitions.writeln('\tHANDLE handle;')
+							g.thread_definitions.writeln('} $name;')
+						}
 					} else {
-						// Windows can only return `u32` (no void*) from a thread, so the
-						// V gohandle must maintain a pointer to the return value
-						g.thread_definitions.writeln('typedef struct {')
-						g.thread_definitions.writeln('\tvoid* ret_ptr;')
-						g.thread_definitions.writeln('\tHANDLE handle;')
-						g.thread_definitions.writeln('} $name;')
-					}
-				} else {
-					if !g.pref.is_bare && !g.pref.no_builtin {
 						g.thread_definitions.writeln('typedef pthread_t $name;')
 					}
 				}

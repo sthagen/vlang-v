@@ -31,13 +31,12 @@ mut:
 	eval_func_lines []string // same line of the `VSTARTUP` file, but used to test fn type
 }
 
-const is_stdin_a_pipe = (os.is_atty(0) == 0)
-
-const vexe = os.getenv('VEXE')
-
-const vstartup = os.getenv('VSTARTUP')
-
-const repl_folder = os.join_path(os.temp_dir(), 'v', 'repl')
+const (
+	is_stdin_a_pipe = os.is_atty(0) == 0
+	vexe            = os.getenv('VEXE')
+	vstartup        = os.getenv('VSTARTUP')
+	repl_folder     = os.join_path(os.temp_dir(), 'v', 'repl')
+)
 
 enum FnType {
 	@none
@@ -293,14 +292,13 @@ fn run_repl(workdir string, vrepl_prefix string) int {
 		print('\n')
 		print_output(result.output)
 	}
-	file := os.join_path(workdir, '.${vrepl_prefix}vrepl.v')
 	temp_file := os.join_path(workdir, '.${vrepl_prefix}vrepl_temp.v')
 	mut prompt := '>>> '
 	defer {
 		if !is_stdin_a_pipe {
 			println('')
 		}
-		cleanup_files([file, temp_file])
+		cleanup_files(temp_file)
 	}
 	mut r := new_repl(workdir)
 	for {
@@ -390,7 +388,10 @@ fn run_repl(workdir string, vrepl_prefix string) int {
 			source_code := r.current_source_code(false, false) + '\n$r.line\n'
 			os.write_file(temp_file, source_code) or { panic(err) }
 			s := repl_run_vfile(temp_file) or { return 1 }
-			print_output(s.output)
+			if s.output.len > r.last_output.len {
+				cur_line_output := s.output[r.last_output.len..]
+				print_output(cur_line_output)
+			}
 		} else {
 			mut temp_line := r.line
 			func_call, fntype := r.function_call(r.line)
@@ -441,7 +442,10 @@ fn run_repl(workdir string, vrepl_prefix string) int {
 				source_code := r.current_source_code(false, false) + '\n$temp_line\n'
 				os.write_file(temp_file, source_code) or { panic(err) }
 				s := repl_run_vfile(temp_file) or { return 1 }
-				print_output(s.output)
+				if s.output.len > r.last_output.len {
+					cur_line_output := s.output[r.last_output.len..]
+					print_output(cur_line_output)
+				}
 				continue
 			}
 			mut temp_source_code := ''
@@ -488,7 +492,9 @@ fn run_repl(workdir string, vrepl_prefix string) int {
 			}
 			if s.output.len > r.last_output.len {
 				len := r.last_output.len
-				r.last_output = s.output.clone()
+				if s.exit_code == 0 {
+					r.last_output = s.output.clone()
+				}
 				cur_line_output := s.output[len..]
 				print_output(cur_line_output)
 			}
@@ -509,11 +515,6 @@ fn convert_output(os_result string) string {
 				return content
 			}
 			content += endline_if_missed(sline[idx + 1..])
-		} else if line.contains('.vrepl.v:') {
-			// Ensure that .vrepl.v: is at the start, ignore the path
-			// This is needed to have stable .repl tests.
-			idx := line.index('.vrepl.v:') or { panic(err) }
-			content += endline_if_missed(line[idx..])
 		} else {
 			content += endline_if_missed(line)
 		}
@@ -562,18 +563,16 @@ fn (mut r Repl) get_one_line(prompt string) ?string {
 	return rline
 }
 
-fn cleanup_files(files []string) {
-	for file in files {
-		os.rm(file) or {}
-		$if windows {
-			os.rm(file[..file.len - 2] + '.exe') or {}
-			$if msvc {
-				os.rm(file[..file.len - 2] + '.ilk') or {}
-				os.rm(file[..file.len - 2] + '.pdb') or {}
-			}
-		} $else {
-			os.rm(file[..file.len - 2]) or {}
+fn cleanup_files(file string) {
+	os.rm(file) or {}
+	$if windows {
+		os.rm(file[..file.len - 2] + '.exe') or {}
+		$if msvc {
+			os.rm(file[..file.len - 2] + '.ilk') or {}
+			os.rm(file[..file.len - 2] + '.pdb') or {}
 		}
+	} $else {
+		os.rm(file[..file.len - 2]) or {}
 	}
 }
 

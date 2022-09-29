@@ -671,7 +671,7 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 		if unwrapped_typ == ast.void_type {
 			g.write('\n $cur_line')
 		} else {
-			if !g.inside_const_optional {
+			if !g.inside_const_opt_or_res {
 				g.write('\n $cur_line (*($unwrapped_styp*)${tmp_opt}.data)')
 			} else {
 				g.write('\n $cur_line $tmp_opt')
@@ -715,7 +715,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	}
 	left_type := g.unwrap_generic(node.left_type)
 	mut unwrapped_rec_type := node.receiver_type
-	if unsafe { g.cur_fn != 0 } && g.cur_fn.generic_names.len > 0 { // in generic fn
+	if g.cur_fn != unsafe { nil } && g.cur_fn.generic_names.len > 0 { // in generic fn
 		unwrapped_rec_type = g.unwrap_generic(node.receiver_type)
 	} else { // in non-generic fn
 		sym := g.table.sym(node.receiver_type)
@@ -1086,6 +1086,16 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			g.write('(map[]){')
 			g.expr(node.left)
 			g.write('}[0]')
+		} else if node.from_embed_types.len > 0 {
+			n_ptr := node.left_type.nr_muls() - 1
+			if n_ptr > 0 {
+				g.write('(')
+				g.write('*'.repeat(n_ptr))
+				g.expr(node.left)
+				g.write(')')
+			} else {
+				g.expr(node.left)
+			}
 		} else {
 			g.expr(node.left)
 		}
