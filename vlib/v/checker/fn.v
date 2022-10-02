@@ -855,6 +855,7 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 		c.fail_if_unreadable(arg.expr, arg.typ, 'argument to print')
 		c.inside_println_arg = false
 		node.return_type = ast.void_type
+		c.set_node_expected_arg_types(mut node, func)
 		/*
 		// TODO: optimize `struct T{} fn (t &T) str() string {return 'abc'} mut a := []&T{} a << &T{} println(a[0])`
 		// It currently generates:
@@ -900,18 +901,28 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 		}
 		if func.is_variadic && i >= func.params.len - 1 {
 			param_sym := c.table.sym(param.typ)
+			mut expected_type := param.typ
 			if param_sym.kind == .array {
 				info := param_sym.array_info()
-				c.expected_type = info.elem_type
+				expected_type = info.elem_type
+				c.expected_type = expected_type
 			}
 			typ := c.expr(call_arg.expr)
-			if i == node.args.len - 1 && c.table.sym(typ).kind == .array
-				&& call_arg.expr !is ast.ArrayDecompose && !param.typ.has_flag(.generic)
-				&& c.expected_type != typ {
-				styp := c.table.type_to_str(typ)
-				elem_styp := c.table.type_to_str(c.expected_type)
-				c.error('to pass `$call_arg.expr` ($styp) to `$func.name` (which accepts type `...$elem_styp`), use `...$call_arg.expr`',
-					node.pos)
+			if i == node.args.len - 1 {
+				if c.table.sym(typ).kind == .array && call_arg.expr !is ast.ArrayDecompose
+					&& !param.typ.has_flag(.generic) && expected_type != typ {
+					styp := c.table.type_to_str(typ)
+					elem_styp := c.table.type_to_str(expected_type)
+					c.error('to pass `$call_arg.expr` ($styp) to `$func.name` (which accepts type `...$elem_styp`), use `...$call_arg.expr`',
+						node.pos)
+				} else if call_arg.expr is ast.ArrayDecompose
+					&& c.table.sym(expected_type).kind == .sum_type
+					&& expected_type.idx() != typ.idx() {
+					expected_type_str := c.table.type_to_str(expected_type)
+					got_type_str := c.table.type_to_str(typ)
+					c.error('cannot use `...$got_type_str` as `...$expected_type_str` in argument ${
+						i + 1} to `$fn_name`', call_arg.pos)
+				}
 			}
 		} else {
 			c.expected_type = param.typ
@@ -1435,6 +1446,11 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 		}
 
 		for i, mut arg in node.args {
+			param_idx := if method.is_variadic && i >= method.params.len - 1 {
+				method.params.len - 1
+			} else {
+				i + 1
+			}
 			if i > 0 || exp_arg_typ == ast.Type(0) {
 				exp_arg_typ = if method.is_variadic && i >= method.params.len - 1 {
 					method.params.last().typ
@@ -1449,6 +1465,15 @@ pub fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 
 			mut got_arg_typ := c.check_expr_opt_call(arg.expr, c.expr(arg.expr))
 			node.args[i].typ = got_arg_typ
+			if c.inside_comptime_for_field && method.params[param_idx].typ.has_flag(.generic) {
+				c.table.register_fn_concrete_types(method.fkey(), [
+					c.comptime_fields_default_type,
+				])
+			} else if c.inside_for_in_any_cond && method.params[param_idx].typ.has_flag(.generic) {
+				c.table.register_fn_concrete_types(method.fkey(), [
+					c.for_in_any_val_type,
+				])
+			}
 			if no_type_promotion {
 				if got_arg_typ != exp_arg_typ {
 					c.error('cannot use `${c.table.sym(got_arg_typ).name}` as argument for `$method.name` (`$exp_arg_sym.name` expected)',

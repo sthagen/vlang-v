@@ -584,15 +584,20 @@ fn (mut g Gen) mov_reg_to_var(var Var, reg Register, config VarConfig) {
 					size_str = 'BYTE'
 				}
 				else {
-					ts := g.table.sym(typ.idx())
-					if ts.info is ast.Enum {
-						if is_extended_register {
-							g.write8(0x44)
-						}
-						g.write8(0x89)
-						size_str = 'DWORD'
+					if typ.is_real_pointer() {
+						g.write16(0x8948 + if is_extended_register { 4 } else { 0 })
+						size_str = 'QWORD'
 					} else {
-						g.n_error('unsupported type for mov_reg_to_var')
+						ts := g.table.sym(typ.idx())
+						if ts.info is ast.Enum {
+							if is_extended_register {
+								g.write8(0x44)
+							}
+							g.write8(0x89)
+							size_str = 'DWORD'
+						} else {
+							g.n_error('unsupported type for mov_reg_to_var')
+						}
 					}
 				}
 			}
@@ -807,6 +812,35 @@ fn (mut g Gen) mov_var_to_reg(reg Register, var Var, config VarConfig) {
 	}
 }
 
+fn (mut g Gen) mov_extend_reg(a Register, b Register, typ ast.Type) {
+	size := g.get_type_size(typ)
+	is_signed := !typ.is_real_pointer() && typ.is_signed()
+
+	if size in [1, 2, 4] {
+		if size == 4 && !is_signed {
+			g.write8(0x40 + if int(a) >= int(Register.r8) { 1 } else { 0 } +
+				if int(b) >= int(Register.r8) { 4 } else { 0 })
+			g.write8(0x89)
+		} else {
+			g.write8(0x48 + if int(a) >= int(Register.r8) { 1 } else { 0 } +
+				if int(b) >= int(Register.r8) { 4 } else { 0 })
+			if size in [1, 2] {
+				g.write8(0x0f)
+			}
+			g.write8(match true {
+				size == 1 && is_signed { 0xbe }
+				size == 1 && !is_signed { 0xb6 }
+				size == 2 && is_signed { 0xbf }
+				size == 2 && !is_signed { 0xb7 }
+				else { 0x63 }
+			})
+		}
+		g.write8(0xc0 + int(a) % 8 * 8 + int(b) % 8)
+		instruction := if is_signed { 's' } else { 'z' }
+		g.println('mov${instruction}x $a, $b')
+	}
+}
+
 fn (mut g Gen) call_addr_at(addr int, at i64) i64 {
 	// Need to calculate the difference between current position (position after the e8 call)
 	// and the function to call.
@@ -990,6 +1024,13 @@ fn (mut g Gen) bitxor_reg(a Register, b Register) {
 	g.write8(0x31)
 	g.write8(0xc0 + int(a) % 8 + int(b) % 8 * 8)
 	g.println('xor $a, $b')
+}
+
+fn (mut g Gen) bitnot_reg(a Register) {
+	g.write8(0x48 + if int(a) >= int(Register.r8) { 1 } else { 0 })
+	g.write8(0xf7)
+	g.write8(0xd0 + int(a) % 8)
+	g.println('not $a')
 }
 
 fn (mut g Gen) shl_reg(a Register, b Register) {
@@ -1793,8 +1834,86 @@ fn (mut g Gen) assign_stmt(node ast.AssignStmt) {
 	// `a := 1` | `a,b := 1,2`
 	for i, left in node.left {
 		right := node.right[i]
+		if left !is ast.Ident {
+			g.gen_left_value(left)
+			g.push(.rax)
+			g.expr(right)
+			g.pop(.rdx)
+			typ := node.left_types[i]
+			if typ.is_number() || typ.is_real_pointer() || typ.is_bool() {
+				match node.op {
+					.assign {
+						g.mov_store(.rdx, .rax, match g.get_type_size(typ) {
+							1 { ._8 }
+							2 { ._16 }
+							3 { ._32 }
+							else { ._64 }
+						})
+					}
+					else {
+						g.n_error('Unsupported assign instruction')
+					}
+				}
+			} else {
+				if node.op != .assign {
+					g.n_error('Unsupported assign instruction')
+				}
+				ts := g.table.sym(typ)
+				match ts.kind {
+					.struct_ {
+						size := g.get_type_size(typ)
+						if size >= 8 {
+							for j in 0 .. size / 8 {
+								g.mov_deref(.rcx, .rdx, ast.u64_type_idx)
+								g.mov_store(.rax, .rcx, ._64)
+								offset := if j == size / 8 - 1 && size % 8 != 0 {
+									size % 8
+								} else {
+									8
+								}
+								g.add(.rax, offset)
+								g.add(.rdx, offset)
+							}
+							if size % 8 != 0 {
+								g.mov_deref(.rcx, .rdx, ast.u64_type_idx)
+								g.mov_store(.rax, .rcx, ._64)
+							}
+						} else {
+							mut left_size := if size >= 4 {
+								g.mov_deref(.rcx, .rdx, ast.u32_type_idx)
+								g.mov_store(.rax, .rcx, ._32)
+								if size > 4 {
+									g.add(.rax, 4)
+									g.add(.rdx, 4)
+								}
+								size - 4
+							} else {
+								size
+							}
+							if left_size >= 2 {
+								g.mov_deref(.rcx, .rdx, ast.u16_type_idx)
+								g.mov_store(.rax, .rcx, ._16)
+								if left_size > 2 {
+									g.add(.rax, 2)
+									g.add(.rdx, 2)
+								}
+								left_size -= 2
+							}
+							if left_size == 1 {
+								g.mov_deref(.rcx, .rdx, ast.u8_type_idx)
+								g.mov_store(.rax, .rcx, ._8)
+							}
+						}
+					}
+					.enum_ {
+						g.mov_store(.rdx, .rax, ._32)
+					}
+					else {}
+				}
+			}
+			continue
+		}
 		name := left.str()
-		// if left is ast.Ident {
 		ident := left as ast.Ident
 		match right {
 			ast.IntegerLiteral {
@@ -2135,20 +2254,6 @@ fn (mut g Gen) assign_stmt(node ast.AssignStmt) {
 			ast.GoExpr {
 				g.v_error('threads not implemented for the native backend', node.pos)
 			}
-			ast.CastExpr {
-				g.warning('cast expressions are work in progress', right.pos)
-				match right.typname {
-					'u64' {
-						g.allocate_var(name, 8, right.expr.str().int())
-					}
-					'int' {
-						g.allocate_var(name, 4, right.expr.str().int())
-					}
-					else {
-						g.v_error('unsupported cast type $right.typ', node.pos)
-					}
-				}
-			}
 			ast.FloatLiteral {
 				g.v_error('floating point arithmetic not yet implemented for the native backend',
 					node.pos)
@@ -2212,6 +2317,20 @@ fn (mut g Gen) gen_left_value(node ast.Expr) {
 			offset := g.get_var_offset(node.name)
 			g.lea_var_to_reg(.rax, offset)
 		}
+		ast.SelectorExpr {
+			g.expr(node.expr)
+			offset := g.get_field_offset(node.expr_type, node.field_name)
+			if offset != 0 {
+				g.add(.rax, offset)
+			}
+		}
+		ast.IndexExpr {} // TODO
+		ast.PrefixExpr {
+			if node.op != .mul {
+				g.n_error('Unsupported left value')
+			}
+			g.expr(node.right)
+		}
 		else {
 			g.n_error('Unsupported left value')
 		}
@@ -2219,8 +2338,30 @@ fn (mut g Gen) gen_left_value(node ast.Expr) {
 }
 
 fn (mut g Gen) prefix_expr(node ast.PrefixExpr) {
-	if node.op == .amp {
-		g.gen_left_value(node.right)
+	match node.op {
+		.minus {
+			g.expr(node.right)
+			g.neg(.rax)
+		}
+		.amp {
+			g.gen_left_value(node.right)
+		}
+		.mul {
+			g.expr(node.right)
+			g.mov_deref(.rax, .rax, node.right_type.deref())
+		}
+		.not {
+			g.expr(node.right)
+			g.cmp_zero(.rax)
+			// TODO mov_extend_reg
+			g.mov64(.rax, 0)
+			g.cset(.e)
+		}
+		.bit_not {
+			g.expr(node.right)
+			g.bitnot_reg(.rax)
+		}
+		else {}
 	}
 }
 
@@ -2282,6 +2423,7 @@ fn (mut g Gen) infix_expr(node ast.InfixExpr) {
 		match node.op {
 			.eq, .ne, .gt, .lt, .ge, .le {
 				g.cmp_reg(.rax, .rdx)
+				// TODO mov_extend_reg
 				g.mov64(.rax, 0)
 				g.cset_op(node.op)
 			}
@@ -2961,7 +3103,7 @@ fn (mut g Gen) init_struct(var Var, init ast.StructInit) {
 				g.mov(.rcx, size / 8)
 				g.lea_var_to_reg(.rdi, var.offset)
 				g.write([u8(0xf3), 0x48, 0xab])
-				g.println('; rep stosq')
+				g.println('rep stosq')
 				size % 8
 			} else {
 				size

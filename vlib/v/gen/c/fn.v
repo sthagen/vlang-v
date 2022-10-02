@@ -48,6 +48,15 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 		g.definitions.write_string('#define _v_malloc GC_MALLOC\n')
 		return
 	}
+	if g.pref.parallel_cc {
+		if node.is_anon {
+			g.write('static ')
+			g.definitions.write_string('static ')
+		}
+		if !node.is_anon {
+			g.out_fn_start_pos << g.out.len
+		}
+	}
 	g.gen_attrs(node.attrs)
 	mut skip := false
 	pos := g.out.len
@@ -98,13 +107,18 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 	}
 	g.fn_decl = keep_fn_decl
 	if skip {
-		g.out.go_back_to(pos)
+		g.go_back_to(pos)
 	}
 	if !g.pref.skip_unused {
 		if node.language != .c {
 			g.writeln('')
 		}
 	}
+	// Write the next function into another parallel C file
+	// g.out_idx++
+	// if g.out_idx >= g.out_parallel.len {
+	// g.out_idx = 0
+	//}
 }
 
 fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
@@ -296,6 +310,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 			g.writeln('${fargtypes[i]}* ${fargs[i]} = HEAP(${fargtypes[i]}, _v_toheap_${fargs[i]});')
 		}
 	}
+	g.indent++
 	for defer_stmt in node.defer_stmts {
 		g.writeln('bool ${g.defer_flag_var(defer_stmt)} = false;')
 		for var in defer_stmt.defer_vars {
@@ -319,6 +334,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 			}
 		}
 	}
+	g.indent--
 	if is_live_wrap {
 		// The live function just calls its implementation dual, while ensuring
 		// that the call is wrapped by the mutex lock & unlock calls.
@@ -485,6 +501,7 @@ fn (mut g Gen) gen_anon_fn_decl(mut node ast.AnonFn) {
 	}
 	node.has_gen = true
 	mut builder := strings.new_builder(256)
+	builder.writeln('/*F*/')
 	if node.inherited_vars.len > 0 {
 		ctx_struct := closure_ctx(node.decl)
 		builder.writeln('$ctx_struct {')
@@ -644,6 +661,7 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 	} else {
 		''
 	}
+	// g.write('/*EE line="$cur_line"*/')
 	tmp_opt := if gen_or || gen_keep_alive { g.new_tmp_var() } else { '' }
 	if gen_or || gen_keep_alive {
 		mut ret_typ := node.return_type
@@ -715,6 +733,8 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	}
 	left_type := g.unwrap_generic(node.left_type)
 	mut unwrapped_rec_type := node.receiver_type
+	mut has_comptime_field := false
+	mut for_in_any_var_type := ast.void_type
 	if g.cur_fn != unsafe { nil } && g.cur_fn.generic_names.len > 0 { // in generic fn
 		unwrapped_rec_type = g.unwrap_generic(node.receiver_type)
 	} else { // in non-generic fn
@@ -733,6 +753,31 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			else {}
 		}
 	}
+	if g.inside_comptime_for_field {
+		mut node_ := unsafe { node }
+		for i, mut call_arg in node_.args {
+			if mut call_arg.expr is ast.Ident {
+				if mut call_arg.expr.obj is ast.Var {
+					node_.args[i].typ = call_arg.expr.obj.typ
+					if call_arg.expr.obj.is_comptime_field {
+						has_comptime_field = true
+					}
+				}
+			} else if mut call_arg.expr is ast.ComptimeSelector {
+				has_comptime_field = true
+			}
+		}
+	}
+	if g.inside_for_in_any_cond {
+		for call_arg in node.args {
+			if call_arg.expr is ast.Ident {
+				if call_arg.expr.obj is ast.Var {
+					for_in_any_var_type = call_arg.expr.obj.typ
+				}
+			}
+		}
+	}
+
 	mut typ_sym := g.table.sym(unwrapped_rec_type)
 	// alias type that undefined this method (not include `str`) need to use parent type
 	if typ_sym.kind == .alias && node.name != 'str' && !typ_sym.has_method(node.name) {
@@ -1020,8 +1065,16 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			}
 		}
 	}
-	concrete_types := node.concrete_types.map(g.unwrap_generic(it))
-	name = g.generic_fn_name(concrete_types, name)
+
+	if g.comptime_for_field_type != 0 && g.inside_comptime_for_field && has_comptime_field {
+		name = g.generic_fn_name([g.comptime_for_field_type], name)
+	} else if g.inside_for_in_any_cond && for_in_any_var_type != ast.void_type {
+		name = g.generic_fn_name([for_in_any_var_type], name)
+	} else {
+		concrete_types := node.concrete_types.map(g.unwrap_generic(it))
+		name = g.generic_fn_name(concrete_types, name)
+	}
+
 	// TODO2
 	// g.generate_tmp_autofree_arg_vars(node, name)
 	if !node.receiver_type.is_ptr() && left_type.is_ptr() && node.name == 'str' {
@@ -1141,6 +1194,7 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 	// will be `0` for `foo()`
 	mut is_interface_call := false
 	mut is_selector_call := false
+	mut has_comptime_field := false
 	if node.left_type != 0 {
 		left_sym := g.table.sym(node.left_type)
 		if left_sym.kind == .interface_ {
@@ -1171,7 +1225,12 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 			if mut call_arg.expr is ast.Ident {
 				if mut call_arg.expr.obj is ast.Var {
 					node_.args[i].typ = call_arg.expr.obj.typ
+					if call_arg.expr.obj.is_comptime_field {
+						has_comptime_field = true
+					}
 				}
+			} else if mut call_arg.expr is ast.ComptimeSelector {
+				has_comptime_field = true
 			}
 		}
 	}
@@ -1262,7 +1321,8 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 	if !is_selector_call {
 		if func := g.table.find_fn(node.name) {
 			if func.generic_names.len > 0 {
-				if g.comptime_for_field_type != 0 && g.inside_comptime_for_field {
+				if g.comptime_for_field_type != 0 && g.inside_comptime_for_field
+					&& has_comptime_field {
 					name = g.generic_fn_name([g.comptime_for_field_type], name)
 				} else {
 					concrete_types := node.concrete_types.map(g.unwrap_generic(it))
@@ -1956,7 +2016,7 @@ fn (mut g Gen) go_expr(node ast.GoExpr) {
 		}
 		g.type_definitions.writeln('} $wrapper_struct_name;')
 		thread_ret_type := if g.pref.os == .windows { 'u32' } else { 'void*' }
-		g.type_definitions.writeln('$thread_ret_type ${wrapper_fn_name}($wrapper_struct_name *arg);')
+		g.type_definitions.writeln('$g.static_modifier $thread_ret_type ${wrapper_fn_name}($wrapper_struct_name *arg);')
 		g.gowrappers.writeln('$thread_ret_type ${wrapper_fn_name}($wrapper_struct_name *arg) {')
 		if node.call_expr.return_type != ast.void_type {
 			if g.pref.os == .windows {
@@ -2004,6 +2064,19 @@ fn (mut g Gen) go_expr(node ast.GoExpr) {
 			if has_cast {
 				pos := g.out.len
 				g.call_args(expr)
+				mut call_args_str := g.out.after(pos)
+				g.go_back(call_args_str.len)
+				mut rep_group := []string{cap: 2 * expr.args.len}
+				for i in 0 .. expr.args.len {
+					rep_group << g.expr_string(expr.args[i].expr)
+					rep_group << 'arg->arg${i + 1}'
+				}
+				call_args_str = call_args_str.replace_each(rep_group)
+				g.gowrappers.write_string(call_args_str)
+			} else if expr.name in ['print', 'println', 'eprint', 'eprintln', 'panic']
+				&& expr.args[0].typ != ast.string_type {
+				pos := g.out.len
+				g.gen_expr_to_string(expr.args[0].expr, expr.args[0].typ)
 				mut call_args_str := g.out.after(pos)
 				g.out.go_back(call_args_str.len)
 				mut rep_group := []string{cap: 2 * expr.args.len}
