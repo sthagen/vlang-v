@@ -559,7 +559,10 @@ fn (mut g Gen) fn_decl_params(params []ast.Param, scope &ast.Scope, is_variadic 
 		} else {
 			c_name(param.name)
 		}
-		typ := g.unwrap_generic(param.typ)
+		mut typ := g.unwrap_generic(param.typ)
+		if g.pref.translated && g.file.is_translated && param.typ.has_flag(.variadic) {
+			typ = g.table.sym(typ).array_info().elem_type.set_flag(.variadic)
+		}
 		param_type_sym := g.table.sym(typ)
 		mut param_type_name := g.typ(typ) // util.no_dots(param_type_sym.name)
 		if param_type_sym.kind == .function {
@@ -1094,9 +1097,8 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		}
 	}
 	is_node_name_in_first_last_repeat := node.name in ['first', 'last', 'repeat']
-	if node.receiver_type.is_ptr() && (!left_type.is_ptr() || left_type.has_flag(.variadic)
-		|| node.from_embed_types.len != 0
-		|| (left_type.has_flag(.shared_f) && node.name != 'str')) {
+	if node.receiver_type.is_ptr() && (!left_type.is_ptr()
+		|| node.from_embed_types.len != 0 || (left_type.has_flag(.shared_f) && node.name != 'str')) {
 		// The receiver is a reference, but the caller provided a value
 		// Add `&` automatically.
 		// TODO same logic in call_args()

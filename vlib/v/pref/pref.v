@@ -21,6 +21,7 @@ pub enum AssertFailureMode {
 	default
 	aborts
 	backtraces
+	continues
 }
 
 pub enum GarbageCollectionMode {
@@ -276,10 +277,14 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 					'backtraces' {
 						res.assert_failure_mode = .backtraces
 					}
+					'continues' {
+						res.assert_failure_mode = .continues
+					}
 					else {
 						eprintln('unknown assert mode `-gc $assert_mode`, supported modes are:`')
 						eprintln('  `-assert aborts`     .... calls abort() after assertion failure')
 						eprintln('  `-assert backtraces` .... calls print_backtrace() after assertion failure')
+						eprintln('  `-assert continues`  .... does not call anything, just continue after an assertion failure')
 						exit(1)
 					}
 				}
@@ -994,7 +999,7 @@ pub fn get_host_arch() Arch {
 	if C.__V_architecture <= int(Arch._auto) || C.__V_architecture >= int(Arch._max) {
 		return Arch.amd64
 	}
-	return Arch(C.__V_architecture)
+	return unsafe { Arch(C.__V_architecture) }
 }
 
 fn (mut prefs Preferences) parse_define(define string) {

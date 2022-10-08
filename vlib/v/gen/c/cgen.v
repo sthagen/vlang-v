@@ -941,11 +941,9 @@ fn (mut g Gen) base_type(_t ast.Type) string {
 	if t.has_flag(.shared_f) {
 		styp = g.find_or_register_shared(t, styp)
 	}
-	if !t.has_flag(.variadic) {
-		nr_muls := g.unwrap_generic(t).nr_muls()
-		if nr_muls > 0 {
-			styp += strings.repeat(`*`, nr_muls)
-		}
+	nr_muls := g.unwrap_generic(t).nr_muls()
+	if nr_muls > 0 {
+		styp += strings.repeat(`*`, nr_muls)
 	}
 	return styp
 }
@@ -4717,6 +4715,9 @@ fn (mut g Gen) const_decl_precomputed(mod string, name string, field_name string
 			if g.is_autofree {
 				g.cleanups[mod].writeln('\tstring_free(&$cname);')
 			}
+		}
+		voidptr {
+			g.const_decl_write_precomputed(mod, styp, cname, field_name, '(voidptr)(0x$ct_value)')
 		}
 		ast.EmptyExpr {
 			return false

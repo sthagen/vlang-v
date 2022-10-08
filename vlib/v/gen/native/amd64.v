@@ -866,6 +866,20 @@ fn (mut g Gen) call(addr int) i64 {
 	return c_addr
 }
 
+fn (mut g Gen) extern_call(addr int) {
+	match g.pref.os {
+		.linux {
+			g.write8(0xff)
+			g.write8(0x15)
+			g.write32(0)
+			g.println('call *@GOTPCREL(%rip)')
+		}
+		else {
+			g.n_error('extern calls are not implemented for $g.pref.os')
+		}
+	}
+}
+
 fn (mut g Gen) syscall() {
 	// g.write(0x050f)
 	g.write8(0x0f)
@@ -1687,7 +1701,7 @@ pub fn (mut g Gen) call_fn_amd64(node ast.CallExpr) {
 				1...8 {
 					g.mov_deref(.rax, .rax, ast.i64_type_idx)
 					if args_size[i] != 8 {
-						g.movabs(.rdx, (i64(1) << (args_size[i] * 8)) - 1)
+						g.movabs(.rdx, i64((u64(1) << (args_size[i] * 8)) - 1))
 						g.bitand_reg(.rax, .rdx)
 					}
 				}
@@ -1697,7 +1711,7 @@ pub fn (mut g Gen) call_fn_amd64(node ast.CallExpr) {
 					g.sub(.rax, 8)
 					g.mov_deref(.rax, .rax, ast.i64_type_idx)
 					if args_size[i] != 16 {
-						g.movabs(.rbx, (i64(1) << ((args_size[i] - 8) * 8)) - 1)
+						g.movabs(.rbx, i64((u64(1) << ((args_size[i] - 8) * 8)) - 1))
 						g.bitand_reg(.rdx, .rbx)
 					}
 				}
@@ -1725,7 +1739,10 @@ pub fn (mut g Gen) call_fn_amd64(node ast.CallExpr) {
 	for i in 0 .. reg_size {
 		g.pop(native.fn_arg_registers[i])
 	}
-	if addr == 0 {
+	if node.name in g.extern_symbols {
+		g.extern_fn_calls[g.pos()] = node.name
+		g.extern_call(int(addr))
+	} else if addr == 0 {
 		g.delay_fn_call(n)
 		g.call(int(0))
 	} else {
@@ -1737,7 +1754,7 @@ pub fn (mut g Gen) call_fn_amd64(node ast.CallExpr) {
 		match return_size {
 			1...7 {
 				g.mov_var_to_reg(.rdx, LocalVar{ offset: return_pos, typ: ast.i64_type_idx })
-				g.movabs(.rcx, 0xffffffffffffffff - (i64(1) << (return_size * 8)) + 1)
+				g.movabs(.rcx, i64(0xffffffffffffffff - (u64(1) << (return_size * 8)) + 1))
 				g.bitand_reg(.rdx, .rcx)
 				g.bitor_reg(.rdx, .rax)
 				g.mov_reg_to_var(LocalVar{ offset: return_pos, typ: ast.i64_type_idx },
@@ -1754,7 +1771,7 @@ pub fn (mut g Gen) call_fn_amd64(node ast.CallExpr) {
 					
 					offset: 8
 				)
-				g.movabs(.rcx, 0xffffffffffffffff - (i64(1) << (return_size * 8)) + 1)
+				g.movabs(.rcx, i64(0xffffffffffffffff - (u64(1) << (return_size * 8)) + 1))
 				g.bitand_reg(.rax, .rcx)
 				g.bitor_reg(.rax, .rdx)
 				g.mov_reg_to_var(LocalVar{ offset: return_pos, typ: ast.i64_type_idx },
@@ -2262,6 +2279,11 @@ fn (mut g Gen) assign_stmt(node ast.AssignStmt) {
 				g.gen_typeof_expr(node.right[i] as ast.TypeOf, true)
 				g.mov_reg(.rsi, .rax)
 			}
+			ast.AtExpr {
+				dest := g.allocate_var(name, 8, 0)
+				g.learel(.rsi, g.allocate_string(g.comptime_at(right), 3, .rel32))
+				g.mov_reg_to_var(LocalVar{dest, ast.u64_type_idx, name}, .rsi)
+			}
 			else {
 				// dump(node)
 				size := g.get_type_size(node.left_types[i])
@@ -2733,7 +2755,8 @@ fn (mut g Gen) condition(expr ast.Expr, neg bool) int {
 
 fn (mut g Gen) if_expr(node ast.IfExpr) {
 	if node.is_comptime {
-		g.n_error('ignored comptime')
+		g.comptime_conditional(node)
+		return
 	}
 	if node.branches.len == 0 {
 		return
