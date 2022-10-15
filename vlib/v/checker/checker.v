@@ -1030,6 +1030,10 @@ fn (mut c Checker) check_or_last_stmt(stmt ast.Stmt, ret_type ast.Type, expr_ret
 					c.error('`or` block must provide a default value of type `$expected_type_name`, or return/continue/break or call a [noreturn] function like panic(err) or exit(1)',
 						stmt.expr.pos())
 				} else {
+					if ret_type.is_ptr() && last_stmt_typ.is_pointer()
+						&& c.table.sym(last_stmt_typ).kind == .voidptr {
+						return
+					}
 					type_name := c.table.type_to_str(last_stmt_typ)
 					expected_type_name := c.table.type_to_str(ret_type.clear_flag(.optional).clear_flag(.result))
 					c.error('wrong return type `$type_name` in the `or {}` block, expected `$expected_type_name`',
@@ -1070,7 +1074,11 @@ fn (mut c Checker) check_or_last_stmt(stmt ast.Stmt, ret_type ast.Type, expr_ret
 					return
 				}
 				if c.check_types(stmt.typ, expr_return_type) {
-					return
+					if stmt.typ.is_ptr() == expr_return_type.is_ptr()
+						|| (expr_return_type.is_ptr() && stmt.typ.is_pointer()
+						&& c.table.sym(stmt.typ).kind == .voidptr) {
+						return
+					}
 				}
 				// opt_returning_string() or { ... 123 }
 				type_name := c.table.type_to_str(stmt.typ)
@@ -2544,6 +2552,12 @@ pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 
 	if to_sym.kind == .enum_ && !(c.inside_unsafe || c.file.is_translated) && from_sym.is_int() {
 		c.error('casting numbers to enums, should be done inside `unsafe{}` blocks', node.pos)
+	}
+
+	if final_to_sym.kind == .function && final_from_sym.kind == .function && !(c.inside_unsafe
+		|| c.file.is_translated) && !c.check_matching_function_symbols(final_from_sym, final_to_sym) {
+		c.error('casting a function value from one function signature, to another function signature, should be done inside `unsafe{}` blocks',
+			node.pos)
 	}
 
 	if to_type == ast.string_type {

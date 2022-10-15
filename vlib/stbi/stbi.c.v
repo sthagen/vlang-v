@@ -4,6 +4,31 @@
 
 module stbi
 
+[if trace_stbi_allocations ?]
+fn trace_allocation(message string) {
+	eprintln(message)
+}
+
+[export: 'stbi__callback_malloc']
+fn cb_malloc(s usize) voidptr {
+	res := unsafe { malloc(isize(s)) }
+	trace_allocation('> stbi__callback_malloc: $s => ${ptr_str(res)}')
+	return res
+}
+
+[export: 'stbi__callback_realloc']
+fn cb_realloc(p voidptr, s usize) voidptr {
+	res := unsafe { v_realloc(p, isize(s)) }
+	trace_allocation('> stbi__callback_realloc: ${ptr_str(p)} , $s => ${ptr_str(res)}')
+	return res
+}
+
+[export: 'stbi__callback_free']
+fn cb_free(p voidptr) {
+	trace_allocation('> stbi__callback_free: ${ptr_str(p)}')
+	unsafe { free(p) }
+}
+
 #flag -I @VEXEROOT/thirdparty/stb_image
 #include "stb_image.h"
 #include "stb_image_write.h"
@@ -108,21 +133,13 @@ pub fn load(path string) ?Image {
 
 // load_from_memory load an image from a memory buffer
 pub fn load_from_memory(buf &u8, bufsize int) ?Image {
-	return load_from_memory_with_channels(buf, bufsize, 0)
-}
-
-// load_from_memory_with_channels an image from a memory buffer, with user-defined number of image channels
-pub fn load_from_memory_with_channels(buf &u8, bufsize int, desired_channels int) ?Image {
 	mut res := Image{
 		ok: true
 		data: 0
 	}
+	flag := C.STBI_rgb_alpha
 	res.data = C.stbi_load_from_memory(buf, bufsize, &res.width, &res.height, &res.nr_channels,
-		desired_channels)
-	if desired_channels == 4 && res.nr_channels == 3 {
-		// Fix an alpha png bug
-		res.nr_channels = 4
-	}
+		flag)
 	if isnil(res.data) {
 		return error('stbi_image failed to load from memory')
 	}

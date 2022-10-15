@@ -152,7 +152,8 @@ pub struct RemoveNewLineConfig {
 	imports_buffer bool // Work on f.out_imports instead of f.out
 }
 
-pub fn (mut f Fmt) remove_new_line(cfg RemoveNewLineConfig) {
+// When the removal action actually occurs, the string of the last line after the removal is returned
+pub fn (mut f Fmt) remove_new_line(cfg RemoveNewLineConfig) string {
 	mut buffer := if cfg.imports_buffer { unsafe { &f.out_imports } } else { unsafe { &f.out } }
 	mut i := 0
 	for i = buffer.len - 1; i >= 0; i-- {
@@ -160,8 +161,23 @@ pub fn (mut f Fmt) remove_new_line(cfg RemoveNewLineConfig) {
 			break
 		}
 	}
+	if i == buffer.len - 1 {
+		return ''
+	}
 	buffer.go_back(buffer.len - i - 1)
 	f.empty_line = false
+	mut line_len := 0
+	mut last_line_str := []u8{}
+	for i = buffer.len - 1; i >= 0; i-- {
+		ch := buffer.byte_at(i)
+		if ch == `\n` {
+			break
+		}
+		line_len += if ch == `\t` { 4 } else { 1 }
+		last_line_str << ch
+	}
+	f.line_len = line_len
+	return last_line_str.reverse().bytestr()
 }
 
 //=== Specialized write methods ===//
@@ -2181,10 +2197,17 @@ fn (mut f Fmt) write_splitted_infix(conditions []string, penalties []int, ignore
 				f.write_splitted_infix(conds, pens, true, is_cond)
 				continue
 			}
+			mut is_wrap_needed := true
 			if i == 0 {
-				f.remove_new_line()
+				last_line_str := f.remove_new_line().trim_space()
+				if last_line_str in ['if', 'for'] {
+					f.write(' ')
+					is_wrap_needed = false
+				}
 			}
-			f.writeln('')
+			if is_wrap_needed {
+				f.writeln('')
+			}
 			f.indent++
 			f.write(c)
 			f.indent--
@@ -2276,17 +2299,12 @@ pub fn (mut f Fmt) map_init(node ast.MapInit) {
 			max_field_len = skey.len
 		}
 	}
-	for i, key in node.keys {
+	for i, _ in node.keys {
 		skey := skeys[i]
 		f.write(skey)
 		f.write(': ')
 		f.write(strings.repeat(` `, max_field_len - skey.len))
 		f.expr(node.vals[i])
-		if key is ast.EnumVal && skey.starts_with('.') {
-			// enforce the use of `,` for maps with short enum keys, otherwise there is ambiguity
-			// when the values are struct values, and the code will no longer parse properly
-			f.write(',')
-		}
 		f.comments(node.comments[i], prev_line: node.vals[i].pos().last_line, has_nl: false)
 		f.writeln('')
 	}
@@ -2603,18 +2621,14 @@ pub fn (mut f Fmt) char_literal(node ast.CharLiteral) {
 }
 
 pub fn (mut f Fmt) string_literal(node ast.StringLiteral) {
-	use_double_quote := node.val.contains("'") && !node.val.contains('"')
+	quote := if node.val.contains("'") && !node.val.contains('"') { '"' } else { "'" }
 	if node.is_raw {
 		f.write('r')
 	} else if node.language == ast.Language.c {
 		f.write('c')
 	}
 	if node.is_raw {
-		if use_double_quote {
-			f.write('"$node.val"')
-		} else {
-			f.write("'$node.val'")
-		}
+		f.write('$quote$node.val$quote')
 	} else {
 		unescaped_val := node.val.replace('$fmt.bs$fmt.bs', '\x01').replace_each([
 			"$fmt.bs'",
@@ -2622,13 +2636,8 @@ pub fn (mut f Fmt) string_literal(node ast.StringLiteral) {
 			'$fmt.bs"',
 			'"',
 		])
-		if use_double_quote {
-			s := unescaped_val.replace_each(['\x01', '$fmt.bs$fmt.bs', '"', '$fmt.bs"'])
-			f.write('"$s"')
-		} else {
-			s := unescaped_val.replace_each(['\x01', '$fmt.bs$fmt.bs', "'", "$fmt.bs'"])
-			f.write("'$s'")
-		}
+		s := unescaped_val.replace_each(['\x01', '$fmt.bs$fmt.bs', quote, '$fmt.bs$quote'])
+		f.write('$quote$s$quote')
 	}
 }
 
@@ -2655,7 +2664,14 @@ pub fn (mut f Fmt) string_inter_literal(node ast.StringInterLiteral) {
 	//	work too different for the various exprs that are interpolated
 	f.write(quote)
 	for i, val in node.vals {
-		f.write(val)
+		unescaped_val := val.replace('$fmt.bs$fmt.bs', '\x01').replace_each([
+			"$fmt.bs'",
+			"'",
+			'$fmt.bs"',
+			'"',
+		])
+		s := unescaped_val.replace_each(['\x01', '$fmt.bs$fmt.bs', quote, '$fmt.bs$quote'])
+		f.write('$s')
 		if i >= node.exprs.len {
 			break
 		}

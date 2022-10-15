@@ -975,6 +975,8 @@ pub fn (t &Table) thread_name(return_type Type) string {
 	if return_type.idx() == void_type_idx {
 		if return_type.has_flag(.optional) {
 			return 'thread ?'
+		} else if return_type.has_flag(.result) {
+			return 'thread !'
 		} else {
 			return 'thread'
 		}
@@ -982,7 +984,8 @@ pub fn (t &Table) thread_name(return_type Type) string {
 	return_type_sym := t.sym(return_type)
 	ptr := if return_type.is_ptr() { '&' } else { '' }
 	opt := if return_type.has_flag(.optional) { '?' } else { '' }
-	return 'thread $opt$ptr$return_type_sym.name'
+	res := if return_type.has_flag(.result) { '!' } else { '' }
+	return 'thread $opt$res$ptr$return_type_sym.name'
 }
 
 [inline]
@@ -990,14 +993,17 @@ pub fn (t &Table) thread_cname(return_type Type) string {
 	if return_type == void_type {
 		if return_type.has_flag(.optional) {
 			return '__v_thread_Option_void'
+		} else if return_type.has_flag(.result) {
+			return '__v_thread_Result_void'
 		} else {
 			return '__v_thread'
 		}
 	}
 	return_type_sym := t.sym(return_type)
 	suffix := if return_type.is_ptr() { '_ptr' } else { '' }
-	prefix := if return_type.has_flag(.optional) { '_option_' } else { '' }
-	return '__v_thread_$prefix$return_type_sym.cname$suffix'
+	opt := if return_type.has_flag(.optional) { '_option_' } else { '' }
+	res := if return_type.has_flag(.result) { '_result_' } else { '' }
+	return '__v_thread_$opt$res$return_type_sym.cname$suffix'
 }
 
 // map_source_name generates the original name for the v source.
@@ -1007,7 +1013,9 @@ pub fn (t &Table) map_name(key_type Type, value_type Type) string {
 	key_type_sym := t.sym(key_type)
 	value_type_sym := t.sym(value_type)
 	ptr := if value_type.is_ptr() { '&' } else { '' }
-	return 'map[$key_type_sym.name]$ptr$value_type_sym.name'
+	opt := if value_type.has_flag(.optional) { '?' } else { '' }
+	res := if value_type.has_flag(.result) { '!' } else { '' }
+	return 'map[$key_type_sym.name]$opt$res$ptr$value_type_sym.name'
 }
 
 [inline]
@@ -1015,7 +1023,9 @@ pub fn (t &Table) map_cname(key_type Type, value_type Type) string {
 	key_type_sym := t.sym(key_type)
 	value_type_sym := t.sym(value_type)
 	suffix := if value_type.is_ptr() { '_ptr' } else { '' }
-	return 'Map_${key_type_sym.cname}_$value_type_sym.cname' + suffix
+	opt := if value_type.has_flag(.optional) { '_option_' } else { '' }
+	res := if value_type.has_flag(.result) { '_result_' } else { '' }
+	return 'Map_${key_type_sym.cname}_$opt$res$value_type_sym.cname$suffix'
 }
 
 pub fn (mut t Table) find_or_register_chan(elem_type Type, is_mut bool) int {

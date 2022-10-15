@@ -11,6 +11,18 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 			eprintln('>>> post processing node.name: ${node.name:-30} | $node.generic_names <=> $c.table.cur_concrete_types')
 		}
 	}
+	// notice vweb route methods (non-generic method)
+	if node.generic_names.len > 0 {
+		typ_vweb_result := c.table.find_type_idx('vweb.Result')
+		if node.return_type == typ_vweb_result {
+			rec_sym := c.table.sym(node.receiver.typ)
+			if rec_sym.kind == .struct_ {
+				if _ := c.table.find_field_with_embeds(rec_sym, 'Context') {
+					c.note('generic method routes of vweb will be skipped', node.pos)
+				}
+			}
+		}
+	}
 	if node.generic_names.len > 0 && c.table.cur_concrete_types.len == 0 {
 		// Just remember the generic function for now.
 		// It will be processed later in c.post_process_generic_fns,
@@ -108,6 +120,9 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 				} else if multi_type.has_flag(.optional) {
 					c.error('option cannot be used in multi-return, return an option instead',
 						node.return_type_pos)
+				} else if multi_type.has_flag(.result) {
+					c.error('result cannot be used in multi-return, return a result instead',
+						node.return_type_pos)
 				} else if multi_sym.kind == .array_fixed {
 					c.error('fixed array cannot be used in multi-return', node.return_type_pos)
 				}
@@ -196,8 +211,9 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 				c.error('invalid use of reserved type `$param.name` as a parameter name',
 					param.pos)
 			}
-			if param.typ.has_flag(.optional) {
-				c.error('optional type argument is not supported currently', param.type_pos)
+			if param.typ.has_flag(.optional) || param.typ.has_flag(.result) {
+				c.error('optional or result type argument is not supported currently',
+					param.type_pos)
 			}
 			if !param.typ.is_ptr() { // value parameter, i.e. on stack - check for `[heap]`
 				arg_typ_sym := c.table.sym(param.typ)
@@ -399,6 +415,7 @@ fn (mut c Checker) anon_fn(mut node ast.AnonFn) ast.Type {
 	}
 	c.table.cur_fn = unsafe { &node.decl }
 	c.inside_anon_fn = true
+	mut has_generic := false
 	for mut var in node.inherited_vars {
 		parent_var := node.decl.scope.parent.find_var(var.name) or {
 			panic('unexpected checker error: cannot find parent of inherited variable `$var.name`')
@@ -408,9 +425,16 @@ fn (mut c Checker) anon_fn(mut node ast.AnonFn) ast.Type {
 				var.pos)
 		}
 		var.typ = parent_var.typ
+		if var.typ.has_flag(.generic) {
+			has_generic = true
+		}
 	}
 	c.stmts(node.decl.stmts)
 	c.fn_decl(mut node.decl)
+	if has_generic && node.decl.generic_names.len == 0 {
+		c.error('generic closure fn must specify type parameter, e.g. fn [foo] <T>()',
+			node.decl.pos)
+	}
 	return node.typ
 }
 
@@ -438,7 +462,7 @@ pub fn (mut c Checker) call_expr(mut node ast.CallExpr) ast.Type {
 	c.inside_fn_arg = old_inside_fn_arg
 	// autofree: mark args that have to be freed (after saving them in tmp exprs)
 	free_tmp_arg_vars := c.pref.autofree && !c.is_builtin_mod && node.args.len > 0
-		&& !node.args[0].typ.has_flag(.optional)
+		&& !node.args[0].typ.has_flag(.optional) && !node.args[0].typ.has_flag(.result)
 	if free_tmp_arg_vars && !c.inside_const {
 		for i, arg in node.args {
 			if arg.typ != ast.string_type {
@@ -459,7 +483,7 @@ pub fn (mut c Checker) call_expr(mut node ast.CallExpr) ast.Type {
 			node.free_receiver = true
 		}
 	}
-	c.expected_or_type = node.return_type.clear_flag(.optional)
+	c.expected_or_type = node.return_type.clear_flag(.optional).clear_flag(.result)
 	c.stmts_ending_with_expression(node.or_block.stmts)
 	c.expected_or_type = ast.void_type
 
@@ -699,11 +723,13 @@ pub fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) 
 	}
 	if !found && mut node.left is ast.CallExpr {
 		c.expr(node.left)
-		sym := c.table.sym(node.left.return_type)
-		if sym.info is ast.FnType {
-			node.return_type = sym.info.func.return_type
-			found = true
-			func = sym.info.func
+		if node.left.return_type != 0 {
+			sym := c.table.sym(node.left.return_type)
+			if sym.info is ast.FnType {
+				node.return_type = sym.info.func.return_type
+				found = true
+				func = sym.info.func
+			}
 		}
 	}
 	// already prefixed (mod.fn) or C/builtin/main
@@ -1970,8 +1996,9 @@ fn (mut c Checker) check_map_and_filter(is_map bool, elem_typ ast.Type, node ast
 			if is_map && arg_expr.return_type in [ast.void_type, 0] {
 				c.error('type mismatch, `$arg_expr.name` does not return anything', arg_expr.pos)
 			} else if !is_map && arg_expr.return_type != ast.bool_type {
-				if arg_expr.or_block.kind != .absent && arg_expr.return_type.has_flag(.optional)
-					&& arg_expr.return_type.clear_flag(.optional) == ast.bool_type {
+				if arg_expr.or_block.kind != .absent && (arg_expr.return_type.has_flag(.optional)
+					|| arg_expr.return_type.has_flag(.result))
+					&& arg_expr.return_type.clear_flag(.optional).clear_flag(.result) == ast.bool_type {
 					return
 				}
 				c.error('type mismatch, `$arg_expr.name` must return a bool', arg_expr.pos)
@@ -2103,6 +2130,9 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 			thread_ret_type := elem_sym.thread_info().return_type
 			if thread_ret_type.has_flag(.optional) {
 				c.error('`.wait()` cannot be called for an array when thread functions return optionals. Iterate over the arrays elements instead and handle each returned optional with `or`.',
+					node.pos)
+			} else if thread_ret_type.has_flag(.result) {
+				c.error('`.wait()` cannot be called for an array when thread functions return results. Iterate over the arrays elements instead and handle each returned result with `or`.',
 					node.pos)
 			}
 			node.return_type = c.table.find_or_register_array(thread_ret_type)
