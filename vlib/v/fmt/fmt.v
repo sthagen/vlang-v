@@ -938,7 +938,11 @@ pub fn (mut f Fmt) enum_decl(node ast.EnumDecl) {
 	if node.is_pub {
 		f.write('pub ')
 	}
-	name := node.name.after('.')
+	mut name := node.name.after('.')
+	if node.typ != ast.int_type {
+		senum_type := f.table.type_to_str_using_aliases(node.typ, f.mod2alias)
+		name += ' as $senum_type'
+	}
 	if node.fields.len == 0 && node.pos.line_nr == node.pos.last_line {
 		f.writeln('enum $name {}\n')
 		return
@@ -1663,7 +1667,7 @@ pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
 		}
 		f.write(f.table.type_to_str_using_aliases(node.elem_type, f.mod2alias))
 		if node.has_default {
-			f.write('{init: ')
+			f.write('\{init: ')
 			f.expr(node.default_expr)
 			f.write('}')
 		} else {
@@ -1868,6 +1872,8 @@ pub fn (mut f Fmt) comptime_call(node ast.ComptimeCall) {
 			f.write("\$env('$node.args_var')")
 		} else if node.is_pkgconfig {
 			f.write("\$pkgconfig('$node.args_var')")
+		} else if node.method_name == 'compile_error' {
+			f.write("\$compile_error('$node.args_var')")
 		} else {
 			inner_args := if node.args_var != '' {
 				node.args_var

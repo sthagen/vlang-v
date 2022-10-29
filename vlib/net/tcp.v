@@ -135,10 +135,10 @@ pub fn (c TcpConn) read_ptr(buf_ptr &u8, len int) !int {
 
 pub fn (c TcpConn) read(mut buf []u8) !int {
 	return c.read_ptr(buf.data, buf.len) or {
-		return IError(io.NotExpected{
+		return io.NotExpected{
 			cause: 'unexpected error in `read_ptr` function'
 			code: -1
-		})
+		}
 	}
 }
 
@@ -394,6 +394,17 @@ fn tcp_socket_from_handle(sockfd int) !TcpSocket {
 		} $else {
 			socket_error(C.fcntl(sockfd, C.F_SETFL, C.fcntl(sockfd, C.F_GETFL) | C.O_NONBLOCK))!
 		}
+	}
+	return s
+}
+
+// tcp_socket_from_handle_raw is similar to tcp_socket_from_handle, but it does not modify any socket options
+pub fn tcp_socket_from_handle_raw(sockfd int) TcpSocket {
+	mut s := TcpSocket{
+		handle: sockfd
+	}
+	$if trace_tcp ? {
+		eprintln('    tcp_socket_from_handle_raw | s.handle: ${s.handle:6}')
 	}
 	return s
 }

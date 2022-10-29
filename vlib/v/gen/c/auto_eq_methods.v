@@ -156,8 +156,9 @@ fn (mut g Gen) gen_struct_equality_fn(left_type ast.Type) string {
 			} else if field_type.sym.kind == .function {
 				fn_builder.write_string('*((voidptr*)(a.$field_name)) == *((voidptr*)(b.$field_name))')
 			} else if field_type.sym.kind == .interface_ {
+				ptr := if field.typ.is_ptr() { '*'.repeat(field.typ.nr_muls()) } else { '' }
 				eq_fn := g.gen_interface_equality_fn(field.typ)
-				fn_builder.write_string('${eq_fn}_interface_eq(a.$field_name, b.$field_name)')
+				fn_builder.write_string('${eq_fn}_interface_eq(${ptr}a.$field_name, ${ptr}b.$field_name)')
 			} else {
 				fn_builder.write_string('a.$field_name == b.$field_name')
 			}
@@ -352,7 +353,7 @@ fn (mut g Gen) gen_map_equality_fn(left_type ast.Type) string {
 	}
 	match kind {
 		.string {
-			fn_builder.writeln('\t\tif (!fast_string_eq(*(string*)map_get(&b, k, &(string[]){_SLIT("")}), v)) {')
+			fn_builder.writeln('\t\tif (!fast_string_eq(*(string*)map_get(&b, k, &(string[]){ _SLIT("")}), v)) {')
 		}
 		.sum_type {
 			eq_fn := g.gen_sumtype_equality_fn(value.typ)
@@ -450,7 +451,7 @@ fn (mut g Gen) gen_interface_equality_fn(left_type ast.Type) string {
 					fn_builder.write_string('${eq_fn}_alias_eq(*(a._$eq_fn), *(b._$eq_fn))')
 				}
 				else {
-					fn_builder.write_string('false')
+					fn_builder.write_string('true')
 				}
 			}
 			fn_builder.writeln(';')

@@ -106,14 +106,14 @@ fn C.sqlite3_errmsg(&C.sqlite3) &char
 fn C.sqlite3_free(voidptr)
 
 // connect Opens the connection with a database.
-pub fn connect(path string) ?DB {
+pub fn connect(path string) !DB {
 	db := &C.sqlite3(0)
 	code := C.sqlite3_open(&char(path.str), &db)
 	if code != 0 {
-		return IError(&SQLError{
+		return &SQLError{
 			msg: unsafe { cstring_to_vstring(&char(C.sqlite3_errstr(code))) }
 			code: code
-		})
+		}
 	}
 	return DB{
 		conn: db
@@ -124,15 +124,15 @@ pub fn connect(path string) ?DB {
 // close Closes the DB.
 // TODO: For all functions, determine whether the connection is
 // closed first, and determine what to do if it is
-pub fn (mut db DB) close() ?bool {
+pub fn (mut db DB) close() !bool {
 	code := C.sqlite3_close(db.conn)
 	if code == 0 {
 		db.is_open = false
 	} else {
-		return IError(&SQLError{
+		return &SQLError{
 			msg: unsafe { cstring_to_vstring(&char(C.sqlite3_errstr(code))) }
 			code: code
-		})
+		}
 	}
 	return true // successfully closed
 }
@@ -217,21 +217,21 @@ pub fn (db &DB) exec(query string) ([]Row, int) {
 // Execute a query, handle error code
 // Return the first row from the resulting table
 [manualfree]
-pub fn (db &DB) exec_one(query string) ?Row {
+pub fn (db &DB) exec_one(query string) !Row {
 	rows, code := db.exec(query)
 	defer {
 		unsafe { rows.free() }
 	}
 	if rows.len == 0 {
-		return IError(&SQLError{
+		return &SQLError{
 			msg: 'No rows'
 			code: code
-		})
+		}
 	} else if code != 101 {
-		return IError(&SQLError{
+		return &SQLError{
 			msg: unsafe { cstring_to_vstring(&char(C.sqlite3_errstr(code))) }
 			code: code
-		})
+		}
 	}
 	res := rows[0]
 	return res
