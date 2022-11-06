@@ -108,6 +108,7 @@ mut:
 	files                            []ast.File
 	expr_level                       int // to avoid infinite recursion segfaults due to compiler bugs
 	cur_orm_ts                       ast.TypeSymbol
+	cur_anon_fn                      &ast.AnonFn = unsafe { nil }
 	error_details                    []string
 	vmod_file_content                string     // needed for @VMOD_FILE, contents of the file, *NOT its path**
 	loop_label                       string     // set when inside a labelled for loop
@@ -995,8 +996,8 @@ pub fn (mut c Checker) check_or_expr(node ast.OrExpr, ret_type ast.Type, expr_re
 		}
 		return
 	}
-	stmts_len := node.stmts.len
-	if stmts_len == 0 {
+
+	if node.stmts.len == 0 {
 		if ret_type != ast.void_type {
 			// x := f() or {}
 			c.error('assignment requires a non empty `or {}` block', node.pos)
@@ -1004,7 +1005,7 @@ pub fn (mut c Checker) check_or_expr(node ast.OrExpr, ret_type ast.Type, expr_re
 		// allow `f() or {}`
 		return
 	}
-	last_stmt := node.stmts[stmts_len - 1]
+	last_stmt := node.stmts.last()
 	c.check_or_last_stmt(last_stmt, ret_type, expr_return_type.clear_flag(.optional).clear_flag(.result))
 }
 
@@ -1394,6 +1395,20 @@ pub fn (mut c Checker) const_decl(mut node ast.ConstDecl) {
 				}
 			}
 		}
+		// Check for int overflow
+		if field.typ == ast.int_type {
+			if mut field.expr is ast.IntegerLiteral {
+				mut is_large := field.expr.val.len > 13
+				if !is_large && field.expr.val.len > 8 {
+					val := field.expr.val.i64()
+					is_large = val > checker.int_max || val < checker.int_min
+				}
+				if is_large {
+					c.error('overflow in implicit type `int`, use explicit type casting instead',
+						field.expr.pos)
+				}
+			}
+		}
 		c.const_deps = []
 		c.const_var = prev_const_var
 	}
@@ -1536,7 +1551,7 @@ pub fn (mut c Checker) enum_decl(mut node ast.EnumDecl) {
 		} else {
 			if signed {
 				if iseen.len > 0 {
-					ilast := iseen[iseen.len - 1]
+					ilast := iseen.last()
 					if ilast == enum_imax {
 						c.error('enum value overflows type `$senum_type`, which has a maximum value of $enum_imax',
 							field.pos)
@@ -1550,7 +1565,7 @@ pub fn (mut c Checker) enum_decl(mut node ast.EnumDecl) {
 				}
 			} else {
 				if useen.len > 0 {
-					ulast := useen[useen.len - 1]
+					ulast := useen.last()
 					if ulast == enum_umax {
 						c.error('enum value overflows type `$senum_type`, which has a maximum value of $enum_umax',
 							field.pos)
@@ -3111,6 +3126,12 @@ pub fn (mut c Checker) concat_expr(mut node ast.ConcatExpr) ast.Type {
 		node.return_type = typ
 		return typ
 	} else {
+		for i := 0; i < mr_types.len; i++ {
+			if mr_types[i] == ast.void_type {
+				c.error('type `void` cannot be used in multi-return', node.vals[i].pos())
+				return ast.void_type
+			}
+		}
 		typ := c.table.find_or_register_multi_return(mr_types)
 		ast.new_type(typ)
 		node.return_type = typ
