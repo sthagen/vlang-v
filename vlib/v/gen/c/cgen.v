@@ -168,6 +168,7 @@ mut:
 	json_types                []ast.Type   // to avoid json gen duplicates
 	pcs                       []ProfileCounterMeta // -prof profile counter fn_names => fn counter name
 	hotcode_fn_names          []string
+	hotcode_fpaths            []string
 	embedded_files            []ast.EmbeddedFile
 	sql_i                     int
 	sql_stmt_name             string
@@ -404,6 +405,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) (string,
 			global_g.pcs << g.pcs
 			global_g.json_types << g.json_types
 			global_g.hotcode_fn_names << g.hotcode_fn_names
+			global_g.hotcode_fpaths << g.hotcode_fpaths
 			global_g.test_function_names << g.test_function_names
 			unsafe { g.free_builders() }
 			for k, v in g.autofree_methods {
@@ -598,7 +600,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) (string,
 	return header, res, out_str, out_fn_start_pos
 }
 
-fn cgen_process_one_file_cb(p &pool.PoolProcessor, idx int, wid int) &Gen {
+fn cgen_process_one_file_cb(mut p pool.PoolProcessor, idx int, wid int) &Gen {
 	file := p.get_item<&ast.File>(idx)
 	mut global_g := &Gen(p.get_shared_context())
 	mut g := &Gen{
@@ -1252,7 +1254,7 @@ fn (mut g Gen) write_chan_pop_optional_fns() {
 static inline $opt_el_type __Option_${styp}_popval($styp ch) {
 	$opt_el_type _tmp = {0};
 	if (sync__Channel_try_pop_priv(ch, _tmp.data, false)) {
-		return ($opt_el_type){ .state = 2, .err = _v_error(_SLIT("channel closed")), .data = { EMPTY_STRUCT_INITIALIZATION} };
+		return ($opt_el_type){ .state = 2, .err = _v_error(_SLIT("channel closed")), .data = {EMPTY_STRUCT_INITIALIZATION} };
 	}
 	return _tmp;
 }')
@@ -1274,7 +1276,8 @@ fn (mut g Gen) write_chan_push_optional_fns() {
 		g.channel_definitions.writeln('
 static inline ${c.option_name}_void __Option_${styp}_pushval($styp ch, $el_type e) {
 	if (sync__Channel_try_push_priv(ch, &e, false)) {
-		return (${c.option_name}_void){ .state = 2, .err = _v_error(_SLIT("channel closed")), .data = { EMPTY_STRUCT_INITIALIZATION} };	}
+		return (${c.option_name}_void){ .state = 2, .err = _v_error(_SLIT("channel closed")), .data = {EMPTY_STRUCT_INITIALIZATION} };
+	}
 	return (${c.option_name}_void){0};
 }')
 	}
@@ -2294,7 +2297,7 @@ fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp_is_ptr
 		}
 	}
 	if got_styp == 'none' && !g.cur_fn.return_type.has_flag(.optional) {
-		g.write('(none){ EMPTY_STRUCT_INITIALIZATION}')
+		g.write('(none){EMPTY_STRUCT_INITIALIZATION}')
 	} else {
 		g.expr(expr)
 	}
@@ -4297,7 +4300,7 @@ fn (mut g Gen) gen_result_error(target_type ast.Type, expr ast.Expr) {
 	styp := g.typ(target_type)
 	g.write('($styp){ .is_error=true, .err=')
 	g.expr(expr)
-	g.write(', .data={ EMPTY_STRUCT_INITIALIZATION} }')
+	g.write(', .data={EMPTY_STRUCT_INITIALIZATION} }')
 }
 
 // NB: remove this when optional has no errors anymore
@@ -4305,7 +4308,7 @@ fn (mut g Gen) gen_optional_error(target_type ast.Type, expr ast.Expr) {
 	styp := g.typ(target_type)
 	g.write('($styp){ .state=2, .err=')
 	g.expr(expr)
-	g.write(', .data={ EMPTY_STRUCT_INITIALIZATION} }')
+	g.write(', .data={EMPTY_STRUCT_INITIALIZATION} }')
 }
 
 fn (mut g Gen) return_stmt(node ast.Return) {
@@ -4838,6 +4841,18 @@ fn (mut g Gen) const_decl_precomputed(mod string, name string, field_name string
 }
 
 fn (mut g Gen) const_decl_write_precomputed(mod string, styp string, cname string, field_name string, ct_value string) {
+	if g.pref.is_livemain || g.pref.is_liveshared {
+		// Note: tcc has problems reloading .so files with consts in them, when the consts are then used inside the reloaded
+		// live functions. As a workaround, just use simple #define macros in this case.
+		//
+		// If you change it, please also test with `v -live run examples/hot_reload/graph.v` which uses `math.pi` .
+		g.global_const_defs[util.no_dots(field_name)] = GlobalConstDef{
+			mod: mod
+			def: '#define $cname $ct_value // precomputed3, -live mode'
+			order: -1
+		}
+		return
+	}
 	g.global_const_defs[util.no_dots(field_name)] = GlobalConstDef{
 		mod: mod
 		def: '$g.static_modifier const $styp $cname = $ct_value; // precomputed2'
@@ -5163,13 +5178,13 @@ fn (mut g Gen) write_init_function() {
 		// Note: os.args in this case will be [].
 		g.writeln('__attribute__ ((constructor))')
 		g.writeln('void _vinit_caller() {')
-		g.writeln('\tstatic bool once = false; if (once) { return;} once = true;')
+		g.writeln('\tstatic bool once = false; if (once) {return;} once = true;')
 		g.writeln('\t_vinit(0,0);')
 		g.writeln('}')
 
 		g.writeln('__attribute__ ((destructor))')
 		g.writeln('void _vcleanup_caller() {')
-		g.writeln('\tstatic bool once = false; if (once) { return;} once = true;')
+		g.writeln('\tstatic bool once = false; if (once) {return;} once = true;')
 		g.writeln('\t_vcleanup();')
 		g.writeln('}')
 	}
@@ -5725,7 +5740,7 @@ fn (mut g Gen) type_default(typ_ ast.Type) string {
 								if field_sym.info is ast.Struct && field_sym.language == .v {
 									if field_sym.info.fields.len == 0
 										&& field_sym.info.embeds.len == 0 {
-										zero_str = '{ EMPTY_STRUCT_INITIALIZATION}'
+										zero_str = '{EMPTY_STRUCT_INITIALIZATION}'
 									}
 								}
 							}

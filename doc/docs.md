@@ -38,7 +38,7 @@ To do so, run the command `v up`.
 ## Table of Contents
 
 <table>
-    <tr><td width=33% valign=top>
+<tr><td width=33% valign=top>
 
 * [Hello world](#hello-world)
 * [Running a project folder](#running-a-project-folder-with-several-files)
@@ -62,6 +62,9 @@ To do so, run the command `v up`.
         * [Array slices](#array-slices)
     * [Fixed size arrays](#fixed-size-arrays)
     * [Maps](#maps)
+
+</td><td width=33% valign=top>
+
 * [Module imports](#module-imports)
     * [Selective imports](#selective-imports)
     * [Module import aliasing](#module-import-aliasing)
@@ -86,7 +89,7 @@ To do so, run the command `v up`.
     * [Embedded structs](#embedded-structs)
 * [Unions](#unions)
 
-</td><td width=33% valign=top>
+</td><td valign=top>
 
 * [Functions 2](#functions-2)
     * [Immutable function args by default](#immutable-function-args-by-default)
@@ -105,12 +108,16 @@ To do so, run the command `v up`.
 * [Modules](#modules)
     * [Create modules](#create-modules)
     * [init functions](#init-functions)
+
+</td></tr>
+<tr><td width=33% valign=top>
+
 * [Type Declarations](#type-declarations)
-    * [Interfaces](#interfaces)
-    * [Function Types](#function-types)
-    * [Enums](#enums)
-    * [Sum types](#sum-types)
     * [Type aliases](#type-aliases)
+    * [Enums](#enums)
+    * [Function Types](#function-types)
+    * [Interfaces](#interfaces)
+    * [Sum types](#sum-types)
     * [Option/Result types & error handling](#optionresult-types-and-error-handling)
         * [Handling optionals/results](#handling-optionalsresults)
     * [Custom error types](#custom-error-types)
@@ -132,11 +139,11 @@ To do so, run the command `v up`.
     * [Control](#control)
     * [Stack and Heap](#stack-and-heap)
 * [ORM](#orm)
-
-</td><td valign=top>
-
 * [Writing documentation](#writing-documentation)
     * [Newlines in Documentation Comments](#newlines-in-documentation-comments)
+
+</td><td width=33% valign=top>
+
 * [Tools](#tools)
     * [v fmt](#v-fmt)
     * [v shader](#v-shader)
@@ -163,21 +170,24 @@ To do so, run the command `v up`.
         * [C Backend binaries Default](#c-backend-binaries-default)
         * [Native Backend binaries](#native-backend-binaries)
         * [Javascript Backend](#javascript-backend)
-    * [V and C](#v-and-c)
-		* [Calling C from V](#calling-c-from-v)
-		* [Calling V from C](#calling-v-from-c)
-		* [Passing C compilation flags](#passing-c-compilation-flags)
-		* [#pkgconfig](#pkgconfig)
-		* [Including C code](#including-c-code)
-		* [C types](#c-types)
-		* [C Declarations](#c-declarations)
-        * [Export to shared library](#export-to-shared-library)
-        * [Translating C to V](#translating-c-to-v)
-    * [Other V Features](#other-v-features)
-        * [Inline assembly](#inline-assembly)
-        * [Hot code reloading](#hot-code-reloading)
-        * [Cross-platform shell scripts in V](#cross-platform-shell-scripts-in-v)
-	    * [Vsh scripts with no extension](#vsh-scripts-with-no-extension)
+
+</td><td valign=top>
+
+* [V and C](#v-and-c)
+	* [Calling C from V](#calling-c-from-v)
+	* [Calling V from C](#calling-v-from-c)
+	* [Passing C compilation flags](#passing-c-compilation-flags)
+	* [#pkgconfig](#pkgconfig)
+	* [Including C code](#including-c-code)
+	* [C types](#c-types)
+	* [C Declarations](#c-declarations)
+	* [Export to shared library](#export-to-shared-library)
+	* [Translating C to V](#translating-c-to-v)
+* [Other V Features](#other-v-features)
+	* [Inline assembly](#inline-assembly)
+	* [Hot code reloading](#hot-code-reloading)
+	* [Cross-platform shell scripts in V](#cross-platform-shell-scripts-in-v)
+	* [Vsh scripts with no extension](#vsh-scripts-with-no-extension)
 * [Appendices](#appendices)
     * [Keywords](#appendix-i-keywords)
     * [Operators](#appendix-ii-operators)
@@ -691,6 +701,9 @@ println('age = $age')
 ```
 
 See all methods of [string](https://modules.vlang.io/index.html#string)
+and related modules [strings](https://modules.vlang.io/strings.html),
+[strconv](https://modules.vlang.io/strconv.html).
+
 
 ### Runes
 
@@ -2953,7 +2966,185 @@ particularly useful for initializing a C library.
 
 ## Type Declarations
 
+### Type aliases
+
+To define a new type `NewType` as an alias for `ExistingType`,
+do `type NewType = ExistingType`.<br/>
+This is a special case of a [sum type](#sum-types) declaration.
+
+### Enums
+
+```v
+enum Color as u8 {
+	red
+	green
+	blue
+}
+
+mut color := Color.red
+// V knows that `color` is a `Color`. No need to use `color = Color.green` here.
+color = .green
+println(color) // "green"
+match color {
+	.red { println('the color was red') }
+	.green { println('the color was green') }
+	.blue { println('the color was blue') }
+}
+```
+
+The enum type can be any integer type, but can be ommited, if it is `int`: `enum Color {`.
+
+Enum match must be exhaustive or have an `else` branch.
+This ensures that if a new enum field is added, it's handled everywhere in the code.
+
+Enum fields cannot re-use reserved keywords. However, reserved keywords may be escaped
+with an @.
+
+```v
+enum Color {
+	@none
+	red
+	green
+	blue
+}
+
+color := Color.@none
+println(color)
+```
+
+Integers may be assigned to enum fields.
+
+```v
+enum Grocery {
+	apple
+	orange = 5
+	pear
+}
+
+g1 := int(Grocery.apple)
+g2 := int(Grocery.orange)
+g3 := int(Grocery.pear)
+println('Grocery IDs: $g1, $g2, $g3')
+```
+
+Output: `Grocery IDs: 0, 5, 6`.
+
+Operations are not allowed on enum variables; they must be explicitly cast to `int`.
+
+Enums can have methods, just like structs.
+
+```v
+enum Cycle {
+	one
+	two
+	three
+}
+
+fn (c Cycle) next() Cycle {
+	match c {
+		.one {
+			return .two
+		}
+		.two {
+			return .three
+		}
+		.three {
+			return .one
+		}
+	}
+}
+
+mut c := Cycle.one
+for _ in 0 .. 10 {
+	println(c)
+	c = c.next()
+}
+```
+
+Output:
+```
+one
+two
+three
+one
+two
+three
+one
+two
+three
+one
+```
+
+### Function Types
+
+You can use type aliases for naming specific function signatures - for
+example:
+
+```v
+type Filter = fn (string) string
+```
+
+This works like any other type - for example, a function can accept an
+argument of a function type:
+
+```v
+type Filter = fn (string) string
+
+fn filter(s string, f Filter) string {
+	return f(s)
+}
+```
+
+V has duck-typing, so functions don't need to declare compatibility with
+a function type - they just have to be compatible:
+
+```v
+fn uppercase(s string) string {
+	return s.to_upper()
+}
+
+// now `uppercase` can be used everywhere where Filter is expected
+```
+
+Compatible functions can also be explicitly cast to a function type:
+
+```v oksyntax
+my_filter := Filter(uppercase)
+```
+
+The cast here is purely informational - again, duck-typing means that the
+resulting type is the same without an explicit cast:
+
+```v oksyntax
+my_filter := uppercase
+```
+
+You can pass the assigned function as an argument:
+
+```v oksyntax
+println(filter('Hello world', my_filter)) // prints `HELLO WORLD`
+```
+
+And you could of course have passed it directly as well, without using a
+local variable:
+
+```v oksyntax
+println(filter('Hello world', uppercase))
+```
+
+And this works with anonymous functions as well:
+
+```v oksyntax
+println(filter('Hello world', fn (s string) string {
+	return s.to_upper()
+}))
+```
+
+You can see the complete
+[example here](https://github.com/vlang/v/tree/master/examples/function_types.v).
+
 ### Interfaces
+
 ```v
 // interface-example.1
 struct Dog {
@@ -3185,177 +3376,6 @@ pub interface ReaderWriter {
 }
 ```
 
-### Function Types
-
-You can use type aliases for naming specific function signatures - for
-example:
-
-```v
-type Filter = fn (string) string
-```
-
-This works like any other type - for example, a function can accept an
-argument of a function type:
-
-```v
-type Filter = fn (string) string
-
-fn filter(s string, f Filter) string {
-	return f(s)
-}
-```
-
-V has duck-typing, so functions don't need to declare compatibility with
-a function type - they just have to be compatible:
-
-```v
-fn uppercase(s string) string {
-	return s.to_upper()
-}
-
-// now `uppercase` can be used everywhere where Filter is expected
-```
-
-Compatible functions can also be explicitly cast to a function type:
-
-```v oksyntax
-my_filter := Filter(uppercase)
-```
-
-The cast here is purely informational - again, duck-typing means that the
-resulting type is the same without an explicit cast:
-
-```v oksyntax
-my_filter := uppercase
-```
-
-You can pass the assigned function as an argument:
-
-```v oksyntax
-println(filter('Hello world', my_filter)) // prints `HELLO WORLD`
-```
-
-And you could of course have passed it directly as well, without using a
-local variable:
-
-```v oksyntax
-println(filter('Hello world', uppercase))
-```
-
-And this works with anonymous functions as well:
-
-```v oksyntax
-println(filter('Hello world', fn (s string) string {
-	return s.to_upper()
-}))
-```
-
-You can see the complete
-[example here](https://github.com/vlang/v/tree/master/examples/function_types.v).
-
-### Enums
-
-```v
-enum Color as u8 {
-	red
-	green
-	blue
-}
-
-mut color := Color.red
-// V knows that `color` is a `Color`. No need to use `color = Color.green` here.
-color = .green
-println(color) // "green"
-match color {
-	.red { println('the color was red') }
-	.green { println('the color was green') }
-	.blue { println('the color was blue') }
-}
-```
-
-The enum type can be any integer type, but can be ommited, if it is `int`: `enum Color {`.
-
-Enum match must be exhaustive or have an `else` branch.
-This ensures that if a new enum field is added, it's handled everywhere in the code.
-
-Enum fields cannot re-use reserved keywords. However, reserved keywords may be escaped
-with an @.
-
-```v
-enum Color {
-	@none
-	red
-	green
-	blue
-}
-
-color := Color.@none
-println(color)
-```
-
-Integers may be assigned to enum fields.
-
-```v
-enum Grocery {
-	apple
-	orange = 5
-	pear
-}
-
-g1 := int(Grocery.apple)
-g2 := int(Grocery.orange)
-g3 := int(Grocery.pear)
-println('Grocery IDs: $g1, $g2, $g3')
-```
-
-Output: `Grocery IDs: 0, 5, 6`.
-
-Operations are not allowed on enum variables; they must be explicitly cast to `int`.
-
-Enums can have methods, just like structs.
-
-```v
-enum Cycle {
-	one
-	two
-	three
-}
-
-fn (c Cycle) next() Cycle {
-	match c {
-		.one {
-			return .two
-		}
-		.two {
-			return .three
-		}
-		.three {
-			return .one
-		}
-	}
-}
-
-mut c := Cycle.one
-for _ in 0 .. 10 {
-	println(c)
-	c = c.next()
-}
-```
-
-Output:
-```
-one
-two
-three
-one
-two
-three
-one
-two
-three
-one
-```
-
 ### Sum types
 
 A sum type instance can hold a value of several different types. Use the `type`
@@ -3519,12 +3539,6 @@ fn pass_time(w World) {
     }
 }
 ```
-
-### Type aliases
-
-To define a new type `NewType` as an alias for `ExistingType`,
-do `type NewType = ExistingType`.<br/>
-This is a special case of a [sum type](#sum-types) declaration.
 
 ### Option/Result types and error handling
 

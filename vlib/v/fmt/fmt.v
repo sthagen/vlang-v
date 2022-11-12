@@ -7,6 +7,7 @@ import strings
 import v.ast
 import v.util
 import v.pref
+import v.checker.constants
 
 const (
 	bs      = '\\'
@@ -1684,7 +1685,7 @@ pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
 		}
 		f.write(f.table.type_to_str_using_aliases(node.elem_type, f.mod2alias))
 		if node.has_default {
-			f.write('\{init: ')
+			f.write('{init: ')
 			f.expr(node.default_expr)
 			f.write('}')
 		} else {
@@ -1881,9 +1882,9 @@ pub fn (mut f Fmt) comptime_call(node ast.ComptimeCall) {
 	} else {
 		if node.is_embed {
 			if node.embed_file.compression_type == 'none' {
-				f.write("\$embed_file('$node.embed_file.rpath')")
+				f.write('\$embed_file(${node.args[0].expr})')
 			} else {
-				f.write("\$embed_file('$node.embed_file.rpath', .$node.embed_file.compression_type)")
+				f.write('\$embed_file(${node.args[0].expr}, .$node.embed_file.compression_type)')
 			}
 		} else if node.is_env {
 			f.write("\$env('$node.args_var')")
@@ -1936,6 +1937,10 @@ pub fn (mut f Fmt) enum_val(node ast.EnumVal) {
 
 pub fn (mut f Fmt) ident(node ast.Ident) {
 	if node.info is ast.IdentVar {
+		if node.comptime && node.name in constants.valid_comptime_not_user_defined {
+			f.write(node.name)
+			return
+		}
 		if node.info.is_mut {
 			f.write(node.info.share.str() + ' ')
 		}
@@ -2701,9 +2706,7 @@ pub fn (mut f Fmt) string_inter_literal(node ast.StringInterLiteral) {
 		if i >= node.exprs.len {
 			break
 		}
-		if node.has_dollar[i] {
-			f.write('$')
-		}
+		f.write('$')
 		fspec_str, needs_braces := node.get_fspec_braces(i)
 		if needs_braces {
 			f.write('{')
