@@ -21,6 +21,7 @@ mut:
 	file_base         string       // "hello.v"
 	file_name         string       // "/home/user/hello.v"
 	file_name_dir     string       // "/home/user"
+	file_display_path string       // just "hello.v", when your current folder for the compilation is "/home/user/", otherwise the full path "/home/user/hello.v"
 	unique_prefix     string       // a hash of p.file_name, used for making anon fn generation unique
 	file_backend_mode ast.Language // .c for .c.v|.c.vv|.c.vsh files; .js for .js.v files, .amd64/.rv32/other arches for .amd64.v/.rv32.v/etc. files, .v otherwise.
 	comments_mode     scanner.CommentsMode = .skip_comments
@@ -178,10 +179,15 @@ pub fn (mut p Parser) free_scanner() {
 	}
 }
 
+const normalised_working_folder = (os.real_path(os.getwd()) + os.path_separator).replace('\\',
+	'/')
+
 pub fn (mut p Parser) set_path(path string) {
 	p.file_name = path
 	p.file_base = os.base(path)
 	p.file_name_dir = os.dir(path)
+	p.file_display_path = os.real_path(p.file_name).replace_once(parser.normalised_working_folder,
+		'').replace('\\', '/')
 	p.inside_vlib_file = p.file_name_dir.contains('vlib')
 	p.inside_test_file = p.file_base.ends_with('_test.v') || p.file_base.ends_with('_test.vv')
 		|| p.file_base.all_before_last('.v').all_before_last('.').ends_with('_test')
@@ -2168,16 +2174,24 @@ fn (p &Parser) is_generic_struct_init() bool {
 		return true
 	} else {
 		mut i := 2
+		mut nested_sbr_count := 0
 		for {
 			cur_tok := p.peek_token(i)
-			if cur_tok.kind == .eof || cur_tok.kind !in [.amp, .dot, .comma, .name, .lsbr, .rsbr] {
+			if cur_tok.kind == .eof
+				|| cur_tok.kind !in [.amp, .dot, .comma, .name, .lpar, .rpar, .lsbr, .rsbr, .key_fn] {
 				break
 			}
-			if cur_tok.kind == .rsbr {
-				if p.peek_token(i + 1).kind == .lcbr {
-					return true
+			if cur_tok.kind == .lsbr {
+				nested_sbr_count++
+			} else if cur_tok.kind == .rsbr {
+				if nested_sbr_count > 0 {
+					nested_sbr_count--
+				} else {
+					if p.peek_token(i + 1).kind == .lcbr {
+						return true
+					}
+					break
 				}
-				break
 			}
 			i++
 		}
@@ -2243,17 +2257,25 @@ fn (p &Parser) is_generic_call() bool {
 			}
 		} else if p.peek_tok.kind == .lsbr {
 			mut i := 3
+			mut nested_sbr_count := 0
 			for {
 				cur_tok := p.peek_token(i)
 				if cur_tok.kind == .eof
-					|| cur_tok.kind !in [.amp, .dot, .comma, .name, .lsbr, .rsbr] {
+					|| cur_tok.kind !in [.amp, .dot, .comma, .name, .lpar, .rpar, .lsbr, .rsbr, .key_fn] {
 					break
 				}
+				if cur_tok.kind == .lsbr {
+					nested_sbr_count++
+				}
 				if cur_tok.kind == .rsbr {
-					if p.peek_token(i + 1).kind == .lpar {
-						return true
+					if nested_sbr_count > 0 {
+						nested_sbr_count--
+					} else {
+						if p.peek_token(i + 1).kind == .lpar {
+							return true
+						}
+						break
 					}
-					break
 				}
 				i++
 			}
@@ -4150,4 +4172,24 @@ fn (mut p Parser) trace(fbase string, message string) {
 	if p.file_base == fbase {
 		println('> p.trace | ${fbase:-10s} | ${message}')
 	}
+}
+
+[params]
+struct ParserShowParams {
+	msg   string
+	reach int = 3
+}
+
+fn (mut p Parser) show(params ParserShowParams) {
+	mut context := []string{}
+	for i in -params.reach .. params.reach + 1 {
+		x := p.peek_token(i).str()
+		if i == 0 {
+			context << '    ${x:-30s}  '
+			continue
+		}
+		context << x
+	}
+	location := '${p.file_display_path}:${p.tok.line_nr}:'
+	println('>> ${location:-40s} ${params.msg} ${context.join('  ')}')
 }

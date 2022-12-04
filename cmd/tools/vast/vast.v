@@ -228,7 +228,7 @@ fn (t Tree) token_node(tok_kind token.Kind) &Node {
 }
 
 // enum type node
-fn (t Tree) enum_node<T>(value T) &Node {
+fn (t Tree) enum_node[T](value T) &Node {
 	return t.string_node('enum:${int(value)}(${value})')
 }
 
@@ -1986,7 +1986,7 @@ fn (t Tree) asm_io(node ast.AsmIO) &Node {
 }
 
 // do not support yet by vlang
-// fn (t Tree) array_node1<T>(nodes []T, method_name string) &Node {
+// fn (t Tree) array_node1[T](nodes []T, method_name string) &Node {
 // 	mut arr := new_array()
 
 // 	// call method dynamically, V do not support yet
@@ -2009,7 +2009,7 @@ fn (t Tree) asm_io(node ast.AsmIO) &Node {
 // }
 
 // do not support yet by vlang
-// fn (t Tree) array_node2<T>(nodes []T) &Node {
+// fn (t Tree) array_node2[T](nodes []T) &Node {
 // 	mut arr := new_array()
 
 // 	for node in nodes {

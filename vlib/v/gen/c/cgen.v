@@ -332,7 +332,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) (string,
 		pp.work_on_items(files)
 		global_g.timers.start('cgen unification')
 		// tg = thread gen
-		for g in pp.get_results_ref<Gen>() {
+		for g in pp.get_results_ref[Gen]() {
 			global_g.embedded_files << g.embedded_files
 			global_g.out.write(g.out) or { panic(err) }
 			global_g.cheaders.write(g.cheaders) or { panic(err) }
@@ -603,7 +603,7 @@ pub fn gen(files []&ast.File, table &ast.Table, pref &pref.Preferences) (string,
 }
 
 fn cgen_process_one_file_cb(mut p pool.PoolProcessor, idx int, wid int) &Gen {
-	file := p.get_item<&ast.File>(idx)
+	file := p.get_item[&ast.File](idx)
 	mut global_g := &Gen(p.get_shared_context())
 	mut g := &Gen{
 		file: file
@@ -991,8 +991,8 @@ fn (mut g Gen) generic_fn_name(types []ast.Type, before string) string {
 	if types.len == 0 {
 		return before
 	}
-	// Using _T_ to differentiate between get<string> and get_string
-	// `foo<int>()` => `foo_T_int()`
+	// Using _T_ to differentiate between get[string] and get_string
+	// `foo[int]()` => `foo_T_int()`
 	mut name := before + '_T'
 	for typ in types {
 		name += '_' + strings.repeat_string('__ptr__', typ.nr_muls()) + g.typ(typ.set_nr_muls(0))
@@ -1551,7 +1551,7 @@ pub fn (mut g Gen) write_multi_return_types() {
 		if sym.kind != .multi_return {
 			continue
 		}
-		if sym.cname.contains('<') {
+		if sym.cname.contains('[') {
 			continue
 		}
 		info := sym.mr_info()
@@ -2545,7 +2545,7 @@ fn cescape_nonascii(original string) string {
 	for c in original {
 		if c < 32 || c > 126 {
 			// Encode with a 3 digit octal escape code, which has the
-			// advantage to be limited/non dependant on what character
+			// advantage to be limited/non dependent on what character
 			// will follow next, unlike hex escapes:
 			write_octal_escape(mut b, c)
 			continue
@@ -5457,7 +5457,7 @@ fn (mut g Gen) sort_globals_consts() {
 	}
 }
 
-// sort structs by dependant fields
+// sort structs by dependent fields
 fn (mut g Gen) sort_structs(typesa []&ast.TypeSymbol) []&ast.TypeSymbol {
 	util.timing_start(@METHOD)
 	defer {
@@ -5569,7 +5569,7 @@ fn (mut g Gen) sort_structs(typesa []&ast.TypeSymbol) []&ast.TypeSymbol {
 			// ast.Interface {}
 			else {}
 		}
-		// add type and dependant types to graph
+		// add type and dependent types to graph
 		dep_graph.add(sym.name, field_deps)
 	}
 	// sort graph
@@ -5579,7 +5579,7 @@ fn (mut g Gen) sort_structs(typesa []&ast.TypeSymbol) []&ast.TypeSymbol {
 		// TODO: should it be removed?
 		verror('cgen.sort_structs(): the following structs form a dependency cycle:\n' +
 			dep_graph_sorted.display_cycles() +
-			'\nyou can solve this by making one or both of the dependant struct fields references, eg: field &MyStruct' +
+			'\nyou can solve this by making one or both of the dependent struct fields references, eg: field &MyStruct' +
 			'\nif you feel this is an error, please create a new issue here: https://github.com/vlang/v/issues and tag @joe-conigliaro')
 	}
 	// sort types
