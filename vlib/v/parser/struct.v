@@ -252,15 +252,16 @@ fn (mut p Parser) struct_decl(is_anon bool) ast.StructDecl {
 						typ = p.table.find_type_idx(anon_struct_decl.name)
 					}
 				} else {
+					start_type_pos := p.tok.pos()
 					typ = p.parse_type()
+					type_pos = start_type_pos.extend(p.prev_tok.pos())
 				}
 				p.inside_struct_field_decl = false
 				if typ.idx() == 0 {
 					// error is set in parse_type
 					return ast.StructDecl{}
 				}
-				type_pos = p.prev_tok.pos()
-				field_pos = field_start_pos.extend(type_pos)
+				field_pos = field_start_pos.extend(p.prev_tok.pos())
 				if typ.has_flag(.optional) || typ.has_flag(.result) {
 					optional_pos = p.peek_token(-2).pos()
 				}
@@ -569,7 +570,8 @@ fn (mut p Parser) interface_decl() ast.InterfaceDecl {
 	for p.tok.kind != .rcbr && p.tok.kind != .eof {
 		if p.tok.kind == .name && p.tok.lit.len > 0 && p.tok.lit[0].is_capital()
 			&& (p.peek_tok.line_nr != p.tok.line_nr
-			|| p.peek_tok.kind !in [.name, .amp, .lsbr, .lpar]) {
+			|| p.peek_tok.kind !in [.name, .amp, .lsbr, .lpar]
+			|| (p.peek_tok.kind == .lsbr && p.peek_tok.pos - p.tok.pos == p.tok.len)) {
 			iface_pos := p.tok.pos()
 			mut iface_name := p.tok.lit
 			iface_type := p.parse_type()
@@ -624,7 +626,7 @@ fn (mut p Parser) interface_decl() ast.InterfaceDecl {
 			is_mut = true
 			mut_pos = fields.len
 		}
-		if p.peek_tok.kind == .lt {
+		if p.peek_tok.kind in [.lt, .lsbr] && p.peek_tok.pos - p.tok.pos == p.tok.len {
 			p.error_with_pos("no need to add generic type names in generic interface's method",
 				p.peek_tok.pos())
 			return ast.InterfaceDecl{}

@@ -140,6 +140,7 @@ mut:
 	inside_const_opt_or_res   bool
 	inside_lambda             bool
 	inside_for_in_any_cond    bool
+	inside_cinit              bool
 	loop_depth                int
 	ternary_names             map[string]string
 	ternary_level_names       map[string][]string
@@ -156,6 +157,7 @@ mut:
 	defer_vars                []string
 	str_types                 []StrType       // types that need automatic str() generation
 	generated_str_fns         []StrType       // types that already have a str() function
+	str_fn_names              []string        // remove duplicate function names
 	threaded_fns              shared []string // for generating unique wrapper types and fns for `go xxx()`
 	waiter_fns                shared []string // functions that wait for `go xxx()` to finish
 	needed_equality_fns       []ast.Type
@@ -2472,9 +2474,23 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 					unwrapped_got_type = unwrapped_got_sym.info.types[g.aggregate_type_idx]
 					unwrapped_got_sym = g.table.sym(unwrapped_got_type)
 				}
+
 				fname := g.get_sumtype_casting_fn(unwrapped_got_type, unwrapped_expected_type)
-				g.call_cfn_for_casting_expr(fname, expr, expected_is_ptr, unwrapped_exp_sym.cname,
-					got_is_ptr, got_is_fn, got_styp)
+
+				if expr is ast.ArrayInit && got_sym.kind == .array_fixed {
+					stmt_str := g.go_before_stmt(0).trim_space()
+					g.empty_line = true
+					tmp_var := g.new_tmp_var()
+					g.write('${got_styp} ${tmp_var} = ')
+					g.expr(expr)
+					g.write(';')
+					g.write(stmt_str)
+					g.write('${fname}(&${tmp_var})')
+					return
+				} else {
+					g.call_cfn_for_casting_expr(fname, expr, expected_is_ptr, unwrapped_exp_sym.cname,
+						got_is_ptr, got_is_fn, got_styp)
+				}
 			}
 			return
 		}
@@ -3063,6 +3079,10 @@ fn (mut g Gen) map_fn_ptrs(key_typ ast.TypeSymbol) (string, string, string, stri
 	mut clone_fn := ''
 	mut free_fn := '&map_free_nop'
 	match key_typ.kind {
+		.alias {
+			alias_key_type := (key_typ.info as ast.Alias).parent_type
+			return g.map_fn_ptrs(g.table.sym(alias_key_type))
+		}
 		.u8, .i8, .char {
 			hash_fn = '&map_hash_int_1'
 			key_eq_fn = '&map_eq_int_1'
@@ -3501,10 +3521,10 @@ fn (mut g Gen) type_name(raw_type ast.Type) {
 }
 
 fn (mut g Gen) typeof_expr(node ast.TypeOf) {
-	typ := if node.expr_type == g.field_data_type {
+	typ := if node.typ == g.field_data_type {
 		g.comptime_for_field_value.typ
 	} else {
-		node.expr_type
+		node.typ
 	}
 	sym := g.table.sym(typ)
 	if sym.kind == .sum_type {
@@ -3524,9 +3544,7 @@ fn (mut g Gen) typeof_expr(node ast.TypeOf) {
 		varg_elem_type_sym := g.table.sym(g.table.value_type(typ))
 		g.write('_SLIT("...${util.strip_main_name(varg_elem_type_sym.name)}")')
 	} else {
-		x := g.table.type_to_str(typ)
-		y := util.strip_main_name(x)
-		g.write('_SLIT("${y}")')
+		g.type_name(typ)
 	}
 }
 
@@ -3544,6 +3562,7 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 				return
 			}
 			.unknown {
+				// ast.TypeOf of `typeof(string).idx` etc
 				if node.field_name == 'name' {
 					// typeof(expr).name
 					mut name_type := node.name_type
@@ -3560,7 +3579,7 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 					g.type_name(name_type)
 					return
 				} else if node.field_name == 'idx' {
-					// typeof(expr).idx
+					// `typeof(expr).idx`
 					g.write(int(g.unwrap_generic(node.name_type)).str())
 					return
 				}
@@ -3573,13 +3592,20 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 	}
 
 	if node.or_block.kind != .absent && !g.is_assign_lhs && g.table.sym(node.typ).kind != .chan {
+		is_ptr := g.table.sym(g.unwrap_generic(node.expr_type)).kind in [.interface_, .sum_type]
 		stmt_str := g.go_before_stmt(0).trim_space()
 		styp := g.typ(node.typ)
 		g.empty_line = true
 		tmp_var := g.new_tmp_var()
 		g.write('${styp} ${tmp_var} = ')
+		if is_ptr {
+			g.write('*(')
+		}
 		g.expr(node.expr)
 		g.write('.${node.field_name}')
+		if is_ptr {
+			g.write(')')
+		}
 		g.or_block(tmp_var, node.or_block, node.typ)
 		g.write(stmt_str)
 		g.write(' ')
@@ -4386,7 +4412,7 @@ fn (g &Gen) expr_is_multi_return_call(expr ast.Expr) bool {
 }
 
 fn (mut g Gen) gen_result_error(target_type ast.Type, expr ast.Expr) {
-	styp := g.typ(target_type)
+	styp := g.typ(g.unwrap_generic(target_type))
 	g.write('(${styp}){ .is_error=true, .err=')
 	g.expr(expr)
 	g.write(', .data={EMPTY_STRUCT_INITIALIZATION} }')
@@ -4394,7 +4420,7 @@ fn (mut g Gen) gen_result_error(target_type ast.Type, expr ast.Expr) {
 
 // NB: remove this when optional has no errors anymore
 fn (mut g Gen) gen_optional_error(target_type ast.Type, expr ast.Expr) {
-	styp := g.typ(target_type)
+	styp := g.typ(g.unwrap_generic(target_type))
 	g.write('(${styp}){ .state=2, .err=')
 	g.expr(expr)
 	g.write(', .data={EMPTY_STRUCT_INITIALIZATION} }')
@@ -5049,6 +5075,10 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 	}
 	// should the global be initialized now, not later in `vinit()`
 	cinit := node.attrs.contains('cinit')
+	g.inside_cinit = cinit
+	defer {
+		g.inside_cinit = false
+	}
 	cextern := node.attrs.contains('c_extern')
 	should_init := (!g.pref.use_cache && g.pref.build_mode != .build_module)
 		|| (g.pref.build_mode == .build_module && g.module_built == node.mod)
@@ -5334,6 +5364,7 @@ fn (mut g Gen) write_sorted_types() {
 }
 
 fn (mut g Gen) write_types(symbols []&ast.TypeSymbol) {
+	mut struct_names := []string{cap: 16}
 	for sym in symbols {
 		if sym.name.starts_with('C.') {
 			continue
@@ -5348,7 +5379,10 @@ fn (mut g Gen) write_types(symbols []&ast.TypeSymbol) {
 		mut name := sym.cname
 		match sym.info {
 			ast.Struct {
-				g.struct_decl(sym.info, name, false)
+				if name !in struct_names {
+					g.struct_decl(sym.info, name, false)
+					struct_names << name
+				}
 			}
 			ast.Alias {
 				// ast.Alias { TODO
@@ -5372,9 +5406,10 @@ fn (mut g Gen) write_types(symbols []&ast.TypeSymbol) {
 				}
 			}
 			ast.SumType {
-				if sym.info.is_generic {
+				if sym.info.is_generic || name in struct_names {
 					continue
 				}
+				struct_names << name
 				g.typedefs.writeln('typedef struct ${name} ${name};')
 				g.type_definitions.writeln('')
 				g.type_definitions.writeln('// Union sum type ${name} = ')

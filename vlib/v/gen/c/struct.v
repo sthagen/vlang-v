@@ -37,12 +37,11 @@ fn (mut g Gen) struct_init(node ast.StructInit) {
 		g.go_back(1) // delete the `&` already generated in `prefix_expr()
 	}
 	mut is_anon := false
-	if sym.kind == .struct_ {
-		mut info := sym.info as ast.Struct
-
-		is_anon = info.is_anon
+	if mut sym.info is ast.Struct {
+		is_anon = sym.info.is_anon
 	}
-	if !is_anon {
+
+	if !g.inside_cinit && !is_anon {
 		g.write('(')
 		defer {
 			g.write(')')
@@ -62,6 +61,12 @@ fn (mut g Gen) struct_init(node ast.StructInit) {
 			g.writeln('&(${basetyp}){')
 		} else {
 			g.write('&(${basetyp}){')
+		}
+	} else if g.inside_cinit {
+		if is_multiline {
+			g.writeln('{')
+		} else {
+			g.write('{')
 		}
 	} else {
 		if is_multiline {

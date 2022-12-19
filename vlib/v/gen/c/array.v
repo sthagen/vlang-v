@@ -222,9 +222,15 @@ fn (mut g Gen) array_init_with_fields(node ast.ArrayInit, elem_type Type, is_amp
 			g.write('sizeof(${elem_styp}), ')
 		}
 		if is_default_array {
+			info := elem_type.unaliased_sym.info as ast.Array
+			depth := if g.table.sym(info.elem_type).kind == .array {
+				1
+			} else {
+				0
+			}
 			g.write('(${elem_styp}[]){')
 			g.write(g.type_default(node.elem_type))
-			g.write('}[0])')
+			g.write('}[0], ${depth})')
 		} else if node.has_len && node.elem_type == ast.string_type {
 			g.write('&(${elem_styp}[]){')
 			g.write('_SLIT("")')
@@ -291,7 +297,17 @@ fn (mut g Gen) array_init_with_fields(node ast.ArrayInit, elem_type Type, is_amp
 	} else {
 		g.write('sizeof(${elem_styp}), ')
 	}
-	if is_default_array || is_default_map {
+	if is_default_array {
+		info := elem_type.unaliased_sym.info as ast.Array
+		depth := if g.table.sym(info.elem_type).kind == .array {
+			1
+		} else {
+			0
+		}
+		g.write('(${elem_styp}[]){')
+		g.expr(node.default_expr)
+		g.write('}[0], ${depth})')
+	} else if is_default_map {
 		g.write('(${elem_styp}[]){')
 		g.expr(node.default_expr)
 		g.write('}[0])')
@@ -303,7 +319,7 @@ fn (mut g Gen) array_init_with_fields(node ast.ArrayInit, elem_type Type, is_amp
 		g.write('&(${elem_styp}[]){')
 		g.write('_SLIT("")')
 		g.write('})')
-	} else if node.has_len && elem_type.unaliased_sym.kind in [.array, .map] {
+	} else if node.has_len && elem_type.unaliased_sym.kind in [.struct_, .array, .map] {
 		g.write('(voidptr)&(${elem_styp}[]){')
 		g.write(g.type_default(node.elem_type))
 		g.write('}[0])')
@@ -948,6 +964,7 @@ fn (mut g Gen) gen_array_any(node ast.CallExpr) {
 	if has_infix_left_var_name {
 		g.indent--
 		g.writeln('}')
+		g.set_current_pos_as_last_stmt_pos()
 	}
 	if s_ends_with_ln {
 		g.writeln(s)
@@ -1023,6 +1040,7 @@ fn (mut g Gen) gen_array_all(node ast.CallExpr) {
 	if has_infix_left_var_name {
 		g.indent--
 		g.writeln('}')
+		g.set_current_pos_as_last_stmt_pos()
 	}
 	if s_ends_with_ln {
 		g.writeln(s)

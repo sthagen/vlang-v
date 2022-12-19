@@ -109,6 +109,10 @@ fn (mut g Gen) final_gen_str(typ StrType) {
 	}
 	styp := typ.styp
 	str_fn_name := styp_to_str_fn_name(styp)
+	if str_fn_name in g.str_fn_names {
+		return
+	}
+	g.str_fn_names << str_fn_name
 	if typ.typ.has_flag(.optional) {
 		g.gen_str_for_option(typ.typ, styp, str_fn_name)
 		return
@@ -709,8 +713,18 @@ fn (mut g Gen) gen_str_for_map(info ast.Map, styp string, str_fn_name string) {
 		val_sym = g.table.sym(val_typ)
 	}
 	val_styp := g.typ(val_typ)
-	elem_str_fn_name := val_styp.replace('*', '') + '_str'
-	if !val_sym.has_method('str') {
+	mut elem_str_fn_name := val_styp.replace('*', '') + '_str'
+	if val_sym.has_method_with_generic_parent('str') {
+		match mut val_sym.info {
+			ast.Struct, ast.Interface, ast.SumType {
+				if val_sym.info.generic_types.len > 0 {
+					elem_str_fn_name = g.generic_fn_name(val_sym.info.concrete_types,
+						elem_str_fn_name)
+				}
+			}
+			else {}
+		}
+	} else {
 		g.get_str_fn(val_typ)
 	}
 
@@ -742,7 +756,7 @@ fn (mut g Gen) gen_str_for_map(info ast.Map, styp string, str_fn_name string) {
 	} else if val_sym.kind == .string {
 		tmp_str := str_intp_sq('*(${val_styp}*)DenseArray_value(&m.key_values, i)')
 		g.auto_str_funcs.writeln('\t\tstrings__Builder_write_string(&sb, ${tmp_str});')
-	} else if should_use_indent_func(val_sym.kind) && !val_sym.has_method('str') {
+	} else if should_use_indent_func(val_sym.kind) && !val_sym.has_method_with_generic_parent('str') {
 		ptr_str := '*'.repeat(val_typ.nr_muls())
 		g.auto_str_funcs.writeln('\t\tstrings__Builder_write_string(&sb, indent_${elem_str_fn_name}(*${ptr_str}(${val_styp}*)DenseArray_value(&m.key_values, i), indent_count));')
 	} else if val_sym.kind in [.f32, .f64] {

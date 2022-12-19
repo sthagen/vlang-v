@@ -52,6 +52,7 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 				c.error('struct field does not support storing result', field.optional_pos)
 			}
 			c.ensure_type_exists(field.typ, field.type_pos) or { return }
+			c.ensure_generic_type_specify_type_names(field.typ, field.type_pos) or { return }
 			if field.typ.has_flag(.generic) {
 				has_generic_types = true
 			}
@@ -77,10 +78,11 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 				if info.is_heap && !field.typ.is_ptr() {
 					struct_sym.info.is_heap = true
 				}
-				if info.generic_types.len > 0 && !field.typ.has_flag(.generic)
-					&& info.concrete_types.len == 0 {
-					c.error('field `${field.name}` type is generic struct, must specify the generic type names, e.g. Foo[T], Foo[int]',
-						field.type_pos)
+				for ct in info.concrete_types {
+					ct_sym := c.table.sym(ct)
+					if ct_sym.kind == .placeholder {
+						c.error('unknown type `${ct_sym.name}`', field.type_pos)
+					}
 				}
 			}
 			if sym.kind == .multi_return {
@@ -169,7 +171,7 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 			}
 		}
 		if node.generic_types.len == 0 && has_generic_types {
-			c.error('generic struct declaration must specify the generic type names, e.g. Foo[T]',
+			c.error('generic struct `${node.name}` declaration must specify the generic type names, e.g. ${node.name}[T]',
 				node.pos)
 		}
 	}
@@ -275,6 +277,9 @@ fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 						node.pos)
 				} else if node.generic_types.len > 0 && c.table.cur_fn != unsafe { nil } {
 					for gtyp in node.generic_types {
+						if !gtyp.has_flag(.generic) {
+							continue
+						}
 						gtyp_name := c.table.sym(gtyp).name
 						if gtyp_name !in c.table.cur_fn.generic_names {
 							cur_generic_names := '(' + c.table.cur_fn.generic_names.join(',') + ')'
@@ -289,10 +294,6 @@ fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 		if node.generic_types.len > 0 && struct_sym.info.generic_types.len == 0 {
 			c.error('a non generic struct `${node.typ_str}` used like a generic struct',
 				node.name_pos)
-		}
-		if node.generic_types.len > 0 && struct_sym.info.generic_types.len == node.generic_types.len
-			&& struct_sym.info.generic_types != node.generic_types {
-			c.table.replace_generic_type(node.typ, node.generic_types)
 		}
 	} else if struct_sym.info is ast.Alias {
 		parent_sym := c.table.sym(struct_sym.info.parent_type)
@@ -607,7 +608,8 @@ fn (mut c Checker) struct_init(mut node ast.StructInit) ast.Type {
 			from_info := from_sym.info as ast.Struct
 			to_info := to_sym.info as ast.Struct
 			// TODO this check is too strict
-			if !c.check_struct_signature(from_info, to_info) {
+			if !c.check_struct_signature(from_info, to_info)
+				|| !c.check_struct_signature_init_fields(from_info, to_info, node) {
 				c.error('struct `${from_sym.name}` is not compatible with struct `${to_sym.name}`',
 					node.update_expr.pos())
 			}

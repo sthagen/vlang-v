@@ -89,17 +89,18 @@ pub struct TypeSymbol {
 pub:
 	parent_idx int
 pub mut:
-	info     TypeInfo
-	kind     Kind
-	name     string // the internal & source name of the type, i.e. `[5]int`.
-	cname    string // the name with no dots for use in the generated C code
-	methods  []Fn
-	mod      string
-	is_pub   bool
-	language Language
-	idx      int
-	size     int = -1
-	align    int = -1
+	info          TypeInfo
+	kind          Kind
+	name          string // the internal & source name of the type, i.e. `[5]int`.
+	cname         string // the name with no dots for use in the generated C code
+	methods       []Fn
+	generic_types []Type
+	mod           string
+	is_pub        bool
+	language      Language
+	idx           int
+	size          int = -1
+	align         int = -1
 }
 
 // max of 8
@@ -1044,7 +1045,7 @@ pub mut:
 pub struct GenericInst {
 pub mut:
 	parent_idx     int    // idx of the base generic struct
-	concrete_types []Type // concrete types, e.g. <int, string>
+	concrete_types []Type // concrete types, e.g. [int, string]
 }
 
 [minify]
@@ -1147,7 +1148,7 @@ pub fn (mytable &Table) type_to_code(t Type) string {
 	}
 }
 
-// clean type name from generics form. From Type<int> -> Type
+// clean type name from generics form. From Type[int] -> Type
 pub fn (t &Table) clean_generics_type_str(typ Type) string {
 	result := t.type_to_str(typ)
 	return result.all_before('[')
@@ -1435,12 +1436,12 @@ pub fn (t &Table) fn_signature_using_aliases(func &Fn, import_aliases map[string
 }
 
 // symbol_name_except_generic return the name of the complete qualified name of the type,
-// but without the generic parts. For example, `main.Abc<int>` -> `main.Abc`
+// but without the generic parts. For example, `main.Abc[int]` -> `main.Abc`
 pub fn (t &TypeSymbol) symbol_name_except_generic() string {
-	// main.Abc<int>
+	// main.Abc[int]
 	mut embed_name := t.name
 	// remove generic part from name
-	// main.Abc<int> => main.Abc
+	// main.Abc[int] => main.Abc
 	if embed_name.contains('[') {
 		embed_name = embed_name.all_before('[')
 	}
@@ -1448,10 +1449,10 @@ pub fn (t &TypeSymbol) symbol_name_except_generic() string {
 }
 
 pub fn (t &TypeSymbol) embed_name() string {
-	// main.Abc<int> => Abc<int>
+	// main.Abc[int] => Abc[int]
 	mut embed_name := t.name.split('.').last()
 	// remove generic part from name
-	// Abc<int> => Abc
+	// Abc[int] => Abc
 	if embed_name.contains('[') {
 		embed_name = embed_name.split('[')[0]
 	}
