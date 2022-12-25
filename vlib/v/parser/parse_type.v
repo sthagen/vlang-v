@@ -654,14 +654,14 @@ pub fn (mut p Parser) find_type_or_add_placeholder(name string, language ast.Lan
 				if p.struct_init_generic_types.len > 0 && sym.info.generic_types.len > 0
 					&& p.struct_init_generic_types != sym.info.generic_types {
 					generic_names := p.struct_init_generic_types.map(p.table.sym(it).name)
-					mut sym_name := sym.name + '['
+					mut sym_name := sym.name + '<'
 					for i, gt in generic_names {
 						sym_name += gt
 						if i != generic_names.len - 1 {
 							sym_name += ','
 						}
 					}
-					sym_name += ']'
+					sym_name += '>'
 					existing_idx := p.table.type_idxs[sym_name]
 					if existing_idx > 0 {
 						idx = existing_idx
@@ -720,10 +720,10 @@ pub fn (mut p Parser) parse_generic_inst_type(name string) ast.Type {
 		if gts.kind == .multi_return {
 			p.error_with_pos('cannot use multi return as generic concrete type', type_pos)
 		}
-		if gt.has_flag(.generic) && gts.name.len > 1 {
-			p.error_with_pos('the parameter type name of a generic struct, must be a single capital letter placeholder name, like T or X, or a non-generic type name like int, string, etc.',
-				type_pos)
-		}
+		// if gt.has_flag(.generic) && gts.name.len > 1 {
+		// 	p.error_with_pos('the parameter type name of a generic struct, must be a single capital letter placeholder name, like T or X, or a non-generic type name like int, string, etc.',
+		// 		type_pos)
+		// }
 		bs_name += gts.name
 		bs_cname += gts.cname
 		concrete_types << gt

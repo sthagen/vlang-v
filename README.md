@@ -14,7 +14,8 @@
 [![Sponsor][SponsorBadge]][SponsorUrl]
 [![Patreon][PatreonBadge]][PatreonUrl]
 [![Discord][DiscordBadge]][DiscordUrl]
-[![Twitter][TwitterUrl]][TwitterBadge]
+[![Twitter][TwitterBadge]][TwitterUrl]
+[![Twitter][ModulesBadge]][ModulesUrl]
 </div>
 
 ## Key Features of V
@@ -188,8 +189,12 @@ v run tetris/tetris.v
 ```
 <img src='https://raw.githubusercontent.com/vlang/v/master/examples/tetris/screenshot.png' width=300 alt='tetris screenshot'>
 
-NB: In order to build Tetris or 2048 (or anything else using `sokol` or  `gg` graphics modules)
-on some Linux systems, you need to install `libxi-dev` and `libxcursor-dev` .
+NB: In order to build Tetris or 2048 (or anything else using `sokol` or `gg` graphics modules),
+you will need additional development libraries for your system.
+For some Linux distros (Debian/Ubuntu based), you need to run this:
+`sudo apt install libxi-dev libxcursor-dev`.
+For Fedora/RH/CentOS, you need to run this:
+`sudo dnf install libXcursor-devel libXi-devel libX11-devel libglvnd-devel` .
 
 ## V net.http, net.websocket, `v install`
 The net.http module, the net.websocket module, and the `v install` command may all use SSL.
@@ -293,10 +298,12 @@ Please see the [Troubleshooting](https://github.com/vlang/v/wiki/Troubleshooting
 [DiscordBadge]: https://img.shields.io/discord/592103645835821068?label=Discord&logo=discord&logoColor=white
 [PatreonBadge]: https://img.shields.io/endpoint.svg?url=https%3A%2F%2Fshieldsio-patreon.vercel.app%2Fapi%3Fusername%3Dvlang%26type%3Dpatrons&style=flat
 [SponsorBadge]: https://camo.githubusercontent.com/da8bc40db5ed31e4b12660245535b5db67aa03ce/68747470733a2f2f696d672e736869656c64732e696f2f7374617469632f76313f6c6162656c3d53706f6e736f72266d6573736167653d254532253944254134266c6f676f3d476974487562
-[TwitterBadge]: https://twitter.com/v_language
+[TwitterBadge]: https://img.shields.io/twitter/follow/v_language.svg?style=flatl&label=Follow&logo=twitter&logoColor=white&color=1da1f2
+[ModulesBadge]: https://img.shields.io/badge/modules-reference-027d9c?logo=v&logoColor=white&logoWidth=10
 
 [WorkflowUrl]: https://github.com/vlang/v/commits/master
 [DiscordUrl]: https://discord.gg/vlang
 [PatreonUrl]: https://patreon.com/vlang
 [SponsorUrl]: https://github.com/sponsors/medvednikov
-[TwitterUrl]: https://img.shields.io/twitter/follow/v_language.svg?style=flatl&label=Follow&logo=twitter&logoColor=white&color=1da1f2
+[TwitterUrl]: https://twitter.com/v_language
+[ModulesUrl]: https://modules.vlang.io

@@ -215,30 +215,28 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 				c.error('optional or result type argument is not supported currently',
 					param.type_pos)
 			}
-			if !param.typ.is_ptr() { // value parameter, i.e. on stack - check for `[heap]`
-				arg_typ_sym := c.table.sym(param.typ)
-				if arg_typ_sym.info is ast.Struct {
-					if arg_typ_sym.info.is_heap { // set auto_heap to promote value parameter
-						mut v := node.scope.find_var(param.name) or { continue }
-						v.is_auto_heap = true
-					}
-					if arg_typ_sym.info.generic_types.len > 0 && !param.typ.has_flag(.generic)
-						&& arg_typ_sym.info.concrete_types.len == 0 {
-						c.error('generic struct `${arg_typ_sym.name}` in fn declaration must specify the generic type names, e.g. ${arg_typ_sym.name}[T]',
-							param.type_pos)
-					}
-				} else if arg_typ_sym.info is ast.Interface {
-					if arg_typ_sym.info.generic_types.len > 0 && !param.typ.has_flag(.generic)
-						&& arg_typ_sym.info.concrete_types.len == 0 {
-						c.error('generic interface `${arg_typ_sym.name}` in fn declaration must specify the generic type names, e.g. ${arg_typ_sym.name}[T]',
-							param.type_pos)
-					}
-				} else if arg_typ_sym.info is ast.SumType {
-					if arg_typ_sym.info.generic_types.len > 0 && !param.typ.has_flag(.generic)
-						&& arg_typ_sym.info.concrete_types.len == 0 {
-						c.error('generic sumtype `${arg_typ_sym.name}` in fn declaration must specify the generic type names, e.g. ${arg_typ_sym.name}[T]',
-							param.type_pos)
-					}
+			arg_typ_sym := c.table.sym(param.typ)
+			if arg_typ_sym.info is ast.Struct {
+				if !param.typ.is_ptr() && arg_typ_sym.info.is_heap { // set auto_heap to promote value parameter
+					mut v := node.scope.find_var(param.name) or { continue }
+					v.is_auto_heap = true
+				}
+				if arg_typ_sym.info.generic_types.len > 0 && !param.typ.has_flag(.generic)
+					&& arg_typ_sym.info.concrete_types.len == 0 {
+					c.error('generic struct `${arg_typ_sym.name}` in fn declaration must specify the generic type names, e.g. ${arg_typ_sym.name}[T]',
+						param.type_pos)
+				}
+			} else if arg_typ_sym.info is ast.Interface {
+				if arg_typ_sym.info.generic_types.len > 0 && !param.typ.has_flag(.generic)
+					&& arg_typ_sym.info.concrete_types.len == 0 {
+					c.error('generic interface `${arg_typ_sym.name}` in fn declaration must specify the generic type names, e.g. ${arg_typ_sym.name}[T]',
+						param.type_pos)
+				}
+			} else if arg_typ_sym.info is ast.SumType {
+				if arg_typ_sym.info.generic_types.len > 0 && !param.typ.has_flag(.generic)
+					&& arg_typ_sym.info.concrete_types.len == 0 {
+					c.error('generic sumtype `${arg_typ_sym.name}` in fn declaration must specify the generic type names, e.g. ${arg_typ_sym.name}[T]',
+						param.type_pos)
 				}
 			}
 			// Ensure each generic type of the parameter was declared in the function's definition
@@ -278,8 +276,12 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 			if node.params.len != 2 {
 				c.error('operator methods should have exactly 1 argument', node.pos)
 			} else {
-				receiver_sym := c.table.sym(node.receiver.typ)
-				param_sym := c.table.sym(node.params[1].typ)
+				receiver_type := node.receiver.typ
+				receiver_sym := c.table.sym(receiver_type)
+
+				param_type := node.params[1].typ
+				param_sym := c.table.sym(param_type)
+
 				if param_sym.kind == .string && receiver_sym.kind == .string {
 					// bypass check for strings
 					// TODO there must be a better way to handle that
@@ -301,6 +303,11 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 						c.error('operator comparison methods should return `bool`', node.pos)
 					} else if parent_sym.is_primitive() {
 						c.error('cannot define operator methods on type alias for `${parent_sym.name}`',
+							node.pos)
+					} else if receiver_type != param_type {
+						srtype := c.table.type_to_str(receiver_type)
+						sptype := c.table.type_to_str(param_type)
+						c.error('the receiver type `${srtype}` should be the same type as the operand `${sptype}`',
 							node.pos)
 					}
 				}

@@ -2,11 +2,20 @@
 // Use of this source code is governed by an MIT license that can be found in the LICENSE file.
 module main
 
-// This module follows a similar convention to Rust: `init` makes the
+import os
+
+// Note: this program follows a similar convention to Rust: `init` makes the
 // structure of the program in the _current_ directory, while `new`
 // makes the program structure in a _sub_ directory. Besides that, the
 // functionality is essentially the same.
-import os
+
+// Note: here are the currently supported invokations so far:
+// 1) `v init` -> create a new project in the current folder
+// 2) `v new abc` -> create a new project in the new folder `abc`, by default a "hello world" project.
+// 3) `v new abcd web` -> create a new project in the new folder `abcd`, using the vweb template.
+// 4) `v new abcde gg` -> create a new project in the new folder `abcde`, using the gg template.
+
+// Note: run `v cmd/tools/vcreate_test.v` after changes to this program, to avoid regressions.
 
 struct Create {
 mut:
@@ -50,6 +59,30 @@ fn vmod_content(c Create) string {
 	dependencies: []
 }
 "
+}
+
+fn new_project_content() string {
+	if os.args.len == 2 && os.args[1] == 'init' {
+		return main_content()
+	}
+	if os.args.len == 3 {
+		return main_content()
+	}
+	if os.args.len == 4 {
+		kind := os.args.last()
+		return match kind {
+			'web' {
+				simple_web_app()
+			}
+			'gg' {
+				main_content() // TODO
+			}
+			else {
+				''
+			}
+		}
+	}
+	return ''
 }
 
 fn main_content() string {
@@ -116,7 +149,7 @@ fn (c &Create) write_main(new bool) {
 		return
 	}
 	main_path := if new { '${c.name}/${c.name}.v' } else { '${c.name}.v' }
-	os.write_file(main_path, main_content()) or { panic(err) }
+	os.write_file(main_path, new_project_content()) or { panic(err) }
 }
 
 fn (c &Create) write_gitattributes(new bool) {
@@ -151,6 +184,13 @@ fn (c &Create) create_git_repo(dir string) {
 }
 
 fn create(args []string) {
+	if os.args.len == 4 {
+		template := os.args.last()
+		if template !in ['web', 'gg'] {
+			eprintln('uknown template "${template}", possible templates: web, gg')
+			exit(1)
+		}
+	}
 	mut c := Create{}
 	c.name = check_name(if args.len > 0 { args[0] } else { os.input('Input your project name: ') })
 	if c.name == '' {
@@ -214,4 +254,62 @@ fn main() {
 		}
 	}
 	println('Complete!')
+}
+
+fn simple_web_app() string {
+	return "import vweb
+import sqlite // can change to 'mysql', 'pg'
+
+const (
+	port = 8082
+)
+
+struct App {
+	vweb.Context
+mut:
+	db shared sqlite.DB
+}
+
+pub fn (app App) before_request() {
+	println('[web] before_request: \${app.req.method} \${app.req.url}')
+}
+
+fn main() {
+	vweb.run(&App{
+		db: sqlite.connect('vweb.sql')!
+}, port)
+}
+
+['/users/:name']
+pub fn (mut app App) user(name string) vweb.Result {
+	user := sql app.db {
+		select from User where name == name
+	}
+	return \$vweb.html()
+}
+
+['/api/users/:name']
+pub fn (mut app App) user(name string) vweb.Result {
+	user := sql app.db {
+		select from User where name == name
+	}
+	return app.json({
+		user: id
+	})
+}
+
+pub fn (mut app App) index() vweb.Result {
+	return \$vweb.html()
+}
+
+[post]
+['/register']
+pub fn (mut app App) register_user(name string, password string) vweb.Result {
+	user := User{name:name, password, password}
+	sql app.db {
+		insert user into User
+	}
+	return app.redirect('/')
+}
+"
 }
