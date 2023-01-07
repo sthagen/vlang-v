@@ -65,6 +65,10 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	if left_sym.kind == .none_ && right_sym.kind == .none_ {
 		c.invalid_operator_error(node.op, left_type, right_type, left_right_pos)
 	}
+	if left_sym.kind == .multi_return && right_sym.kind == .multi_return {
+		c.error('invalid number of operand for `${node.op}`. Only one allowed on each side.',
+			left_right_pos)
+	}
 	if left_type.is_any_kind_of_pointer()
 		&& node.op in [.plus, .minus, .mul, .div, .mod, .xor, .amp, .pipe] {
 		if !c.pref.translated && ((right_type.is_any_kind_of_pointer() && node.op != .minus)
@@ -458,7 +462,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					return ast.void_type
 				} else if left_value_sym.kind == .sum_type {
 					if right_sym.kind != .array {
-						if !c.table.is_sumtype_or_in_variant(left_value_type, ast.mktyp(right_type)) {
+						if !c.table.is_sumtype_or_in_variant(left_value_type, ast.mktyp(c.unwrap_generic(right_type))) {
 							c.error('cannot append `${right_sym.name}` to `${left_sym.name}`',
 								right_pos)
 						}
