@@ -887,6 +887,7 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 		return ast.void_type
 	}
 
+	node.is_file_translated = func.is_file_translated
 	node.is_noreturn = func.is_noreturn
 	node.is_ctor_new = func.is_ctor_new
 	if !found_in_args {
@@ -909,7 +910,7 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 	}
 	node.is_keep_alive = func.is_keep_alive
 	if func.language == .v && func.no_body && !c.pref.translated && !c.file.is_translated
-		&& !func.is_unsafe && func.mod != 'builtin' {
+		&& !func.is_unsafe && !func.is_file_translated && func.mod != 'builtin' {
 		c.error('cannot call a function that does not have a body', node.pos)
 	}
 	if node.concrete_types.len > 0 && func.generic_names.len > 0
@@ -1019,6 +1020,9 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 			}
 		}
 		arg_typ_sym := c.table.sym(arg_typ)
+		if arg_typ_sym.kind == .none_ {
+			c.error('cannot use `none` as function argument', call_arg.pos)
+		}
 		param_typ_sym := c.table.sym(param.typ)
 		if func.is_variadic && arg_typ.has_flag(.variadic) && node.args.len - 1 > i {
 			c.error('when forwarding a variadic variable, it must be the final argument',
@@ -1747,6 +1751,9 @@ fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 						1} to `${method_name}`', arg.pos)
 				}
 				continue
+			}
+			if final_arg_sym.kind == .none_ {
+				c.error('cannot use `none` as method argument', arg.pos)
 			}
 			if param.typ.is_ptr() && !arg.typ.is_real_pointer() && arg.expr.is_literal()
 				&& !c.pref.translated {
