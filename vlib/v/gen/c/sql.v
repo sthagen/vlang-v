@@ -156,7 +156,7 @@ fn (mut g Gen) sql_insert(node ast.SqlStmtLine, expr string, table_name string, 
 
 	for sub in subs {
 		g.sql_stmt_line(sub, expr, or_expr)
-		g.writeln('array_push(&${last_ids_arr}, _MOV((orm__Primitive[]){orm__Connection_name_table[${expr}._typ]._method_last_id(${expr}._object)}));')
+		g.writeln('array_push(&${last_ids_arr}, _MOV((orm__Primitive[]){orm__int_to_primitive(orm__Connection_name_table[${expr}._typ]._method_last_id(${expr}._object))}));')
 	}
 
 	g.write('${result_name}_void ${res} = orm__Connection_name_table[${expr}._typ]._method_')
@@ -207,7 +207,7 @@ fn (mut g Gen) sql_insert(node ast.SqlStmtLine, expr string, table_name string, 
 
 	if arrs.len > 0 {
 		mut id_name := g.new_tmp_var()
-		g.writeln('orm__Primitive ${id_name} = orm__Connection_name_table[${expr}._typ]._method_last_id(${expr}._object);')
+		g.writeln('orm__Primitive ${id_name} = orm__int_to_primitive(orm__Connection_name_table[${expr}._typ]._method_last_id(${expr}._object));')
 		for i, mut arr in arrs {
 			idx := g.new_tmp_var()
 			g.writeln('for (int ${idx} = 0; ${idx} < ${arr.object_var_name}.${field_names[i]}.len; ${idx}++) {')
@@ -286,6 +286,9 @@ fn (mut g Gen) sql_expr_to_orm_primitive(expr ast.Expr) {
 		ast.StringLiteral {
 			g.sql_write_orm_primitive(ast.string_type, expr)
 		}
+		ast.StringInterLiteral {
+			g.sql_write_orm_primitive(ast.string_type, expr)
+		}
 		ast.IntegerLiteral {
 			g.sql_write_orm_primitive(ast.int_type, expr)
 		}
@@ -304,7 +307,7 @@ fn (mut g Gen) sql_expr_to_orm_primitive(expr ast.Expr) {
 		}
 		else {
 			eprintln(expr)
-			verror('Unknown expr')
+			verror('V ORM: ${expr.type_name()} is not supported')
 		}
 	}
 }
@@ -417,6 +420,9 @@ fn (mut g Gen) sql_where_data(expr ast.Expr, mut fields []string, mut parenthese
 			}
 		}
 		ast.StringLiteral {
+			data << expr
+		}
+		ast.StringInterLiteral {
 			data << expr
 		}
 		ast.IntegerLiteral {

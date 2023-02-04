@@ -800,7 +800,11 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 						typ = obj.smartcasts.last()
 					} else {
 						if obj.typ == 0 {
-							typ = c.expr(obj.expr)
+							if obj.expr is ast.IfGuardExpr {
+								typ = c.expr(obj.expr.expr)
+							} else {
+								typ = c.expr(obj.expr)
+							}
 						} else {
 							typ = obj.typ
 						}
@@ -2232,7 +2236,11 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 	if method_name == 'slice' && !c.is_builtin_mod {
 		c.error('.slice() is a private method, use `x[start..end]` instead', node.pos)
 	}
-	array_info := left_sym.info as ast.Array
+	array_info := if left_sym.info is ast.Array {
+		left_sym.info as ast.Array
+	} else {
+		c.table.sym(c.unwrap_generic(left_type)).info as ast.Array
+	}
 	elem_typ = array_info.elem_type
 	if method_name in ['filter', 'map', 'any', 'all'] {
 		// position of `it` doesn't matter
