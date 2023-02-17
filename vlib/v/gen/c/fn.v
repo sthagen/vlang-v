@@ -434,11 +434,6 @@ fn (mut g Gen) c_fn_name(node &ast.FnDecl) !string {
 			return error('none')
 		}
 		name = g.cc_type(node.receiver.typ, false) + '_' + name
-		if unwrapped_rec_sym.language == .c && node.receiver.typ.is_real_pointer()
-			&& node.name == 'str' {
-			// TODO: handle this in a more general way, perhaps add a `[typedef_incomplete]` attribute, for C structs instead of this hack
-			name = name.replace_once('C__', '')
-		}
 	}
 	if node.language == .c {
 		name = util.no_dots(name)
@@ -957,6 +952,19 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			else {}
 		}
 	}
+
+	if node.from_embed_types.len == 0 && node.left is ast.Ident {
+		if node.left.obj is ast.Var {
+			if node.left.obj.smartcasts.len > 0 {
+				unwrapped_rec_type = g.unwrap_generic(node.left.obj.smartcasts.last())
+				cast_sym := g.table.sym(unwrapped_rec_type)
+				if cast_sym.info is ast.Aggregate {
+					unwrapped_rec_type = cast_sym.info.types[g.aggregate_type_idx]
+				}
+			}
+		}
+	}
+
 	if g.inside_comptime_for_field {
 		mut node_ := unsafe { node }
 		comptime_args = g.change_comptime_args(mut node_)
@@ -1764,6 +1772,19 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 					}
 				}
 			}
+		} else if arg.expr is ast.ArrayDecompose {
+			mut d_count := 0
+			for d_i in i .. expected_types.len {
+				g.write('*(${g.typ(expected_types[d_i])}*)array_get(')
+				g.expr(arg.expr)
+				g.write(', ${d_count})')
+
+				if d_i < expected_types.len - 1 {
+					g.write(', ')
+				}
+				d_count++
+			}
+			continue
 		}
 		use_tmp_var_autofree := g.is_autofree && arg.typ == ast.string_type && arg.is_tmp_autofree
 			&& !g.inside_const && !g.is_builtin_mod

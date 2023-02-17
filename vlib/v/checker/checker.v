@@ -2694,6 +2694,11 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 	//        node.typ: `Outside`
 	node.expr_type = c.expr(node.expr) // type to be casted
 
+	if node.expr is ast.ComptimeSelector {
+		node.expr_type = c.get_comptime_selector_type(node.expr as ast.ComptimeSelector,
+			node.expr_type)
+	}
+
 	mut from_type := c.unwrap_generic(node.expr_type)
 	from_sym := c.table.sym(from_type)
 	final_from_sym := c.table.final_sym(from_type)
@@ -3643,6 +3648,9 @@ fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) ast.Type {
 	c.inside_ref_lit = old_inside_ref_lit
 	node.right_type = right_type
 	if node.op == .amp {
+		if node.right is ast.Nil {
+			c.error('invalid operation: cannot take address of nil', node.right.pos())
+		}
 		if mut node.right is ast.PrefixExpr {
 			if node.right.op == .amp {
 				c.error('unexpected `&`, expecting expression', node.right.pos)
