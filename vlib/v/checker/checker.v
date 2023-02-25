@@ -2755,7 +2755,9 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 	if from_type == ast.void_type {
 		c.error('expression does not return a value so it cannot be cast', node.expr.pos())
 	}
-	if to_sym.kind == .sum_type {
+	if to_type.has_flag(.option) && from_type == ast.none_type {
+		// allow conversion from none to every option type
+	} else if to_sym.kind == .sum_type {
 		if from_type in [ast.int_literal_type, ast.float_literal_type] {
 			xx := if from_type == ast.int_literal_type { ast.int_type } else { ast.f64_type }
 			node.expr_type = c.promote_num(node.expr_type, xx)
@@ -3116,7 +3118,7 @@ fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 					return c.expected_type
 				}
 			}
-			c.error('cycle in constant `${c.const_decl}`', node.pos)
+			c.error('cycle in constant `${c.const_var.name}`', node.pos)
 			return ast.void_type
 		}
 		c.const_deps << name
