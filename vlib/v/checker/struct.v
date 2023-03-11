@@ -648,13 +648,20 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 					}
 				}
 				if !field.has_default_expr && field.name !in inited_fields && !field.typ.is_ptr()
-					&& c.table.final_sym(field.typ).kind == .struct_ {
+					&& !field.typ.has_flag(.option) && c.table.final_sym(field.typ).kind == .struct_ {
 					mut zero_struct_init := ast.StructInit{
 						pos: node.pos
 						typ: field.typ
 					}
 					c.struct_init(mut zero_struct_init, true)
 				}
+			}
+			for embed in info.embeds {
+				mut zero_struct_init := ast.StructInit{
+					pos: node.pos
+					typ: embed
+				}
+				c.struct_init(mut zero_struct_init, true)
 			}
 			// println('>> checked_types.len: $checked_types.len | checked_types: $checked_types | type_sym: $type_sym.name ')
 		}

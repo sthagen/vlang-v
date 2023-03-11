@@ -992,7 +992,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		&& !typ_sym.has_method(node.name) {
 		unwrapped_rec_type = (typ_sym.info as ast.Alias).parent_type
 		typ_sym = g.table.sym(unwrapped_rec_type)
-	} else if typ_sym.kind == .array && !typ_sym.has_method(node.name) {
+	} else if typ_sym.kind == .array && !typ_sym.has_method(node.name) && node.name != 'str' {
 		typ := g.table.unaliased_type((typ_sym.info as ast.Array).elem_type)
 		typ_idx := g.table.find_type_idx(g.table.array_name(typ))
 		if typ_idx > 0 {
@@ -1481,6 +1481,10 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 							if cast_sym.info is ast.Aggregate {
 								typ = cast_sym.info.types[g.aggregate_type_idx]
 							}
+						}
+						// handling println( var or { ... })
+						if typ.has_flag(.option) && expr.or_expr.kind != .absent {
+							typ = typ.clear_flag(.option)
 						}
 					}
 				}
@@ -2380,7 +2384,7 @@ fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type ast.Type, lang as
 		return
 	} else if arg.expr is ast.ArrayInit {
 		if arg.expr.is_fixed {
-			if !arg.expr.has_it {
+			if !arg.expr.has_index {
 				g.write('(${g.typ(arg.expr.typ)})')
 			}
 		}
