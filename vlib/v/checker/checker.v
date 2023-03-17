@@ -98,8 +98,11 @@ mut:
 	for_in_any_val_type              ast.Type
 	comptime_for_field_var           string
 	comptime_fields_default_type     ast.Type
+	comptime_fields_key_type         ast.Type // key type on `$for k, v in val.$(field.name)`
+	comptime_fields_val_type         ast.Type // value type on `$for k, v in val.$(field.name)`
 	comptime_fields_type             map[string]ast.Type
 	comptime_for_field_value         ast.StructField // value of the field variable
+	comptime_enum_field_value        string // current enum value name
 	fn_scope                         &ast.Scope = unsafe { nil }
 	main_fn_decl_node                ast.FnDecl
 	match_exhaustive_cutoff_limit    int = 10
@@ -115,6 +118,7 @@ mut:
 	is_index_assign                  bool
 	comptime_call_pos                int // needed for correctly checking use before decl for templates
 	goto_labels                      map[string]ast.GotoLabel // to check for unused goto labels
+	enum_data_type                   ast.Type
 }
 
 pub fn new_checker(table &ast.Table, pref_ &pref.Preferences) &Checker {
@@ -544,7 +548,7 @@ fn (mut c Checker) sum_type_decl(node ast.SumTypeDecl) {
 			c.error('sum type cannot hold a reference type', variant.pos)
 		}
 		c.ensure_type_exists(variant.typ, variant.pos) or {}
-		mut sym := c.table.sym(variant.typ)
+		sym := c.table.sym(variant.typ)
 		if sym.name in names_used {
 			c.error('sum type ${node.name} cannot hold the type `${sym.name}` more than once',
 				variant.pos)
@@ -554,7 +558,7 @@ fn (mut c Checker) sum_type_decl(node ast.SumTypeDecl) {
 			c.error('sum type cannot hold an interface', variant.pos)
 		} else if sym.kind == .struct_ && sym.language == .js {
 			c.error('sum type cannot hold a JS struct', variant.pos)
-		} else if mut sym.info is ast.Struct {
+		} else if sym.info is ast.Struct {
 			if sym.info.is_generic {
 				if !variant.typ.has_flag(.generic) {
 					c.error('generic struct `${sym.name}` must specify generic type names, e.g. ${sym.name}[T]',
@@ -577,11 +581,10 @@ fn (mut c Checker) sum_type_decl(node ast.SumTypeDecl) {
 				}
 			}
 		} else if sym.info is ast.FnType {
-			func := (sym.info as ast.FnType).func
-			if c.table.sym(func.return_type).name.ends_with('.${node.name}') {
+			if c.table.sym(sym.info.func.return_type).name.ends_with('.${node.name}') {
 				c.error('sum type `${node.name}` cannot be defined recursively', variant.pos)
 			}
-			for param in func.params {
+			for param in sym.info.func.params {
 				if c.table.sym(param.typ).name.ends_with('.${node.name}') {
 					c.error('sum type `${node.name}` cannot be defined recursively', variant.pos)
 				}
@@ -1301,6 +1304,10 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 		c.error('`${node.expr}` does not return a value', node.pos)
 		node.expr_type = ast.void_type
 		return ast.void_type
+	} else if c.inside_comptime_for_field && typ == c.enum_data_type && node.field_name == 'value' {
+		// for comp-time enum.values
+		node.expr_type = c.comptime_fields_type[c.comptime_for_field_var]
+		return node.expr_type
 	}
 	node.expr_type = typ
 	if !(node.expr is ast.Ident && (node.expr as ast.Ident).kind == .constant) {
@@ -2474,8 +2481,12 @@ pub fn (mut c Checker) expr(node_ ast.Expr) ast.Type {
 			c.expected_type = ast.string_type
 			node.expr_type = c.expr(node.expr)
 
-			if node.expr is ast.Ident && c.is_comptime_var(node.expr) {
-				node.expr_type = c.comptime_fields_default_type
+			if c.inside_comptime_for_field && node.expr is ast.Ident {
+				if c.is_comptime_var(node.expr) {
+					node.expr_type = c.get_comptime_var_type(node.expr as ast.Ident)
+				} else if (node.expr as ast.Ident).name in c.comptime_fields_type {
+					node.expr_type = c.comptime_fields_type[(node.expr as ast.Ident).name]
+				}
 			}
 			c.check_expr_opt_call(node.expr, node.expr_type)
 			etidx := node.expr_type.idx()
@@ -2674,9 +2685,10 @@ pub fn (mut c Checker) expr(node_ ast.Expr) ast.Type {
 		}
 		ast.StructInit {
 			if node.unresolved {
-				return c.expr(ast.resolve_init(node, c.unwrap_generic(node.typ), c.table))
+				return c.expr(c.table.resolve_init(node, c.unwrap_generic(node.typ)))
 			}
-			return c.struct_init(mut node, false)
+			mut inited_fields := []string{}
+			return c.struct_init(mut node, false, mut inited_fields)
 		}
 		ast.TypeNode {
 			if !c.inside_x_is_type && node.typ.has_flag(.generic) && unsafe { c.table.cur_fn != 0 }
@@ -3650,7 +3662,7 @@ fn (c &Checker) has_return(stmts []ast.Stmt) ?bool {
 
 pub fn (mut c Checker) is_comptime_var(node ast.Expr) bool {
 	return c.inside_comptime_for_field && node is ast.Ident
-		&& (node as ast.Ident).info is ast.IdentVar && (node as ast.Ident).kind == .variable && ((node as ast.Ident).obj as ast.Var).is_comptime_field
+		&& (node as ast.Ident).info is ast.IdentVar && (node as ast.Ident).kind == .variable && ((node as ast.Ident).obj as ast.Var).ct_type_var != .no_comptime
 }
 
 fn (mut c Checker) mark_as_referenced(mut node ast.Expr, as_interface bool) {
