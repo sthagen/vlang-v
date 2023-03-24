@@ -3427,13 +3427,6 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 				g.error('unknown generic field', node.pos)
 			}
 		}
-	} else {
-		// for comp-time enum value evaluation
-		if node.expr_type == g.enum_data_type && node.expr is ast.Ident
-			&& (node.expr as ast.Ident).name == 'value' {
-			g.write(node.str())
-			return
-		}
 	}
 	if node.expr_type == 0 {
 		g.checker_bug('unexpected SelectorExpr.expr_type = 0', node.pos)
@@ -6144,14 +6137,19 @@ fn (mut g Gen) size_of(node ast.SizeOf) {
 	g.write('sizeof(${util.no_dots(styp)})')
 }
 
-fn (mut g Gen) enum_val(node ast.EnumVal) {
-	styp := g.typ(g.table.unaliased_type(node.typ))
-	if g.pref.translated && node.typ.is_number() {
+[inline]
+fn (mut g Gen) gen_enum_prefix(typ ast.Type) string {
+	if g.pref.translated && typ.is_number() {
 		// Mostly in translated code, when C enums are used as ints in switches
-		g.write('_const_main__${node.val}')
+		return '_const_main__'
 	} else {
-		g.write('${styp}__${node.val}')
+		styp := g.typ(g.table.unaliased_type(typ))
+		return '${styp}__'
 	}
+}
+
+fn (mut g Gen) enum_val(node ast.EnumVal) {
+	g.write('${g.gen_enum_prefix(node.typ)}${node.val}')
 }
 
 fn (mut g Gen) as_cast(node ast.AsCast) {
