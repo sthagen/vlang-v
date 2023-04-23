@@ -63,6 +63,7 @@ mut:
 	inside_struct_field_decl  bool
 	inside_struct_attr_decl   bool
 	inside_map_init           bool
+	inside_orm                bool
 	or_is_handled             bool       // ignore `or` in this expression
 	builtin_mod               bool       // are we in the `builtin` module?
 	mod                       string     // current module name
@@ -754,7 +755,7 @@ pub fn (mut p Parser) top_stmt() ast.Stmt {
 				if p.peek_tok.kind == .key_for {
 					comptime_for_stmt := p.comptime_for()
 					return p.other_stmts(comptime_for_stmt)
-				} else {
+				} else if p.peek_tok.kind == .key_if {
 					if_expr := p.if_expr(true)
 					cur_stmt := ast.ExprStmt{
 						expr: if_expr
@@ -765,6 +766,8 @@ pub fn (mut p Parser) top_stmt() ast.Stmt {
 					} else {
 						return p.other_stmts(cur_stmt)
 					}
+				} else {
+					return p.unexpected()
 				}
 			}
 			.hash {
@@ -4010,7 +4013,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 	if p.tok.kind == .key_fn && p.is_fn_type_decl() {
 		// function type: `type mycallback = fn(string, int)`
 		fn_name := p.prepend_mod(name)
-		fn_type := p.parse_fn_type(fn_name)
+		fn_type := p.parse_fn_type(fn_name, generic_types)
 		p.table.sym(fn_type).is_pub = is_pub
 		type_pos = type_pos.extend(p.tok.pos())
 		comments = p.eat_comments(same_line: true)

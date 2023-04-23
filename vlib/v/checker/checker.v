@@ -1127,8 +1127,7 @@ fn (mut c Checker) check_or_last_stmt(stmt ast.Stmt, ret_type ast.Type, expr_ret
 				c.expected_or_type = ret_type.clear_flags(.option, .result)
 				last_stmt_typ := c.expr(stmt.expr)
 
-				if ret_type.has_flag(.option)
-					&& (last_stmt_typ.has_flag(.option) || last_stmt_typ == ast.none_type) {
+				if last_stmt_typ.has_flag(.option) || last_stmt_typ == ast.none_type {
 					if stmt.expr in [ast.Ident, ast.SelectorExpr, ast.CallExpr, ast.None] {
 						expected_type_name := c.table.type_to_str(ret_type.clear_flags(.option,
 							.result))
@@ -1440,6 +1439,7 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 		if node.or_block.kind == .block {
 			c.expected_or_type = node.typ.clear_flags(.option, .result)
 			c.stmts_ending_with_expression(node.or_block.stmts)
+			c.check_or_expr(node.or_block, node.typ, c.expected_or_type, node)
 			c.expected_or_type = ast.void_type
 		}
 		return field.typ
@@ -1471,6 +1471,7 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 		node.has_hidden_receiver = true
 		method.name = ''
 		fn_type := ast.new_type(c.table.find_or_register_fn_type(method, false, true))
+		node.typ = fn_type
 		return fn_type
 	}
 	if sym.kind !in [.struct_, .aggregate, .interface_, .sum_type] {
@@ -2238,7 +2239,7 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 		else {
 			if node.kind == 'define' {
 				if !c.is_builtin_mod && !c.file.path.ends_with('.c.v')
-					&& !c.file.path.contains('vlib' + os.path_separator) {
+					&& !c.file.path.contains('vlib') {
 					c.error("#define can only be used in vlib (V's standard library) and *.c.v files",
 						node.pos)
 				}
