@@ -324,7 +324,7 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 						continue
 					}
 					gtyp_name := c.table.sym(gtyp).name
-					if gtyp_name !in c.table.cur_fn.generic_names {
+					if gtyp_name.len == 1 && gtyp_name !in c.table.cur_fn.generic_names {
 						cur_generic_names := '(' + c.table.cur_fn.generic_names.join(',') + ')'
 						c.error('generic struct init type parameter `${gtyp_name}` must be within the parameters `${cur_generic_names}` of the current generic function',
 							node.pos)
@@ -572,6 +572,14 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 							c.error('cannot assign negative value to unsigned integer type',
 								field.expr.pos)
 						}
+					}
+				}
+
+				if field_type_sym.kind == .struct_ && !(field_type_sym.info as ast.Struct).is_anon
+					&& mut field.expr is ast.StructInit {
+					if field.expr.is_anon {
+						c.error('cannot assign anonymous `struct` to a typed `struct`',
+							field.expr.pos)
 					}
 				}
 			}
