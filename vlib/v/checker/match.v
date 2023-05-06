@@ -9,7 +9,7 @@ fn (mut c Checker) match_expr(mut node ast.MatchExpr) ast.Type {
 	node.is_expr = c.expected_type != ast.void_type
 	node.expected_type = c.expected_type
 	if mut node.cond is ast.ParExpr && !c.pref.translated && !c.file.is_translated {
-		c.error('unnecessary `()` in `match` condition, use `match expr {` instead of `match (expr) {`.',
+		c.warn('unnecessary `()` in `match` condition, use `match expr {` instead of `match (expr) {`.',
 			node.cond.pos)
 	}
 	if node.is_expr {
@@ -196,6 +196,10 @@ fn (mut c Checker) match_exprs(mut node ast.MatchExpr, cond_type_sym ast.TypeSym
 			}
 			if expr is ast.TypeNode && cond_sym.kind == .struct_ {
 				c.error('struct instances cannot be matched by type name, they can only be matched to other instances of the same struct type',
+					branch.pos)
+			}
+			if mut expr is ast.TypeNode && cond_sym.is_primitive() {
+				c.error('matching by type can only be done for sum types, generics, interfaces, `${node.cond}` is none of those',
 					branch.pos)
 			}
 			if mut expr is ast.RangeExpr {
