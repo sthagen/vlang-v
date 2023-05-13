@@ -986,6 +986,10 @@ pub fn (mut f Fmt) enum_decl(node ast.EnumDecl) {
 			f.write(' = ')
 			f.expr(field.expr)
 		}
+		if field.attrs.len > 0 {
+			f.write(' ')
+			f.single_line_attrs(field.attrs, inline: true)
+		}
 		f.comments(field.comments, inline: true, has_nl: false, level: .indent)
 		f.writeln('')
 		f.comments(field.next_comments, inline: false, has_nl: true, level: .indent)
@@ -2018,6 +2022,17 @@ pub fn (mut f Fmt) ident(node ast.Ident) {
 		}
 		name := f.short_module(node.name)
 		f.write(name)
+		if node.concrete_types.len > 0 {
+			f.write('[')
+			for i, concrete_type in node.concrete_types {
+				typ_name := f.table.type_to_str_using_aliases(concrete_type, f.mod2alias)
+				f.write(typ_name)
+				if i != node.concrete_types.len - 1 {
+					f.write(', ')
+				}
+			}
+			f.write(']')
+		}
 		if node.or_expr.kind == .propagate_option {
 			f.write('?')
 		} else if node.or_expr.kind == .block {
