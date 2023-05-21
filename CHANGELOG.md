@@ -4,6 +4,10 @@
  in addition to `[skip]`. This allows having custom behavior for different serialization methods.
 - ORM: fixed a foreign key bug that could result in an extra insert.
 - Generic functions as function parameters are now supported: `fn f[T](x T, i int, f_ Fn[T]) T { `.
+- Enum values now can have attributes.
+- json: Enum value string serialization supports `[json:'alias']` to change its string values.
+- Functions can now return fixed size arrays.
+- The builtin websocket library is now thread safe.
 
 ## V 0.3.4
 
@@ -140,12 +144,12 @@ Final steps in making the Option type a first class type:
   	a T
   	b U
   }
-  
+
   foo := Foo{
   	a: 2
   	b: 'x'
   }
-  
+
   println(foo)
   ```
 - unsafe: dereferencing nil references is no longer allowed in the following case:

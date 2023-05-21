@@ -182,6 +182,10 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 				if right.op == .amp && right.right is ast.StructInit {
 					right_type = c.expr(right)
 				}
+			} else if mut right is ast.Ident {
+				if right.kind == .function {
+					c.expr(right)
+				}
 			}
 			if right.is_auto_deref_var() {
 				left_type = ast.mktyp(right_type.deref())
@@ -254,7 +258,7 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 		if !is_decl && left is ast.Ident && !is_blank_ident && !left_type.is_real_pointer()
 			&& right_type.is_real_pointer() && !right_type.has_flag(.shared_f) {
 			left_sym := c.table.sym(left_type)
-			if left_sym.kind != .function {
+			if left_sym.kind !in [.function, .array] {
 				c.warn(
 					'cannot assign a reference to a value (this will be an error soon) left=${c.table.type_str(left_type)} ${left_type.is_ptr()} ' +
 					'right=${c.table.type_str(right_type)} ${right_type.is_real_pointer()} ptr=${right_type.is_ptr()}',

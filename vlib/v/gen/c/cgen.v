@@ -799,6 +799,7 @@ pub fn (mut g Gen) init() {
 	g.write_typedef_types()
 	g.write_typeof_functions()
 	g.write_sorted_types()
+	g.write_array_fixed_return_types()
 	g.write_multi_return_types()
 	g.definitions.writeln('// end of definitions #endif')
 	if g.pref.compile_defines_all.len > 0 {
@@ -1390,7 +1391,7 @@ pub fn (mut g Gen) write_typedef_types() {
 						mut def_str := 'typedef ${fixed};'
 						def_str = def_str.replace_once('(*)', '(*${styp}[${len}])')
 						g.type_definitions.writeln(def_str)
-					} else {
+					} else if !info.is_fn_ret {
 						g.type_definitions.writeln('typedef ${fixed} ${styp} [${len}];')
 						base := g.typ(info.elem_type.clear_flags(.option, .result))
 						if info.elem_type.has_flag(.option) && base !in g.options_forward {
@@ -1571,6 +1572,30 @@ pub fn (mut g Gen) write_fn_typesymbol_declaration(sym ast.TypeSymbol) {
 		}
 		g.type_definitions.writeln(')${call_conv_attribute_suffix};')
 	}
+}
+
+pub fn (mut g Gen) write_array_fixed_return_types() {
+	g.typedefs.writeln('\n// BEGIN_array_fixed_return_typedefs')
+	g.type_definitions.writeln('\n// BEGIN_array_fixed_return_structs')
+
+	for sym in g.table.type_symbols {
+		if sym.kind != .array_fixed || (sym.info as ast.ArrayFixed).elem_type.has_flag(.generic)
+			|| !(sym.info as ast.ArrayFixed).is_fn_ret {
+			continue
+		}
+		info := sym.info as ast.ArrayFixed
+		mut fixed_elem_name := g.typ(info.elem_type.set_nr_muls(0))
+		if info.elem_type.is_ptr() {
+			fixed_elem_name += '*'.repeat(info.elem_type.nr_muls())
+		}
+		g.typedefs.writeln('typedef struct ${sym.cname} ${sym.cname};')
+		g.type_definitions.writeln('struct ${sym.cname} {')
+		g.type_definitions.writeln('\t${fixed_elem_name} ret_arr[${info.size}];')
+		g.type_definitions.writeln('};')
+	}
+
+	g.typedefs.writeln('// END_array_fixed_return_typedefs\n')
+	g.type_definitions.writeln('// END_array_fixed_return_structs\n')
 }
 
 pub fn (mut g Gen) write_multi_return_types() {
@@ -4564,6 +4589,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 	fn_return_is_multi := sym.kind == .multi_return
 	fn_return_is_option := fn_ret_type.has_flag(.option)
 	fn_return_is_result := fn_ret_type.has_flag(.result)
+	fn_return_is_fixed_array := sym.kind == .array_fixed && !fn_ret_type.has_flag(.option)
 
 	mut has_semicolon := false
 	if node.exprs.len == 0 {
@@ -4581,10 +4607,14 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 		return
 	}
 	tmpvar := g.new_tmp_var()
-	ret_typ := g.typ(g.unwrap_generic(fn_ret_type))
+	mut ret_typ := g.typ(g.unwrap_generic(fn_ret_type))
+	if fn_ret_type.has_flag(.generic) && fn_return_is_fixed_array {
+		ret_typ = '_v_${ret_typ}'
+	}
 	mut use_tmp_var := g.defer_stmts.len > 0 || g.defer_profile_code.len > 0
 		|| g.cur_lock.lockeds.len > 0
 		|| (fn_return_is_multi && node.exprs.len >= 1 && fn_return_is_option)
+		|| fn_return_is_fixed_array
 	// handle promoting none/error/function returning _option'
 	if fn_return_is_option {
 		option_none := node.exprs[0] is ast.None
@@ -4879,7 +4909,20 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 			if g.fn_decl.return_type.has_flag(.option) {
 				g.expr_with_opt(node.exprs[0], node.types[0], g.fn_decl.return_type)
 			} else {
-				g.expr_with_cast(node.exprs[0], node.types[0], g.fn_decl.return_type)
+				if fn_return_is_fixed_array && !node.types[0].has_flag(.option) {
+					g.writeln('{0};')
+					if node.exprs[0] is ast.Ident {
+						g.write('memcpy(${tmpvar}.ret_arr, ${g.expr_string(node.exprs[0])}, sizeof(${g.typ(node.types[0])})) /*ret*/')
+					} else {
+						tmpvar2 := g.new_tmp_var()
+						g.write('${g.typ(node.types[0])} ${tmpvar2} = ')
+						g.expr_with_cast(node.exprs[0], node.types[0], g.fn_decl.return_type)
+						g.writeln(';')
+						g.write('memcpy(${tmpvar}.ret_arr, ${tmpvar2}, sizeof(${g.typ(node.types[0])})) /*ret*/')
+					}
+				} else {
+					g.expr_with_cast(node.exprs[0], node.types[0], g.fn_decl.return_type)
+				}
 			}
 		}
 		if use_tmp_var {
@@ -5638,7 +5681,8 @@ fn (mut g Gen) write_types(symbols []&ast.TypeSymbol) {
 			}
 			ast.ArrayFixed {
 				elem_sym := g.table.sym(sym.info.elem_type)
-				if !elem_sym.is_builtin() && !sym.info.elem_type.has_flag(.generic) {
+				if !elem_sym.is_builtin() && !sym.info.elem_type.has_flag(.generic)
+					&& !sym.info.is_fn_ret {
 					// .array_fixed {
 					styp := sym.cname
 					// array_fixed_char_300 => char x[300]
@@ -5889,7 +5933,7 @@ fn (mut g Gen) or_block(var_name string, or_block ast.OrExpr, return_type ast.Ty
 	is_none_ok := return_type == ast.ovoid_type
 	g.writeln(';')
 	if is_none_ok {
-		g.writeln('if (${cvar_name}.state != 0 && ${cvar_name}.err._typ != _IError_None___index) {')
+		g.writeln('if (${cvar_name}.state != 0) {')
 	} else {
 		if return_type != 0 && g.table.sym(return_type).kind == .function {
 			mr_styp = 'voidptr'
@@ -5958,7 +6002,7 @@ fn (mut g Gen) or_block(var_name string, or_block ast.OrExpr, return_type ast.Ty
 			err_msg := 'IError_name_table[${cvar_name}.err._typ]._method_msg(${cvar_name}.err._object)'
 			if g.pref.is_debug {
 				paline, pafile, pamod, pafn := g.panic_debug_info(or_block.pos)
-				g.writeln('panic_debug(${paline}, tos3("${pafile}"), tos3("${pamod}"), tos3("${pafn}"), ${err_msg} );')
+				g.writeln('panic_debug(${paline}, tos3("${pafile}"), tos3("${pamod}"), tos3("${pafn}"), ${err_msg}.len == 0 ? _SLIT("option not set ()") : ${err_msg});')
 			} else {
 				g.writeln('\tpanic_option_not_set( ${err_msg} );')
 			}

@@ -2131,7 +2131,7 @@ fn (mut p Parser) is_following_concrete_types() bool {
 		} else if cur_tok.kind == .rsbr {
 			break
 		} else if cur_tok.kind == .name {
-			if !(cur_tok.lit.len > 1 && p.is_typename(cur_tok)) {
+			if !(p.is_typename(cur_tok) && !(cur_tok.lit.len == 1 && !cur_tok.lit[0].is_capital())) {
 				return false
 			}
 		} else if cur_tok.kind != .comma {
@@ -3788,8 +3788,9 @@ fn (mut p Parser) global_decl() ast.GlobalDecl {
 		}
 	}
 
-	if !p.has_globals && !p.pref.enable_globals && !p.pref.is_fmt && !p.pref.translated
-		&& !p.is_translated && !p.pref.is_livemain && !p.pref.building_v && !p.builtin_mod {
+	if !p.has_globals && !p.pref.enable_globals && !p.pref.is_fmt && !p.pref.is_vet
+		&& !p.pref.translated && !p.is_translated && !p.pref.is_livemain && !p.pref.building_v
+		&& !p.builtin_mod {
 		p.error('use `v -enable-globals ...` to enable globals')
 		return ast.GlobalDecl{}
 	}
@@ -4099,7 +4100,6 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 				name_pos)
 			return ast.SumTypeDecl{}
 		}
-		comments = p.eat_comments(same_line: true)
 		return ast.SumTypeDecl{
 			name: name
 			typ: typ
@@ -4109,7 +4109,6 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 			attrs: p.attrs
 			pos: decl_pos
 			name_pos: name_pos
-			comments: comments
 		}
 	}
 	// type MyType = int
