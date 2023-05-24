@@ -4263,7 +4263,7 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 	node_typ := g.unwrap_generic(node.typ)
 	mut expr_type := node.expr_type
 	sym := g.table.sym(node_typ)
-	if node.expr is ast.Ident && g.is_comptime_var(node.expr) {
+	if (node.expr is ast.Ident && g.is_comptime_var(node.expr)) || node.expr is ast.ComptimeSelector {
 		expr_type = g.unwrap_generic(g.get_comptime_var_type(node.expr))
 	}
 	if sym.kind in [.sum_type, .interface_] {
@@ -6116,7 +6116,7 @@ fn (mut g Gen) type_default(typ_ ast.Type) string {
 				for field in info.fields {
 					field_sym := g.table.sym(field.typ)
 					if field.has_default_expr
-						|| field_sym.kind in [.array, .map, .string, .bool, .alias, .i8, .i16, .int, .i64, .u8, .u16, .u32, .u64, .char, .voidptr, .byteptr, .charptr, .struct_, .chan] {
+						|| field_sym.kind in [.array, .map, .string, .bool, .alias, .i8, .i16, .int, .i64, .u8, .u16, .u32, .u64, .f32, .f64, .char, .voidptr, .byteptr, .charptr, .struct_, .chan] {
 						field_name := c_name(field.name)
 						if field.has_default_expr {
 							mut expr_str := ''
