@@ -163,6 +163,10 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 								field.default_expr.pos)
 						}
 					}
+					if field.typ.has_flag(.option) && field.default_expr is ast.None {
+						c.warn('unnecessary default value of `none`: struct fields are zeroed by default',
+							field.default_expr.pos)
+					}
 					continue
 				}
 				if field.typ in ast.unsigned_integer_type_idxs {
@@ -645,7 +649,8 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 						break
 					}
 				}
-				if sym.kind == .interface_ && (!has_noinit && sym.language != .js) {
+				if !field.typ.has_flag(.option) && sym.kind == .interface_
+					&& (!has_noinit && sym.language != .js) {
 					// TODO: should be an error instead, but first `ui` needs updating.
 					c.note('interface field `${type_sym.name}.${field.name}` must be initialized',
 						node.pos)

@@ -251,6 +251,34 @@ pub fn (mut app App) controller_get_user_by_id() vweb.Result {
 	return app.text(app.query.str())
 }
 ```
+#### - Host
+To restrict an endpoint to a specific host, you can use the `host` attribute
+followed by a colon `:` and the host name. You can test the Host feature locally 
+by adding a host to the "hosts" file of your device.
+
+**Example:**
+
+```v ignore
+['/'; host: 'example.com']
+pub fn (mut app App) hello_web() vweb.Result {
+	return app.text('Hello World')
+}
+
+['/'; host: 'api.example.org']
+pub fn (mut app App) hello_api() vweb.Result {
+	return app.text('Hello API')
+}
+
+// define the handler without a host attribute last if you have conflicting paths.
+['/']
+pub fn (mut app App) hello_others() vweb.Result {
+	return app.text('Hello Others')
+}
+```
+
+You can also [create a controller](#hosts) to handle all requests from a specific
+host in one app.
+
 ### Middleware
 
 Vweb has different kinds of middleware.
@@ -661,6 +689,43 @@ pub fn (mut app App) admin_path vweb.Result {
 There will be an error, because the controller `Admin` handles all routes starting with
 `"/admin"`; the method `admin_path` is unreachable.
 
+#### Hosts
+You can also set a host for a controller. All requests coming from that host will be handled
+by the controller.
+
+**Example:**
+```v
+module main
+
+import vweb
+
+struct App {
+	vweb.Context
+	vweb.Controller
+}
+
+pub fn (mut app App) index() vweb.Result {
+	return app.text('App')
+}
+
+struct Example {
+	vweb.Context
+}
+
+// You can only access this route at example.com: http://example.com/
+pub fn (mut app Example) index() vweb.Result {
+	return app.text('Example')
+}
+
+fn main() {
+	vweb.run(&App{
+		controllers: [
+			vweb.controller_host('example.com', '/', &Example{}),
+		]
+	}, 8080)
+}
+```
+
 #### Databases and `[vweb_global]` in controllers
 
 Fields with `[vweb_global]` have to passed to each controller individually.
@@ -980,7 +1045,8 @@ pub fn (mut app App) form_echo() vweb.Result {
 #### -handle_static
 
 handle_static is used to mark a folder (relative to the current working folder) as one that
-contains only static resources (css files, images etc).
+contains only static resources (css files, images etc).\
+host_handle_static can be used to limit the static resources to a specific host.
 
 If `root` is set the mount path for the dir will be in '/'
 
@@ -990,6 +1056,7 @@ If `root` is set the mount path for the dir will be in '/'
 fn main() {
     mut app := &App{}
     app.serve_static('/favicon.ico', 'favicon.ico')
+    // app.host_serve_static('localhost', '/favicon.ico', 'favicon.ico')
     // Automatically make available known static mime types found in given directory.
     os.chdir(os.dir(os.executable()))?
     app.handle_static('assets', true)
@@ -1005,11 +1072,15 @@ For example: suppose you have called .mount_static_folder_at('/var/share/myasset
 and you have a file /var/share/myassets/main.css .
 => That file will be available at URL: http://server/assets/main.css .
 
+mount_static_folder_at can be used to limit the static resources to a specific host.
+
 #### -serve_static
 
 Serves a file static.
 `url` is the access path on the site, `file_path` is the real path to the file, `mime_type` is the
 file type
+
+host_serve_static can be used to limit the static resources to a specific host.
 
 **Example:**
 
@@ -1017,6 +1088,7 @@ file type
 fn main() {
     mut app := &App{}
     app.serve_static('/favicon.ico', 'favicon.ico')
+    // app.host_serve_static('localhost', /favicon.ico', 'favicon.ico')
     app.mount_static_folder_at(os.resource_abs_path('.'), '/')
     vweb.run(app, 8081)
 }
