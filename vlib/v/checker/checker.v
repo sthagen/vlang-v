@@ -12,7 +12,6 @@ import v.util
 import v.util.version
 import v.errors
 import v.pkgconfig
-import v.checker.constants
 
 const (
 	int_min                  = int(0x80000000)
@@ -643,6 +642,13 @@ fn (mut c Checker) fail_if_immutable(expr_ ast.Expr) (string, token.Pos) {
 			return '', expr.pos
 		}
 		ast.ComptimeSelector {
+			if mut expr.left is ast.Ident {
+				if mut expr.left.obj is ast.Var {
+					if expr.left.obj.ct_type_var != .generic_param {
+						c.fail_if_immutable(expr.left)
+					}
+				}
+			}
 			return '', expr.pos
 		}
 		ast.Ident {
@@ -1822,7 +1828,7 @@ fn (mut c Checker) stmt(node_ ast.Stmt) {
 			for i, ident in node.defer_vars {
 				mut id := ident
 				if mut id.info is ast.IdentVar {
-					if id.comptime && id.name in constants.valid_comptime_not_user_defined {
+					if id.comptime && id.name in ast.valid_comptime_not_user_defined {
 						node.defer_vars[i] = ast.Ident{
 							scope: 0
 							name: ''
@@ -2530,6 +2536,14 @@ pub fn (mut c Checker) expr(node_ ast.Expr) ast.Type {
 
 			unwrapped_expr_type := c.unwrap_generic(node.expr_type)
 			tsym := c.table.sym(unwrapped_expr_type)
+			if tsym.kind == .array_fixed {
+				info := tsym.info as ast.ArrayFixed
+				if !info.is_fn_ret {
+					// for dumping fixed array we must register the fixed array struct to return from function
+					c.table.find_or_register_array_fixed(info.elem_type, info.size, info.size_expr,
+						true)
+				}
+			}
 			type_cname := if node.expr_type.has_flag(.option) {
 				'_option_${tsym.cname}'
 			} else {

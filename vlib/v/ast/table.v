@@ -372,6 +372,43 @@ pub fn (t &Table) find_method_with_embeds(sym &TypeSymbol, method_name string) !
 	}
 }
 
+// find_enum_field_val finds the int value from the enum name and enum field
+pub fn (t &Table) find_enum_field_val(name string, field_ string) i64 {
+	mut val := i64(0)
+	enum_decl := t.enum_decls[name]
+	mut enum_vals := []i64{}
+	for field in enum_decl.fields {
+		if field.name == field_ {
+			if field.has_expr {
+				if field.expr is IntegerLiteral {
+					val = field.expr.val.i64()
+					break
+				}
+			} else {
+				if enum_vals.len > 0 {
+					val = enum_vals.last() + 1
+				} else {
+					val = 0
+				}
+				break
+			}
+		} else {
+			if field.has_expr {
+				if field.expr is IntegerLiteral {
+					enum_vals << field.expr.val.i64()
+				}
+			} else {
+				if enum_vals.len > 0 {
+					enum_vals << enum_vals.last() + 1
+				} else {
+					enum_vals << 0
+				}
+			}
+		}
+	}
+	return val
+}
+
 pub fn (t &Table) get_embed_methods(sym &TypeSymbol) []Fn {
 	mut methods := []Fn{}
 	if sym.info is Struct {
@@ -1905,7 +1942,7 @@ pub fn (mut t Table) unwrap_generic_type(typ Type, generic_names []string, concr
 			mut info := ts.info
 			info.is_generic = false
 			info.concrete_types = final_concrete_types
-			info.parent_type = typ
+			info.parent_type = typ.set_flag(.generic)
 			info.fields = fields
 			new_idx := t.register_sym(
 				kind: .struct_
@@ -1940,7 +1977,7 @@ pub fn (mut t Table) unwrap_generic_type(typ Type, generic_names []string, concr
 			mut info := ts.info
 			info.is_generic = false
 			info.concrete_types = final_concrete_types
-			info.parent_type = typ
+			info.parent_type = typ.set_flag(.generic)
 			info.fields = fields
 			info.variants = variants
 			new_idx := t.register_sym(
@@ -1984,7 +2021,7 @@ pub fn (mut t Table) unwrap_generic_type(typ Type, generic_names []string, concr
 			mut info := ts.info
 			info.is_generic = false
 			info.concrete_types = final_concrete_types
-			info.parent_type = typ
+			info.parent_type = typ.set_flag(.generic)
 			info.fields = fields
 			info.methods = imethods
 			new_idx := t.register_sym(
@@ -2047,8 +2084,6 @@ pub fn (mut t Table) generic_insts_to_concrete() {
 							...parent_info
 							is_generic: false
 							concrete_types: info.concrete_types.clone()
-							fields: fields
-							parent_type: new_type(info.parent_idx).set_flag(.generic)
 						}
 						sym.is_pub = true
 						sym.kind = parent.kind

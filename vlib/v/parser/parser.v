@@ -2140,7 +2140,13 @@ fn (mut p Parser) is_following_concrete_types() bool {
 		} else if cur_tok.kind == .rsbr {
 			break
 		} else if cur_tok.kind == .name {
-			if !(p.is_typename(cur_tok) && !(cur_tok.lit.len == 1 && !cur_tok.lit[0].is_capital())) {
+			if p.peek_token(i + 1).kind == .dot {
+				if p.is_typename(cur_tok) {
+					return false
+				}
+				i++
+			} else if !(p.is_typename(cur_tok) && !(cur_tok.lit.len == 1
+				&& !cur_tok.lit[0].is_capital())) {
 				return false
 			}
 		} else if cur_tok.kind != .comma {
@@ -4118,7 +4124,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 		p.error_with_pos('a type alias can not refer to itself: ${name}', decl_pos.extend(type_alias_pos))
 		return ast.AliasTypeDecl{}
 	}
-	comments = p.eat_comments(same_line: true)
+	comments = sum_variants[0].end_comments.clone()
 	return ast.AliasTypeDecl{
 		name: name
 		is_pub: is_pub

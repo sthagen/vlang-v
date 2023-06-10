@@ -241,8 +241,36 @@ fn (mut c Checker) array_init(mut node ast.ArrayInit) ast.Type {
 			ast.IntegerLiteral {
 				fixed_size = init_expr.val.int()
 			}
+			ast.CastExpr {
+				if !init_expr.typ.is_pure_int() {
+					c.error('only integer types are allowed', init_expr.pos)
+				}
+				match init_expr.expr {
+					ast.IntegerLiteral {
+						fixed_size = init_expr.expr.val.int()
+					}
+					ast.EnumVal {
+						fixed_size = c.table.find_enum_field_val(init_expr.expr.enum_name,
+							init_expr.expr.val)
+					}
+					else {}
+				}
+			}
+			ast.EnumVal {
+				c.error('${init_expr.enum_name}.${init_expr.val} has to be casted to integer to be used as size',
+					init_expr.pos)
+			}
 			ast.Ident {
 				if init_expr.obj is ast.ConstField {
+					if init_expr.obj.expr is ast.EnumVal {
+						c.error('${init_expr.obj.expr.enum_name}.${init_expr.obj.expr.val} has to be casted to integer to be used as size',
+							init_expr.pos)
+					}
+					if init_expr.obj.expr is ast.CastExpr {
+						if !init_expr.obj.expr.typ.is_pure_int() {
+							c.error('only integer types are allowed', init_expr.pos)
+						}
+					}
 					if comptime_value := c.eval_comptime_const_expr(init_expr.obj.expr,
 						0)
 					{
@@ -344,7 +372,8 @@ fn (mut c Checker) map_init(mut node ast.MapInit) ast.Type {
 		mut key0_type := ast.void_type
 		mut val0_type := ast.void_type
 		use_expected_type := c.expected_type != ast.void_type && !c.inside_const
-			&& c.table.sym(c.expected_type).kind == .map
+			&& c.table.sym(c.expected_type).kind == .map && !(c.inside_fn_arg
+			&& c.expected_type.has_flag(.generic))
 		if use_expected_type {
 			sym := c.table.sym(c.expected_type)
 			info := sym.map_info()
