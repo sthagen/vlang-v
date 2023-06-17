@@ -115,6 +115,7 @@ mut:
 	comptime_call_pos                int // needed for correctly checking use before decl for templates
 	goto_labels                      map[string]ast.GotoLabel // to check for unused goto labels
 	enum_data_type                   ast.Type
+	fn_return_type                   ast.Type
 }
 
 pub fn new_checker(table &ast.Table, pref_ &pref.Preferences) &Checker {
@@ -168,6 +169,20 @@ pub fn (mut c Checker) check(ast_file_ &ast.File) {
 	c.reset_checker_state_at_start_of_new_file()
 	c.change_current_file(ast_file)
 	for i, ast_import in ast_file.imports {
+		// Imports with the same path and name (self-imports and module name conflicts with builtin module imports)
+		if c.mod == ast_import.mod {
+			c.error('cannot import `${ast_import.mod}` into a module with the same name',
+				ast_import.mod_pos)
+		}
+		// Duplicates of regular imports with the default alias (modname) and `as` imports with a custom alias
+		if c.mod == ast_import.alias {
+			if c.mod == ast_import.mod.all_after_last('.') {
+				c.error('cannot import `${ast_import.mod}` into a module with the same name',
+					ast_import.mod_pos)
+			}
+			c.error('cannot import `${ast_import.mod}` as `${ast_import.alias}` into a module with the same name',
+				ast_import.alias_pos)
+		}
 		for sym in ast_import.syms {
 			full_name := ast_import.mod + '.' + sym.name
 			if full_name in c.const_names {
@@ -179,6 +194,12 @@ pub fn (mut c Checker) check(ast_file_ &ast.File) {
 			if ast_import.mod == ast_file.imports[j].mod {
 				c.error('`${ast_import.mod}` was already imported on line ${
 					ast_file.imports[j].mod_pos.line_nr + 1}', ast_import.mod_pos)
+			} else if ast_import.mod == ast_file.imports[j].alias {
+				c.error('`${ast_file.imports[j].mod}` was already imported as `${ast_import.alias}` on line ${
+					ast_file.imports[j].mod_pos.line_nr + 1}', ast_import.mod_pos)
+			} else if ast_import.alias == ast_file.imports[j].alias {
+				c.error('`${ast_file.imports[j].mod}` was already imported on line ${
+					ast_file.imports[j].alias_pos.line_nr + 1}', ast_import.alias_pos)
 			}
 		}
 	}
@@ -1668,6 +1689,7 @@ fn (mut c Checker) enum_decl(mut node ast.EnumDecl) {
 					mut overflows := false
 					mut uval := u64(0)
 					mut ival := i64(0)
+
 					if signed {
 						val := field.expr.val.i64()
 						ival = val
@@ -1680,9 +1702,22 @@ fn (mut c Checker) enum_decl(mut node ast.EnumDecl) {
 						val := field.expr.val.u64()
 						uval = val
 						if val >= enum_umax {
-							c.error('enum value `${field.expr.val}` overflows the enum type `${senum_type}`, values of which have to be in [${enum_umin}, ${enum_umax}]',
-								field.expr.pos)
 							overflows = true
+							if val == enum_umax {
+								is_bin := field.expr.val.starts_with('0b')
+								is_oct := field.expr.val.starts_with('0o')
+								is_hex := field.expr.val.starts_with('0x')
+
+								if is_hex {
+									overflows = val.hex() != enum_umax.hex()
+								} else if !is_bin && !is_oct && !is_hex {
+									overflows = field.expr.val.str() != enum_umax.str()
+								}
+							}
+							if overflows {
+								c.error('enum value `${field.expr.val}` overflows the enum type `${senum_type}`, values of which have to be in [${enum_umin}, ${enum_umax}]',
+									field.expr.pos)
+							}
 						}
 					}
 					if !overflows && !c.pref.translated && !c.file.is_translated
@@ -2900,15 +2935,15 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 			// TODO make this an error
 			c.warn('cannot cast voidptr to a struct outside `unsafe`', node.pos)
 		}
-		if !from_type.is_int() && final_from_sym.kind != .enum_ && !from_type.is_pointer()
-			&& !from_type.is_ptr() {
+		if !from_type.is_int() && final_from_sym.kind != .enum_
+			&& !from_type.is_any_kind_of_pointer() {
 			ft := c.table.type_to_str(from_type)
 			tt := c.table.type_to_str(to_type)
 			c.error('cannot cast `${ft}` to `${tt}`', node.pos)
 		}
 	} else if to_sym.kind == .interface_ {
 		if c.type_implements(from_type, to_type, node.pos) {
-			if !from_type.is_ptr() && !from_type.is_pointer() && from_sym.kind != .interface_
+			if !from_type.is_any_kind_of_pointer() && from_sym.kind != .interface_
 				&& !c.inside_unsafe {
 				c.mark_as_referenced(mut &node.expr, true)
 			}
@@ -2938,8 +2973,8 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 			type_name := c.table.type_to_str(to_type)
 			c.error('cannot cast struct `${from_type_name}` to `${type_name}`', node.pos)
 		}
-	} else if to_sym.kind == .u8 && !final_from_sym.is_number() && !final_from_sym.is_pointer()
-		&& !from_type.is_ptr() && final_from_sym.kind !in [.char, .enum_, .bool] {
+	} else if to_sym.kind == .u8 && !final_from_sym.is_number()
+		&& !from_type.is_any_kind_of_pointer() && final_from_sym.kind !in [.char, .enum_, .bool] {
 		ft := c.table.type_to_str(from_type)
 		tt := c.table.type_to_str(to_type)
 		c.error('cannot cast type `${ft}` to `${tt}`', node.pos)
@@ -3010,7 +3045,7 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 			ft := c.table.type_to_str(from_type)
 			c.error('cannot cast type `${ft}` to string, use `${snexpr}.str()` instead.',
 				node.pos)
-		} else if from_type.is_real_pointer() {
+		} else if from_type.is_any_kind_of_pointer() {
 			snexpr := node.expr.str()
 			ft := c.table.type_to_str(from_type)
 			c.error('cannot cast pointer type `${ft}` to string, use `&u8(${snexpr}).vstring()` or `cstring_to_vstring(${snexpr})` instead.',
@@ -4086,7 +4121,7 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 	if !c.inside_unsafe && !c.is_builtin_mod && !c.inside_if_guard && !c.is_index_assign
 		&& typ_sym.kind == .map && node.or_expr.stmts.len == 0 {
 		elem_type := c.table.value_type(typ)
-		if elem_type.is_real_pointer() {
+		if elem_type.is_any_kind_of_pointer() {
 			c.note('accessing a pointer map value requires an `or {}` block outside `unsafe`',
 				node.pos)
 		}

@@ -659,7 +659,7 @@ fn (g &JsGen) type_to_fmt(typ ast.Type) StrIntpType {
 		return .si_s
 	}
 	sym := g.table.sym(typ)
-	if typ.is_ptr() && (typ.is_int_valptr() || typ.is_float_valptr()) {
+	if typ.is_int_valptr() || typ.is_float_valptr() {
 		return .si_s
 	} else if sym.kind in [.struct_, .array, .array_fixed, .map, .bool, .enum_, .interface_,
 		.sum_type, .function, .alias, .chan] {
@@ -679,6 +679,10 @@ fn (g &JsGen) type_to_fmt(typ ast.Type) StrIntpType {
 	} else if sym.kind == .u64 {
 		return .si_u64
 	} else if sym.kind == .i64 {
+		return .si_i64
+	} else if sym.kind == .usize {
+		return .si_u64
+	} else if sym.kind == .isize {
 		return .si_i64
 	}
 	return .si_i32
@@ -808,8 +812,7 @@ fn struct_auto_str_func(mut g JsGen, sym &ast.TypeSymbol, field_type ast.Type, f
 		mut method_str := 'it.${g.js_name(field_name)}'
 		if sym.kind == .bool {
 			method_str += ' ? new string("true") : new string("false")'
-		} else if (field_type.is_int_valptr() || field_type.is_float_valptr())
-			&& field_type.is_ptr() && !expects_ptr {
+		} else if (field_type.is_int_valptr() || field_type.is_float_valptr()) && !expects_ptr {
 			// ptr int can be "nil", so this needs to be casted to a string
 			if sym.kind == .f32 {
 				return 'str_intp(1, _MOV((StrIntpData[]){
@@ -819,9 +822,12 @@ fn struct_auto_str_func(mut g JsGen, sym &ast.TypeSymbol, field_type ast.Type, f
 				return 'str_intp(1, _MOV((StrIntpData[]){
 					{_SLIT0, ${si_g64_code}, {.d_f64 = *${method_str} }}
 				}))'
-			} else if sym.kind == .u64 {
+			} else if sym.kind in [.u64, .usize] {
 				fmt_type := StrIntpType.si_u64
 				return 'str_intp(1, _MOV((StrIntpData[]){{_SLIT0, ${u32(fmt_type) | 0xfe00}, {.d_u64 = *${method_str} }}}))'
+			} else if sym.kind in [.i64, .isize] {
+				fmt_type := StrIntpType.si_u64
+				return 'str_intp(1, _MOV((StrIntpData[]){{_SLIT0, ${u32(fmt_type) | 0xfe00}, {.d_i64 = *${method_str} }}}))'
 			}
 			fmt_type := StrIntpType.si_i32
 			return 'str_intp(1, _MOV((StrIntpData[]){{_SLIT0, ${u32(fmt_type) | 0xfe00}, {.d_i32 = *${method_str} }}}))'

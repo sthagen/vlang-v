@@ -311,6 +311,17 @@ pub fn (t Type) is_ptr() bool {
 }
 
 [inline]
+pub fn (typ Type) is_pointer() bool {
+	// builtin pointer types (voidptr, byteptr, charptr)
+	return typ.idx() in ast.pointer_type_idxs
+}
+
+[inline]
+pub fn (typ Type) is_voidptr() bool {
+	return typ.idx() == ast.voidptr_type_idx
+}
+
+[inline]
 pub fn (t Type) is_any_kind_of_pointer() bool {
 	return (int(t) >> 16) & 0xff > 0 || (u16(t) & 0xffff) in ast.pointer_type_idxs
 }
@@ -472,39 +483,23 @@ pub fn new_type_ptr(idx int, nr_muls int) Type {
 }
 
 [inline]
-pub fn (typ Type) is_pointer() bool {
-	// builtin pointer types (voidptr, byteptr, charptr)
-	return typ.idx() in ast.pointer_type_idxs
-}
-
-[inline]
-pub fn (typ Type) is_voidptr() bool {
-	return typ.idx() == ast.voidptr_type_idx
-}
-
-[inline]
-pub fn (typ Type) is_real_pointer() bool {
-	return typ.is_ptr() || typ.is_pointer()
-}
-
-[inline]
 pub fn (typ Type) is_float() bool {
-	return typ.clear_flags() in ast.float_type_idxs
+	return !typ.is_ptr() && typ.idx() in ast.float_type_idxs
 }
 
 [inline]
 pub fn (typ Type) is_int() bool {
-	return typ.clear_flags() in ast.integer_type_idxs
+	return !typ.is_ptr() && typ.idx() in ast.integer_type_idxs
 }
 
 [inline]
 pub fn (typ Type) is_int_valptr() bool {
-	return typ.idx() in ast.integer_type_idxs
+	return typ.is_ptr() && typ.idx() in ast.integer_type_idxs
 }
 
 [inline]
 pub fn (typ Type) is_float_valptr() bool {
-	return typ.idx() in ast.float_type_idxs
+	return typ.is_ptr() && typ.idx() in ast.float_type_idxs
 }
 
 [inline]
@@ -555,7 +550,7 @@ pub fn (typ Type) is_number() bool {
 
 [inline]
 pub fn (typ Type) is_string() bool {
-	return typ.idx() in ast.string_type_idxs
+	return typ.idx() == ast.string_type_idx
 }
 
 [inline]
@@ -618,7 +613,6 @@ pub const (
 		char_type_idx, u16_type_idx, u32_type_idx, u64_type_idx, isize_type_idx, usize_type_idx,
 		f32_type_idx, f64_type_idx, int_literal_type_idx, float_literal_type_idx, rune_type_idx]
 	pointer_type_idxs          = [voidptr_type_idx, byteptr_type_idx, charptr_type_idx, nil_type_idx]
-	string_type_idxs           = [string_type_idx]
 )
 
 pub const (

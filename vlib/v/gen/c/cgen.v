@@ -245,8 +245,9 @@ mut:
 	out_fn_start_pos []int  // for generating multiple .c files, stores locations of all fn positions in `out` string builder
 	static_modifier  string // for parallel_cc
 
-	has_reflection     bool
-	reflection_strings &map[string]int
+	has_reflection       bool
+	reflection_strings   &map[string]int
+	defer_return_tmp_var string
 }
 
 // global or const variable definition string
@@ -1802,7 +1803,7 @@ fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) bool {
 				g.set_current_pos_as_last_stmt_pos()
 				g.skip_stmt_pos = true
 				mut is_noreturn := false
-				if stmt is ast.Return {
+				if stmt in [ast.Return, ast.BranchStmt] {
 					is_noreturn = true
 				} else if stmt is ast.ExprStmt {
 					is_noreturn = is_noreturn_callexpr(stmt.expr)
@@ -1883,19 +1884,35 @@ fn (mut g Gen) expr_with_tmp_var(expr ast.Expr, expr_typ ast.Type, ret_typ ast.T
 		g.gen_option_error(ret_typ, expr)
 		g.writeln(';')
 	} else {
+		mut is_ptr_to_ptr_assign := false
 		g.writeln('${g.typ(ret_typ)} ${tmp_var};')
 		if ret_typ.has_flag(.option) {
 			if expr_typ.has_flag(.option) && expr in [ast.StructInit, ast.ArrayInit, ast.MapInit] {
 				g.write('_option_none(&(${styp}[]) { ')
 			} else {
-				g.write('_option_ok(&(${styp}[]) { ')
+				is_ptr_to_ptr_assign = (expr is ast.SelectorExpr
+					|| (expr is ast.Ident && !(expr as ast.Ident).is_auto_heap()))
+					&& ret_typ.is_ptr() && expr_typ.is_ptr() && expr_typ.has_flag(.option)
+				// option ptr assignment simplification
+				if is_ptr_to_ptr_assign {
+					g.write('${tmp_var} = ')
+				} else {
+					g.write('_option_ok(&(${styp}[]) { ')
+				}
+				if !expr_typ.is_ptr() && ret_typ.is_ptr() {
+					g.write('&/*ref*/')
+				}
 			}
 		} else {
 			g.write('_result_ok(&(${styp}[]) { ')
 		}
 		g.expr_with_cast(expr, expr_typ, ret_typ)
 		if ret_typ.has_flag(.option) {
-			g.writeln(' }, (${c.option_name}*)(&${tmp_var}), sizeof(${styp}));')
+			if is_ptr_to_ptr_assign {
+				g.writeln(';')
+			} else {
+				g.writeln(' }, (${c.option_name}*)(&${tmp_var}), sizeof(${styp}));')
+			}
 		} else {
 			g.writeln(' }, (${c.result_name}*)(&${tmp_var}), sizeof(${styp}));')
 		}
@@ -3782,7 +3799,11 @@ fn (mut g Gen) enum_decl(node ast.EnumDecl) {
 		g.enum_typedefs.writeln(', // ${cur_value}')
 		cur_enum_offset++
 	}
-	packed_attribute := if node.typ != ast.int_type { '__attribute__((packed))' } else { '' }
+	packed_attribute := if !g.is_cc_msvc && node.typ != ast.int_type {
+		'__attribute__((packed))'
+	} else {
+		''
+	}
 	g.enum_typedefs.writeln('} ${packed_attribute} ${enum_name};')
 	if node.typ != ast.int_type {
 		g.enum_typedefs.writeln('#pragma pack(pop)\n')
@@ -4679,6 +4700,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 		return
 	}
 	tmpvar := g.new_tmp_var()
+	g.defer_return_tmp_var = tmpvar
 	mut ret_typ := g.typ(g.unwrap_generic(fn_ret_type))
 	if fn_ret_type.has_flag(.generic) && fn_return_is_fixed_array {
 		ret_typ = '_v_${ret_typ}'
@@ -4722,7 +4744,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 					}
 				}
 				g.write_defer_stmts_when_needed()
-				g.writeln('return ${tmpvar};')
+				g.writeln('return ${tmpvar}; //test')
 			}
 			return
 		}
@@ -4750,7 +4772,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 			g.writeln(';')
 			if use_tmp_var {
 				g.write_defer_stmts_when_needed()
-				g.writeln('return ${tmpvar};')
+				g.writeln('return ${tmpvar}; //test1')
 			}
 			return
 		}
@@ -4858,7 +4880,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 				g.writeln(';')
 			}
 			g.write_defer_stmts_when_needed()
-			g.writeln('return ${tmpvar};')
+			g.writeln('return ${tmpvar}; //test2')
 			has_semicolon = true
 		}
 	} else if node.exprs.len >= 1 {
@@ -4897,7 +4919,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 			g.writeln(' }, (${c.option_name}*)(&${tmpvar}), sizeof(${styp}));')
 			g.write_defer_stmts_when_needed()
 			g.autofree_scope_vars(node.pos.pos - 1, node.pos.line_nr, true)
-			g.writeln('return ${tmpvar};')
+			g.writeln('return ${tmpvar}; //test4')
 			return
 		}
 		expr_type_is_result := match expr0 {
@@ -4930,7 +4952,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 			g.writeln(' }, (${c.result_name}*)(&${tmpvar}), sizeof(${styp}));')
 			g.write_defer_stmts_when_needed()
 			g.autofree_scope_vars(node.pos.pos - 1, node.pos.line_nr, true)
-			g.writeln('return ${tmpvar};')
+			g.writeln('return ${tmpvar}; //test 4')
 			return
 		}
 		// autofree before `return`
@@ -5008,7 +5030,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 			if !g.is_builtin_mod {
 				g.autofree_scope_vars(node.pos.pos - 1, node.pos.line_nr, true)
 			}
-			g.write('return ${tmpvar}')
+			g.write('return ${tmpvar} /* test5 */')
 			has_semicolon = false
 		}
 	} else {
@@ -6241,6 +6263,18 @@ fn (mut g Gen) type_default(typ_ ast.Type) string {
 				return init_str
 			}
 		}
+		.enum_ {
+			// returns the enum's first value
+			if enum_decl := g.table.enum_decls[sym.name] {
+				return if enum_decl.fields[0].expr is ast.EmptyExpr {
+					'0'
+				} else {
+					g.expr_string(enum_decl.fields[0].expr)
+				}
+			} else {
+				return '0'
+			}
+		}
 		else {
 			return '0'
 		}
@@ -6792,7 +6826,7 @@ pub fn (mut g Gen) get_array_depth(el_typ ast.Type) int {
 // returns true if `t` includes any pointer(s) - during garbage collection heap regions
 // that contain no pointers do not have to be scanned
 pub fn (mut g Gen) contains_ptr(el_typ ast.Type) bool {
-	if el_typ.is_ptr() || el_typ.is_pointer() {
+	if el_typ.is_any_kind_of_pointer() {
 		return true
 	}
 	typ := g.unwrap_generic(el_typ)

@@ -164,7 +164,7 @@ fn (mut c Checker) array_init(mut node ast.ArrayInit) ast.Type {
 					c.expected_type = elem_type
 					c.type_implements(typ, elem_type, expr.pos())
 				}
-				if !typ.is_ptr() && !typ.is_pointer() && !c.inside_unsafe {
+				if !typ.is_any_kind_of_pointer() && !c.inside_unsafe {
 					typ_sym := c.table.sym(typ)
 					if typ_sym.kind != .interface_ {
 						c.mark_as_referenced(mut &expr, true)
@@ -199,7 +199,7 @@ fn (mut c Checker) array_init(mut node ast.ArrayInit) ast.Type {
 				c.expected_type = elem_type
 				continue
 			} else {
-				if !typ.is_real_pointer() && !typ.is_int() && is_first_elem_ptr {
+				if !typ.is_any_kind_of_pointer() && !typ.is_int() && is_first_elem_ptr {
 					c.error('cannot have non-pointer of type `${c.table.type_to_str(typ)}` in a pointer array of type `${c.table.type_to_str(elem_type)}`',
 						expr.pos())
 				}
@@ -250,8 +250,11 @@ fn (mut c Checker) array_init(mut node ast.ArrayInit) ast.Type {
 						fixed_size = init_expr.expr.val.int()
 					}
 					ast.EnumVal {
-						fixed_size = c.table.find_enum_field_val(init_expr.expr.enum_name,
+						if val := c.table.find_enum_field_val(init_expr.expr.enum_name,
 							init_expr.expr.val)
+						{
+							fixed_size = val
+						}
 					}
 					else {}
 				}

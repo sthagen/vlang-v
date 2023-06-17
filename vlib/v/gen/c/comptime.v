@@ -80,6 +80,15 @@ fn (mut g Gen) comptime_call(mut node ast.ComptimeCall) {
 		g.write('_SLIT("${val}")')
 		return
 	}
+	if node.method_name == 'res' {
+		if node.args_var != '' {
+			g.write('${g.defer_return_tmp_var}.arg${node.args_var}')
+			return
+		}
+
+		g.write('${g.defer_return_tmp_var}')
+		return
+	}
 	if node.is_vweb {
 		is_html := node.method_name == 'html'
 		mut cur_line := ''
@@ -555,22 +564,30 @@ fn (mut g Gen) comptime_if_cond(cond ast.Expr, pkg_exist bool) (bool, bool) {
 							if selector.expr is ast.Ident && selector.field_name == 'name' {
 								if g.comptime_for_method_var.len > 0
 									&& (selector.expr as ast.Ident).name == g.comptime_for_method_var {
-									is_equal := g.comptime_for_method == cond.right.val
-									if is_equal {
+									is_true := if cond.op == .eq {
+										g.comptime_for_method == cond.right.val
+									} else {
+										g.comptime_for_method != cond.right.val
+									}
+									if is_true {
 										g.write('1')
 									} else {
 										g.write('0')
 									}
-									return is_equal, true
+									return is_true, true
 								} else if g.comptime_for_field_var.len > 0
 									&& (selector.expr as ast.Ident).name == g.comptime_for_field_var {
-									is_equal := g.comptime_for_field_value.name == cond.right.val
-									if is_equal {
+									is_true := if cond.op == .eq {
+										g.comptime_for_field_value.name == cond.right.val
+									} else {
+										g.comptime_for_field_value.name != cond.right.val
+									}
+									if is_true {
 										g.write('1')
 									} else {
 										g.write('0')
 									}
-									return is_equal, true
+									return is_true, true
 								}
 							}
 						} else if cond.right is ast.IntegerLiteral {

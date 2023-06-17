@@ -2132,7 +2132,7 @@ fn (mut g Gen) keep_alive_call_pregen(node ast.CallExpr) int {
 fn (mut g Gen) keep_alive_call_postgen(node ast.CallExpr, tmp_cnt_save int) {
 	g.writeln('// keep_alive_call_postgen()')
 	for i, expected_type in node.expected_arg_types {
-		if expected_type.is_ptr() || expected_type.is_pointer() {
+		if expected_type.is_any_kind_of_pointer() {
 			g.writeln('GC_reachable_here(__tmp_arg_${tmp_cnt_save + i});')
 		}
 	}
@@ -2142,8 +2142,8 @@ fn (mut g Gen) keep_alive_call_postgen(node ast.CallExpr, tmp_cnt_save int) {
 fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type ast.Type, lang ast.Language) {
 	arg_typ := g.unwrap_generic(arg.typ)
 	arg_sym := g.table.sym(arg_typ)
-	exp_is_ptr := expected_type.is_real_pointer()
-	arg_is_ptr := arg_typ.is_real_pointer()
+	exp_is_ptr := expected_type.is_any_kind_of_pointer()
+	arg_is_ptr := arg_typ.is_any_kind_of_pointer()
 	if expected_type == 0 {
 		g.checker_bug('ref_or_deref_arg expected_type is 0', arg.pos)
 	}
@@ -2193,13 +2193,18 @@ fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type ast.Type, lang as
 			if arg_typ_sym.kind != .function && deref_sym.kind !in [.sum_type, .interface_]
 				&& lang != .c {
 				if arg.expr.is_lvalue() {
-					g.write('(voidptr)&/*qq*/')
+					if expected_type.has_flag(.option) {
+						g.expr_with_opt(arg.expr, arg_typ, expected_type)
+						return
+					} else {
+						g.write('(voidptr)&/*qq*/')
+					}
 				} else {
 					mut atype := expected_deref_type
 					if atype.has_flag(.generic) {
 						atype = g.unwrap_generic(atype)
 					}
-					if atype.has_flag(.generic) {
+					if atype.has_flag(.generic) || arg.expr is ast.StructInit {
 						g.write('(voidptr)&/*qq*/')
 					} else {
 						needs_closing = true

@@ -507,7 +507,7 @@ fn (mut g Gen) struct_decl(s ast.Struct, name string, is_anon bool) {
 	}
 	// g.type_definitions.writeln('} $name;\n')
 	//
-	ti_attrs := if s.attrs.contains('packed') {
+	ti_attrs := if !g.is_cc_msvc && s.attrs.contains('packed') {
 		'__attribute__((__packed__))'
 	} else {
 		''
@@ -549,7 +549,8 @@ fn (mut g Gen) struct_init_field(sfield ast.StructInitField, language ast.Langua
 		} else {
 			if sfield.typ != ast.voidptr_type && sfield.typ != ast.nil_type
 				&& (sfield.expected_type.is_ptr() && !sfield.expected_type.has_flag(.shared_f))
-				&& !(sfield.typ.is_ptr() || sfield.typ.is_pointer()) && !sfield.typ.is_number() {
+				&& !sfield.expected_type.has_flag(.option) && !sfield.typ.is_any_kind_of_pointer()
+				&& !sfield.typ.is_number() {
 				g.write('/* autoref */&')
 			}
 
