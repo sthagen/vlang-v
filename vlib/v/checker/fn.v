@@ -459,12 +459,12 @@ fn (mut c Checker) anon_fn(mut node ast.AnonFn) ast.Type {
 		}
 		node.decl.scope.update_var_type(var.name, var.typ)
 	}
-	c.stmts(node.decl.stmts)
-	c.fn_decl(mut node.decl)
 	if has_generic && node.decl.generic_names.len == 0 {
 		c.error('generic closure fn must specify type parameter, e.g. fn [foo] [T]()',
 			node.decl.pos)
 	}
+	c.stmts(node.decl.stmts)
+	c.fn_decl(mut node.decl)
 	return node.typ
 }
 
@@ -819,7 +819,7 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 		}
 	}
 	if !found && c.pref.is_vsh {
-		// TOOD: test this hack more extensively
+		// TODO: test this hack more extensively
 		os_name := 'os.${fn_name}'
 		if f := c.table.find_fn(os_name) {
 			if f.generic_names.len == node.concrete_types.len {
@@ -2059,7 +2059,7 @@ fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 			arg) or {
 			// str method, allow type with str method if fn arg is string
 			// Passing an int or a string array produces a c error here
-			// Deleting this condition results in propper V error messages
+			// Deleting this condition results in proper V error messages
 			// if arg_typ_sym.kind == .string && typ_sym.has_method('str') {
 			// continue
 			// }
@@ -2210,16 +2210,23 @@ fn (mut c Checker) set_node_expected_arg_types(mut node ast.CallExpr, func &ast.
 	}
 }
 
-fn (mut c Checker) post_process_generic_fns() {
+fn (mut c Checker) post_process_generic_fns() ! {
+	mut all_generic_fns := map[string]int{}
 	// Loop thru each generic function concrete type.
 	// Check each specific fn instantiation.
 	for i in 0 .. c.file.generic_fns.len {
 		mut node := c.file.generic_fns[i]
 		c.mod = node.mod
 		fkey := node.fkey()
+		all_generic_fns[fkey]++
+		if all_generic_fns[fkey] > generic_fn_cutoff_limit_per_fn {
+			c.error('generic function visited more than ${generic_fn_cutoff_limit_per_fn} times',
+				node.pos)
+			return error('fkey: ${fkey}')
+		}
 		gtypes := c.table.fn_generic_types[fkey]
 		$if trace_post_process_generic_fns ? {
-			eprintln('> post_process_generic_fns ${node.mod} | ${node.name} | fkey: ${fkey} | gtypes: ${gtypes}')
+			eprintln('> post_process_generic_fns ${node.mod} | ${node.name} | fkey: ${fkey} | gtypes: ${gtypes} | c.file.generic_fns.len: ${c.file.generic_fns.len}')
 		}
 		for concrete_types in gtypes {
 			c.table.cur_concrete_types = concrete_types

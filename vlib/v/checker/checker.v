@@ -14,12 +14,14 @@ import v.errors
 import v.pkgconfig
 
 const (
-	int_min                  = int(0x80000000)
-	int_max                  = int(0x7FFFFFFF)
+	int_min                                        = int(0x80000000)
+	int_max                                        = int(0x7FFFFFFF)
 	// prevent stack overflows by restricting too deep recursion:
-	expr_level_cutoff_limit  = 40
-	stmt_level_cutoff_limit  = 40
-	iface_level_cutoff_limit = 100
+	expr_level_cutoff_limit                        = 40
+	stmt_level_cutoff_limit                        = 40
+	iface_level_cutoff_limit                       = 100
+	generic_fn_cutoff_limit_per_fn                 = 10_000 // how many times post_process_generic_fns, can visit the same function before bailing out
+	generic_fn_postprocess_iterations_cutoff_limit = 1000_000 // how many times the compiler will try to resolve all remaining generic functions
 )
 
 pub const (
@@ -323,7 +325,7 @@ pub fn (mut c Checker) check_files(ast_files []&ast.File) {
 	// is needed when the generic type is auto inferred from the call argument.
 	// we may have to loop several times, if there were more concrete types found.
 	mut post_process_generic_fns_iterations := 0
-	for {
+	post_process_iterations_loop: for post_process_generic_fns_iterations <= checker.generic_fn_postprocess_iterations_cutoff_limit {
 		$if trace_post_process_generic_fns_loop ? {
 			eprintln('>>>>>>>>> recheck_generic_fns loop iteration: ${post_process_generic_fns_iterations}')
 		}
@@ -334,7 +336,7 @@ pub fn (mut c Checker) check_files(ast_files []&ast.File) {
 						file.generic_fns.map(it.name).str())
 				}
 				c.change_current_file(file)
-				c.post_process_generic_fns()
+				c.post_process_generic_fns() or { break post_process_iterations_loop }
 			}
 		}
 		if !c.need_recheck_generic_fns {
@@ -564,11 +566,15 @@ fn (mut c Checker) sum_type_decl(node ast.SumTypeDecl) {
 	c.check_valid_pascal_case(node.name, 'sum type', node.pos)
 	mut names_used := []string{}
 	for variant in node.variants {
-		if variant.typ.is_ptr() {
-			c.error('sum type cannot hold a reference type', variant.pos)
-		}
 		c.ensure_type_exists(variant.typ, variant.pos) or {}
 		sym := c.table.sym(variant.typ)
+		if variant.typ.is_ptr() {
+			variant_name := sym.name.all_after_last('.')
+			lb, rb := if sym.kind == .struct_ { '{', '}' } else { '(', ')' }
+			c.add_error_detail('declare the sum type with non-reference types: `${node.name} = ${variant_name} | ...`
+and use a reference to the sum type instead: `var := &${node.name}(${variant_name}${lb}val${rb})`')
+			c.error('sum type cannot hold a reference type', variant.pos)
+		}
 		if sym.name in names_used {
 			c.error('sum type ${node.name} cannot hold the type `${sym.name}` more than once',
 				variant.pos)
@@ -1020,6 +1026,28 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 	return true
 }
 
+fn (mut c Checker) expr_or_block_err(kind ast.OrKind, expr_name string, pos token.Pos, is_field bool) {
+	obj_does_not_return_or_is_not := if is_field {
+		'field `${expr_name}` is not'
+	} else {
+		'function `${expr_name}` does not return'
+	}
+	match kind {
+		.absent {}
+		.block {
+			c.error('unexpected `or` block, the ${obj_does_not_return_or_is_not} an Option or a Result',
+				pos)
+		}
+		.propagate_option {
+			c.error('unexpected `?`, the ${obj_does_not_return_or_is_not} an Option',
+				pos)
+		}
+		.propagate_result {
+			c.error('unexpected `!`, the ${obj_does_not_return_or_is_not} a Result', pos)
+		}
+	}
+}
+
 // return the actual type of the expression, once the option is handled
 fn (mut c Checker) check_expr_opt_call(expr ast.Expr, ret_type ast.Type) ast.Type {
 	if expr is ast.CallExpr {
@@ -1051,15 +1079,8 @@ fn (mut c Checker) check_expr_opt_call(expr ast.Expr, ret_type ast.Type) ast.Typ
 				}
 			}
 			return ret_type.clear_flag(.result)
-		} else if expr.or_block.kind == .block {
-			c.error('unexpected `or` block, the function `${expr.name}` does not return an Option or a Result',
-				expr.or_block.pos)
-		} else if expr.or_block.kind == .propagate_option {
-			c.error('unexpected `?`, the function `${expr.name}` does not return an Option',
-				expr.or_block.pos)
-		} else if expr.or_block.kind == .propagate_result {
-			c.error('unexpected `!`, the function `${expr.name}` does not return a Result',
-				expr.or_block.pos)
+		} else {
+			c.expr_or_block_err(expr.or_block.kind, expr.name, expr.or_block.pos, false)
 		}
 	} else if expr is ast.SelectorExpr && c.table.sym(ret_type).kind != .chan {
 		if expr.typ.has_flag(.option) || expr.typ.has_flag(.result) {
@@ -1083,14 +1104,9 @@ fn (mut c Checker) check_expr_opt_call(expr ast.Expr, ret_type ast.Type) ast.Typ
 				}
 			}
 			return ret_type.clear_flag(.result)
-		} else if expr.or_block.kind == .block {
-			c.error('unexpected `or` block, the field `${expr.field_name}` is neither an Option, nor a Result',
-				expr.or_block.pos)
-		} else if expr.or_block.kind == .propagate_option {
-			c.error('unexpected `?`, the field `${expr.field_name}` is not an Option',
-				expr.or_block.pos)
-		} else if expr.or_block.kind == .propagate_result {
-			c.error('unexpected `!`, Result fields are not supported', expr.or_block.pos)
+		} else {
+			c.expr_or_block_err(expr.or_block.kind, expr.field_name, expr.or_block.pos,
+				true)
 		}
 	} else if expr is ast.IndexExpr {
 		if expr.or_expr.kind != .absent {
@@ -1478,7 +1494,7 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 		}
 		return field.typ
 	}
-	if mut method := c.table.find_method(sym, field_name) {
+	if mut method := sym.find_method_with_generic_parent(field_name) {
 		if c.expected_type != 0 && c.expected_type != ast.none_type {
 			fn_type := ast.new_type(c.table.find_or_register_fn_type(method, false, true))
 			// if the expected type includes the receiver, don't hide it behind a closure
@@ -2114,7 +2130,7 @@ fn (mut c Checker) asm_arg(arg ast.AsmArg, stmt ast.AsmStmt, aliases []string) {
 			c.asm_arg(arg.base, stmt, aliases)
 			c.asm_arg(arg.index, stmt, aliases)
 		}
-		ast.BoolLiteral {} // all of these are guarented to be correct.
+		ast.BoolLiteral {} // all of these are guaranteed to be correct.
 		ast.FloatLiteral {}
 		ast.CharLiteral {}
 		ast.IntegerLiteral {}
@@ -2505,16 +2521,8 @@ pub fn (mut c Checker) expr(node_ ast.Expr) ast.Type {
 				}
 			}
 			if !ret_type.has_flag(.option) && !ret_type.has_flag(.result) {
-				if node.or_block.kind == .block {
-					c.error('unexpected `or` block, the function `${node.name}` does not return an Option or a Result',
-						node.or_block.pos)
-				} else if node.or_block.kind == .propagate_option {
-					c.error('unexpected `?`, the function `${node.name}` does not return an Option or a Result',
-						node.or_block.pos)
-				} else if node.or_block.kind == .propagate_result {
-					c.error('unexpected `!`, the function `${node.name}` does not return an Option or a Result',
-						node.or_block.pos)
-				}
+				c.expr_or_block_err(node.or_block.kind, node.name, node.or_block.pos,
+					false)
 			}
 			if node.or_block.kind != .absent {
 				if ret_type.has_flag(.option) {
@@ -2704,18 +2712,9 @@ pub fn (mut c Checker) expr(node_ ast.Expr) ast.Type {
 			if c.table.sym(ret_type).kind == .chan {
 				return ret_type
 			}
-
 			if !ret_type.has_flag(.option) && !ret_type.has_flag(.result) {
-				if node.or_block.kind == .block {
-					c.error('unexpected `or` block, the field `${node.field_name}` is neither an Option, nor a Result',
-						node.or_block.pos)
-				} else if node.or_block.kind == .propagate_option {
-					c.error('unexpected `?`, the field `${node.field_name}` is neither an Option, nor a Result',
-						node.or_block.pos)
-				} else if node.or_block.kind == .propagate_result {
-					c.error('unexpected `!`, the field `${node.field_name}` is neither an Option, nor a Result',
-						node.or_block.pos)
-				}
+				c.expr_or_block_err(node.or_block.kind, node.field_name, node.or_block.pos,
+					true)
 			}
 			if node.or_block.kind != .absent {
 				if ret_type.has_flag(.option) {
@@ -2855,6 +2854,12 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 
 	if to_sym.language != .c {
 		c.ensure_type_exists(to_type, node.pos) or {}
+
+		if to_sym.kind == .alias && (to_sym.info as ast.Alias).parent_type.has_flag(.option)
+			&& !to_type.has_flag(.option) {
+			c.error('alias to Option type requires to be used as Option type (?${to_sym.name}(...))',
+				node.pos)
+		}
 	}
 	if from_sym.kind == .u8 && from_type.is_ptr() && to_sym.kind == .string && !to_type.is_ptr() {
 		c.error('to convert a C string buffer pointer to a V string, use x.vstring() instead of string(x)',
@@ -4010,7 +4015,7 @@ fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) ast.Type {
 	}
 	// FIXME
 	// there are currently other issues to investigate if right_type
-	// is unwraped directly as initialization, so do it here
+	// is unwrapped directly as initialization, so do it here
 	if node.op == .minus && !right_sym.is_number() {
 		c.type_error_for_operator('-', 'numeric', right_sym.name, node.pos)
 	}
@@ -4030,8 +4035,8 @@ fn (mut c Checker) type_error_for_operator(op_label string, types_label string, 
 }
 
 fn (mut c Checker) check_index(typ_sym &ast.TypeSymbol, index ast.Expr, index_type ast.Type, pos token.Pos, range_index bool, is_gated bool) {
-	index_type_sym := c.table.sym(index_type)
 	if typ_sym.kind in [.array, .array_fixed, .string] {
+		index_type_sym := c.table.sym(index_type)
 		if !(index_type.is_int() || index_type_sym.kind == .enum_
 			|| (index_type_sym.kind == .alias
 			&& (index_type_sym.info as ast.Alias).parent_type.is_int())
@@ -4097,9 +4102,16 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 		}
 		else {}
 	}
+	is_aggregate_arr := typ_sym.kind == .aggregate
+		&& (typ_sym.info as ast.Aggregate).types.filter(c.table.type_kind(it) !in [.array, .array_fixed, .string, .map]).len == 0
 	if typ_sym.kind !in [.array, .array_fixed, .string, .map] && !typ.is_ptr()
-		&& typ !in [ast.byteptr_type, ast.charptr_type] && !typ.has_flag(.variadic) {
+		&& typ !in [ast.byteptr_type, ast.charptr_type] && !typ.has_flag(.variadic)
+		&& !is_aggregate_arr {
 		c.error('type `${typ_sym.name}` does not support indexing', node.pos)
+	}
+	if is_aggregate_arr {
+		// treating indexexpr of sumtype of array types
+		typ = (typ_sym.info as ast.Aggregate).types[0]
 	}
 	if typ.has_flag(.option) {
 		if node.left is ast.Ident && (node.left as ast.Ident).or_expr.kind == .absent {
@@ -4371,12 +4383,12 @@ fn (mut c Checker) error(message string, pos token.Pos) {
 }
 
 fn (c &Checker) check_struct_signature_init_fields(from ast.Struct, to ast.Struct, node ast.StructInit) bool {
-	if node.fields.len == 0 {
+	if node.init_fields.len == 0 {
 		return from.fields.len == to.fields.len
 	}
 
 	mut count_not_in_from := 0
-	for field in node.fields {
+	for field in node.init_fields {
 		filtered := from.fields.filter(it.name == field.name)
 		if filtered.len != 1 {
 			count_not_in_from++
@@ -4400,7 +4412,7 @@ fn (c &Checker) check_struct_signature(from ast.Struct, to ast.Struct) bool {
 		}
 		counterpart := filtered[0]
 		if field.typ != counterpart.typ {
-			// field has different tye
+			// field has different type
 			return false
 		}
 		if field.is_pub != counterpart.is_pub {
@@ -4613,7 +4625,7 @@ fn (mut c Checker) ensure_type_exists(typ ast.Type, pos token.Pos) ? {
 		}
 		.int_literal, .float_literal {
 			// Separate error condition for `int_literal` and `float_literal` because `util.suggestion` may give different
-			// suggestions due to f32 comparision issue.
+			// suggestions due to f32 comparison issue.
 			if !c.is_builtin_mod {
 				msg := if sym.kind == .int_literal {
 					'unknown type `${sym.name}`.\nDid you mean `int`?'
@@ -4652,7 +4664,8 @@ fn (mut c Checker) ensure_type_exists(typ ast.Type, pos token.Pos) ? {
 	}
 }
 
-fn (mut c Checker) fail_if_unreadable(expr ast.Expr, typ ast.Type, what string) {
+// return true if a violation of a shared variable access rule is detected
+fn (mut c Checker) fail_if_unreadable(expr ast.Expr, typ ast.Type, what string) bool {
 	mut pos := token.Pos{}
 	match expr {
 		ast.Ident {
@@ -4661,9 +4674,10 @@ fn (mut c Checker) fail_if_unreadable(expr ast.Expr, typ ast.Type, what string) 
 					action := if what == 'argument' { 'passed' } else { 'used' }
 					c.error('`${expr.name}` is `shared` and must be `rlock`ed or `lock`ed to be ${action} as non-mut ${what}',
 						expr.pos)
+					return true
 				}
 			}
-			return
+			return false
 		}
 		ast.SelectorExpr {
 			pos = expr.pos
@@ -4673,31 +4687,42 @@ fn (mut c Checker) fail_if_unreadable(expr ast.Expr, typ ast.Type, what string) 
 					action := if what == 'argument' { 'passed' } else { 'used' }
 					c.error('`${expr_name}` is `shared` and must be `rlock`ed or `lock`ed to be ${action} as non-mut ${what}',
 						expr.pos)
+					return true
 				}
-				return
+				return false
 			} else {
-				c.fail_if_unreadable(expr.expr, expr.expr_type, what)
+				if c.fail_if_unreadable(expr.expr, expr.expr_type, what) {
+					return true
+				}
 			}
 		}
 		ast.CallExpr {
 			pos = expr.pos
 			if expr.is_method {
-				c.fail_if_unreadable(expr.left, expr.left_type, what)
+				if c.fail_if_unreadable(expr.left, expr.left_type, what) {
+					return true
+				}
 			}
-			return
+			return false
 		}
 		ast.LockExpr {
 			// TODO: check expressions inside the lock by appending to c.(r)locked_names
-			return
+			return false
 		}
 		ast.IndexExpr {
 			pos = expr.left.pos().extend(expr.pos)
-			c.fail_if_unreadable(expr.left, expr.left_type, what)
+			if c.fail_if_unreadable(expr.left, expr.left_type, what) {
+				return true
+			}
 		}
 		ast.InfixExpr {
 			pos = expr.left.pos().extend(expr.pos)
-			c.fail_if_unreadable(expr.left, expr.left_type, what)
-			c.fail_if_unreadable(expr.right, expr.right_type, what)
+			if c.fail_if_unreadable(expr.left, expr.left_type, what) {
+				return true
+			}
+			if c.fail_if_unreadable(expr.right, expr.right_type, what) {
+				return true
+			}
 		}
 		else {
 			pos = expr.pos()
@@ -4706,6 +4731,29 @@ fn (mut c Checker) fail_if_unreadable(expr ast.Expr, typ ast.Type, what string) 
 	if typ.has_flag(.shared_f) {
 		c.error('you have to create a handle and `rlock` it to use a `shared` element as non-mut ${what}',
 			pos)
+		return true
+	}
+	return false
+}
+
+fn (mut c Checker) fail_if_stack_struct_action_outside_unsafe(mut ident ast.Ident, failed_action string) {
+	if mut ident.obj is ast.Var {
+		mut obj := unsafe { &ident.obj }
+		if c.fn_scope != unsafe { nil } {
+			obj = c.fn_scope.find_var(ident.obj.name) or { obj }
+		}
+		if obj.is_stack_obj && !c.inside_unsafe {
+			sym := c.table.sym(obj.typ.set_nr_muls(0))
+			if !sym.is_heap() && !c.pref.translated && !c.file.is_translated {
+				suggestion := if sym.kind == .struct_ {
+					'declaring `${sym.name}` as `[heap]`'
+				} else {
+					'wrapping the `${sym.name}` object in a `struct` declared as `[heap]`'
+				}
+				c.error('`${ident.name}` cannot be ${failed_action} outside `unsafe` blocks as it might refer to an object stored on stack. Consider ${suggestion}.',
+					ident.pos)
+			}
+		}
 	}
 }
 
