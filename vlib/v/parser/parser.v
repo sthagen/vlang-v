@@ -330,7 +330,7 @@ pub fn (mut p Parser) parse() &ast.File {
 		}
 		stmt := p.top_stmt()
 		// clear the attributes after each statement
-		if !(stmt is ast.ExprStmt && (stmt as ast.ExprStmt).expr is ast.Comment) {
+		if !(stmt is ast.ExprStmt && stmt.expr is ast.Comment) {
 			p.attrs = []
 		}
 		stmts << stmt
@@ -1941,6 +1941,7 @@ fn (mut p Parser) note(s string) {
 }
 
 fn (mut p Parser) error_with_pos(s string, pos token.Pos) ast.NodeError {
+	// print_backtrace()
 	mut kind := 'error:'
 	if p.pref.fatal_errors {
 		util.show_compiler_message(kind, pos: pos, file_path: p.file_name, message: s)
@@ -2102,7 +2103,7 @@ fn (mut p Parser) parse_multi_expr(is_top_level bool) ast.Stmt {
 			if (is_top_level || p.tok.kind != .rcbr)
 				&& node !in [ast.CallExpr, ast.PostfixExpr, ast.ComptimeCall, ast.SelectorExpr, ast.DumpExpr] {
 				is_complex_infix_expr := node is ast.InfixExpr
-					&& (node as ast.InfixExpr).op in [.left_shift, .right_shift, .unsigned_right_shift, .arrow]
+					&& node.op in [.left_shift, .right_shift, .unsigned_right_shift, .arrow]
 				if !is_complex_infix_expr {
 					return p.error_with_pos('expression evaluated but not used', node.pos())
 				}
@@ -2629,11 +2630,12 @@ fn (mut p Parser) name_expr() ast.Expr {
 		// type cast. TODO: finish
 		// if name in ast.builtin_type_names_to_idx {
 		// handle the easy cases first, then check for an already known V typename, not shadowed by a local variable
-		if is_mod_cast || is_c_pointer_cast || is_c_type_cast || is_js_cast
-			|| is_generic_cast || (language == .v && name.len > 0 && (name[0].is_capital()
+		if (is_option || p.peek_tok.kind in [.lsbr, .lt, .lpar]) && (is_mod_cast
+			|| is_c_pointer_cast || is_c_type_cast || is_js_cast || is_generic_cast
+			|| (language == .v && name.len > 0 && (name[0].is_capital()
 			|| (!known_var && (name in p.table.type_idxs
 			|| name_w_mod in p.table.type_idxs))
-			|| name.all_after_last('.')[0].is_capital())) {
+			|| name.all_after_last('.')[0].is_capital()))) {
 			// MainLetter(x) is *always* a cast, as long as it is not `C.`
 			// TODO handle C.stat()
 			start_pos := p.tok.pos()
@@ -2672,7 +2674,7 @@ fn (mut p Parser) name_expr() ast.Expr {
 			p.expr_mod = ''
 			return node
 		} else {
-			// fn call
+			// fn_call
 			if is_option {
 				p.unexpected_with_pos(p.prev_tok.pos(),
 					got: '${p.prev_tok}'
@@ -2745,8 +2747,14 @@ fn (mut p Parser) name_expr() ast.Expr {
 			}
 		}
 		if p.peek_token(2).kind == .name && p.peek_token(3).kind == .lpar && !known_var {
-			p.error_with_pos('the receiver of the method call must be an instantiated object, e.g. `foo.bar()`',
-				p.tok.pos())
+			if lit0_is_capital && p.peek_tok.kind == .dot && language == .v {
+				// New static method call
+				p.expr_mod = ''
+				return p.call_expr(language, mod)
+			} else {
+				p.error_with_pos('${lit0_is_capital} the receiver of the method call must be an instantiated object, e.g. `foo.bar()`',
+					p.tok.pos())
+			}
 		}
 		// `Color.green`
 		mut enum_name := p.check_name()

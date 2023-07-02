@@ -166,8 +166,7 @@ fn (mut c Checker) reset_checker_state_at_start_of_new_file() {
 	c.inside_if_guard = false
 }
 
-pub fn (mut c Checker) check(ast_file_ &ast.File) {
-	mut ast_file := unsafe { ast_file_ }
+pub fn (mut c Checker) check(mut ast_file ast.File) {
 	c.reset_checker_state_at_start_of_new_file()
 	c.change_current_file(ast_file)
 	for i, ast_import in ast_file.imports {
@@ -266,7 +265,7 @@ pub fn (mut c Checker) check_scope_vars(sc &ast.Scope) {
 }
 
 // not used right now
-pub fn (mut c Checker) check2(ast_file &ast.File) []errors.Error {
+pub fn (mut c Checker) check2(mut ast_file ast.File) []errors.Error {
 	c.change_current_file(ast_file)
 	for stmt in ast_file.stmts {
 		c.stmt(stmt)
@@ -290,7 +289,7 @@ pub fn (mut c Checker) check_files(ast_files []&ast.File) {
 		for i in 0 .. ast_files.len {
 			mut file := ast_files[i]
 			c.timers.start('checker_check ${file.path}')
-			c.check(file)
+			c.check(mut file)
 			if file.mod.name == 'main' {
 				files_from_main_module << file
 				has_main_mod_file = true
@@ -462,6 +461,10 @@ fn (mut c Checker) alias_type_decl(node ast.AliasTypeDecl) {
 	}
 	c.ensure_type_exists(node.parent_type, node.type_pos) or { return }
 	mut parent_typ_sym := c.table.sym(node.parent_type)
+	if node.parent_type.has_flag(.result) {
+		c.add_error_detail('Result types cannot be stored and have to be unwrapped immediately')
+		c.error('cannot make an alias of Result type', node.type_pos)
+	}
 	match parent_typ_sym.kind {
 		.placeholder, .int_literal, .float_literal {
 			c.error('unknown aliased type `${parent_typ_sym.name}`', node.type_pos)
@@ -1368,7 +1371,7 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 		return node.expr_type
 	}
 	node.expr_type = typ
-	if !(node.expr is ast.Ident && (node.expr as ast.Ident).kind == .constant) {
+	if !(node.expr is ast.Ident && node.expr.kind == .constant) {
 		if node.expr_type.has_flag(.option) {
 			c.error('cannot access fields of an Option, handle the error with `or {...}` or propagate it with `?`',
 				node.pos)
@@ -1600,12 +1603,12 @@ fn (mut c Checker) const_decl(mut node ast.ConstDecl) {
 				first_stmts := field.expr.branches[0].stmts
 				second_stmts := field.expr.branches[1].stmts
 				if first_stmts.len > 0 && first_stmts.last() is ast.ExprStmt
-					&& (first_stmts.last() as ast.ExprStmt).typ != ast.void_type {
+					&& first_stmts.last().typ != ast.void_type {
 					field.expr.is_expr = true
 					field.expr.typ = (first_stmts.last() as ast.ExprStmt).typ
 					field.typ = field.expr.typ
 				} else if second_stmts.len > 0 && second_stmts.last() is ast.ExprStmt
-					&& (second_stmts.last() as ast.ExprStmt).typ != ast.void_type {
+					&& second_stmts.last().typ != ast.void_type {
 					field.expr.is_expr = true
 					field.expr.typ = (second_stmts.last() as ast.ExprStmt).typ
 					field.typ = field.expr.typ
@@ -2824,9 +2827,8 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 	//        node.typ: `Outside`
 	node.expr_type = c.expr(node.expr) // type to be casted
 
-	if node.expr is ast.ComptimeSelector {
-		node.expr_type = c.get_comptime_selector_type(node.expr as ast.ComptimeSelector,
-			node.expr_type)
+	if mut node.expr is ast.ComptimeSelector {
+		node.expr_type = c.get_comptime_selector_type(node.expr, node.expr_type)
 	}
 
 	mut from_type := c.unwrap_generic(node.expr_type)
@@ -3817,8 +3819,8 @@ fn (c &Checker) has_return(stmts []ast.Stmt) ?bool {
 
 [inline]
 pub fn (mut c Checker) is_comptime_var(node ast.Expr) bool {
-	return node is ast.Ident
-		&& (node as ast.Ident).info is ast.IdentVar && (node as ast.Ident).kind == .variable && ((node as ast.Ident).obj as ast.Var).ct_type_var != .no_comptime
+	return node is ast.Ident && node.info is ast.IdentVar && node.kind == .variable
+		&& ((node as ast.Ident).obj as ast.Var).ct_type_var != .no_comptime
 }
 
 fn (mut c Checker) mark_as_referenced(mut node ast.Expr, as_interface bool) {
@@ -3906,6 +3908,9 @@ fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) ast.Type {
 				c.error('unexpected `&`, expecting expression', node.right.pos)
 			}
 		} else if mut node.right is ast.SelectorExpr {
+			if node.right.expr.is_literal() {
+				c.error('cannot take the address of a literal value', node.pos.extend(node.right.pos))
+			}
 			right_sym := c.table.sym(right_type)
 			expr_sym := c.table.sym(node.right.expr_type)
 			if expr_sym.kind == .struct_ && (expr_sym.info as ast.Struct).is_minify
@@ -4114,7 +4119,7 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 		typ = (typ_sym.info as ast.Aggregate).types[0]
 	}
 	if typ.has_flag(.option) {
-		if node.left is ast.Ident && (node.left as ast.Ident).or_expr.kind == .absent {
+		if node.left is ast.Ident && node.left.or_expr.kind == .absent {
 			c.error('type `?${typ_sym.name}` is an Option, it must be unwrapped first; use `var?[]` to do it',
 				node.left.pos())
 		} else if node.left is ast.CallExpr {

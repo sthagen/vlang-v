@@ -1888,9 +1888,9 @@ fn (mut g Gen) expr_with_tmp_var(expr ast.Expr, expr_typ ast.Type, ret_typ ast.T
 		if ret_typ.has_flag(.generic) {
 			if expr is ast.SelectorExpr && g.cur_concrete_types.len == 0 {
 				// resolve generic struct on selectorExpr inside non-generic function
-				if expr.expr is ast.Ident && (expr.expr as ast.Ident).obj is ast.Var {
-					if ((expr.expr as ast.Ident).obj as ast.Var).expr is ast.StructInit {
-						g.cur_concrete_types << (g.table.sym((expr.expr as ast.Ident).obj.typ).info as ast.Struct).concrete_types
+				if expr.expr is ast.Ident && expr.expr.obj is ast.Var {
+					if (expr.expr.obj as ast.Var).expr is ast.StructInit {
+						g.cur_concrete_types << (g.table.sym(expr.expr.obj.typ).info as ast.Struct).concrete_types
 					}
 				}
 			}
@@ -1908,8 +1908,8 @@ fn (mut g Gen) expr_with_tmp_var(expr ast.Expr, expr_typ ast.Type, ret_typ ast.T
 					g.write('_option_none(&(${styp}[]) { ')
 				}
 			} else {
-				is_ptr_to_ptr_assign = (expr is ast.SelectorExpr
-					|| (expr is ast.Ident && !(expr as ast.Ident).is_auto_heap()))
+				is_ptr_to_ptr_assign =
+					(expr is ast.SelectorExpr || (expr is ast.Ident && !expr.is_auto_heap()))
 					&& ret_typ.is_ptr() && expr_typ.is_ptr() && expr_typ.has_flag(.option)
 				// option ptr assignment simplification
 				if is_ptr_to_ptr_assign {
@@ -2294,8 +2294,7 @@ fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp_is_ptr
 	}
 	g.write('${fname}(')
 	if !got_is_ptr && !got_is_fn {
-		if !expr.is_lvalue()
-			|| (expr is ast.Ident && (expr as ast.Ident).obj.is_simple_define_const()) {
+		if !expr.is_lvalue() || (expr is ast.Ident && expr.obj.is_simple_define_const()) {
 			// Note: the `_to_sumtype_` family of functions do call memdup internally, making
 			// another duplicate with the HEAP macro is redundant, so use ADDR instead:
 			promotion_macro_name := if fname.contains('_to_sumtype_') { 'ADDR' } else { 'HEAP' }
@@ -3580,9 +3579,6 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 		opt_base_typ := g.base_type(node.expr_type)
 		g.write('(*(${opt_base_typ}*)')
 	}
-	if sym.kind in [.interface_, .sum_type] {
-		g.write('(*(')
-	}
 	if sym.kind == .array_fixed {
 		if node.field_name != 'len' {
 			g.error('field_name should be `len`', node.pos)
@@ -3602,6 +3598,9 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 	if f := g.table.find_field_with_embeds(sym, node.field_name) {
 		field_sym := g.table.sym(f.typ)
 		field_typ = f.typ
+		if sym.kind in [.interface_, .sum_type] {
+			g.write('(*(')
+		}
 		if field_sym.kind in [.sum_type, .interface_] {
 			if !prevent_sum_type_unwrapping_once {
 				// check first if field is sum type because scope searching is expensive
@@ -3676,9 +3675,15 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 					method_name = g.generic_fn_name(rec_sym.info.concrete_types, m.name)
 				}
 			}
-			sb.write_string('${expr_styp}_${method_name}(')
-			if !receiver.typ.is_ptr() {
-				sb.write_string('*')
+			if rec_sym.info is ast.Interface {
+				left_cc_type := g.cc_type(g.table.unaliased_type(receiver.typ), false)
+				left_type_name := util.no_dots(left_cc_type)
+				sb.write_string('${c_name(left_type_name)}_name_table[a0->_typ]._method_${method_name}(')
+			} else {
+				sb.write_string('${expr_styp}_${method_name}(')
+				if !receiver.typ.is_ptr() {
+					sb.write_string('*')
+				}
 			}
 			for i in 0 .. m.params.len {
 				if i != 0 {
@@ -3706,10 +3711,14 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 			g.write(')')
 			return
 		}
+	} else {
+		if sym.kind in [.interface_, .sum_type] {
+			g.write('(*(')
+		}
 	}
 	// var?.field_opt
-	field_is_opt := (node.expr is ast.Ident && (node.expr as ast.Ident).is_auto_heap()
-		&& (node.expr as ast.Ident).or_expr.kind != .absent && field_typ.has_flag(.option))
+	field_is_opt := (node.expr is ast.Ident && node.expr.is_auto_heap()
+		&& node.expr.or_expr.kind != .absent && field_typ.has_flag(.option))
 	if field_is_opt {
 		g.write('((${g.base_type(field_typ)})')
 	}
@@ -3746,7 +3755,7 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 			g.write(embed_name)
 		}
 	}
-	alias_to_ptr := sym.info is ast.Alias && (sym.info as ast.Alias).parent_type.is_ptr()
+	alias_to_ptr := sym.info is ast.Alias && sym.info.parent_type.is_ptr()
 	if field_is_opt
 		|| ((node.expr_type.is_ptr() || sym.kind == .chan || alias_to_ptr)
 		&& node.from_embed_types.len == 0) {
@@ -4183,14 +4192,14 @@ fn (mut g Gen) select_expr(node ast.SelectExpr) {
 
 [inline]
 pub fn (mut g Gen) is_generic_param_var(node ast.Expr) bool {
-	return node is ast.Ident
-		&& (node as ast.Ident).info is ast.IdentVar && (node as ast.Ident).obj is ast.Var && ((node as ast.Ident).obj as ast.Var).ct_type_var == .generic_param
+	return node is ast.Ident && node.info is ast.IdentVar
+		&& (node as ast.Ident).obj is ast.Var && ((node as ast.Ident).obj as ast.Var).ct_type_var == .generic_param
 }
 
 [inline]
 pub fn (mut g Gen) is_comptime_var(node ast.Expr) bool {
-	return node is ast.Ident
-		&& (node as ast.Ident).info is ast.IdentVar && (node as ast.Ident).obj is ast.Var && ((node as ast.Ident).obj as ast.Var).ct_type_var != .no_comptime
+	return node is ast.Ident && node.info is ast.IdentVar
+		&& (node as ast.Ident).obj is ast.Var && ((node as ast.Ident).obj as ast.Var).ct_type_var != .no_comptime
 }
 
 fn (mut g Gen) ident(node ast.Ident) {
@@ -4535,8 +4544,7 @@ fn (mut g Gen) gen_result_error(target_type ast.Type, expr ast.Expr) {
 fn (mut g Gen) gen_option_error(target_type ast.Type, expr ast.Expr) {
 	styp := g.typ(g.unwrap_generic(target_type))
 	g.write('(${styp}){ .state=2, .err=')
-	if target_type.has_flag(.option) && expr is ast.Ident
-		&& (expr as ast.Ident).or_expr.kind == .propagate_option {
+	if target_type.has_flag(.option) && expr is ast.Ident && expr.or_expr.kind == .propagate_option {
 		g.expr(ast.None{}) // option type unwrapping error
 	} else {
 		g.expr(expr)

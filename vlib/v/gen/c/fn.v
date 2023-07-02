@@ -2155,7 +2155,7 @@ fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type ast.Type, lang as
 		&& g.table.unaliased_type(arg_typ).is_pointer() && expected_type.is_pointer()) {
 		if arg.is_mut {
 			if exp_sym.kind == .array {
-				if (arg.expr is ast.Ident && (arg.expr as ast.Ident).kind == .variable)
+				if (arg.expr is ast.Ident && arg.expr.kind == .variable)
 					|| arg.expr is ast.SelectorExpr {
 					g.write('&/*arr*/')
 					g.expr(arg.expr)
@@ -2173,7 +2173,7 @@ fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type ast.Type, lang as
 				g.expr(arg.expr)
 				return
 			} else if arg_sym.kind == .interface_ && exp_sym.kind == .interface_
-				&& (arg.expr is ast.Ident || arg.expr is ast.SelectorExpr) {
+				&& arg.expr in [ast.Ident, ast.SelectorExpr] {
 				g.write('&/*iface*/')
 				g.expr(arg.expr)
 				return
