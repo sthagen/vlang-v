@@ -49,7 +49,6 @@ pub struct Gen {
 	enum_data_type      ast.Type // cache her to avoid map lookups
 	module_built        string
 	timers_should_print bool
-	table               &ast.Table = unsafe { nil }
 mut:
 	out                       strings.Builder
 	cheaders                  strings.Builder
@@ -81,7 +80,8 @@ mut:
 	sql_buf                   strings.Builder // for writing exprs to args via `sqlite3_bind_int()` etc
 	global_const_defs         map[string]GlobalConstDef
 	sorted_global_const_names []string
-	file                      &ast.File = unsafe { nil }
+	file                      &ast.File  = unsafe { nil }
+	table                     &ast.Table = unsafe { nil }
 	unique_file_path_hash     u64 // a hash of file.path, used for making auxilary fn generation unique (like `compare_xyz`)
 	fn_decl                   &ast.FnDecl = unsafe { nil } // pointer to the FnDecl we are currently inside otherwise 0
 	last_fn_c_name            string
@@ -1410,16 +1410,12 @@ pub fn (mut g Gen) write_typedef_types() {
 					g.type_definitions.writeln('typedef chan ${sym.cname};')
 					chan_inf := sym.chan_info()
 					chan_elem_type := chan_inf.elem_type
+					is_fixed_arr := g.table.sym(chan_elem_type).kind == .array_fixed
 					if !chan_elem_type.has_flag(.generic) {
-						mut el_stype := g.typ(chan_elem_type)
-						is_fixed_arr := g.table.sym(chan_elem_type).kind == .array_fixed
+						el_stype := if is_fixed_arr { '_v_' } else { '' } + g.typ(chan_elem_type)
 						val_arg_pop := if is_fixed_arr { '&val.ret_arr' } else { '&val' }
 						val_arg_push := if is_fixed_arr { 'val' } else { '&val' }
-						push_arg := if is_fixed_arr {
-							el_stype.trim_string_left('_v_') + '*'
-						} else {
-							el_stype
-						}
+						push_arg := el_stype + if is_fixed_arr { '*' } else { '' }
 						g.channel_definitions.writeln('
 static inline ${el_stype} __${sym.cname}_popval(${sym.cname} ch) {
 	${el_stype} val;
@@ -3121,7 +3117,12 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 					g.writeln('(${shared_styp}*)__dup${shared_styp}(&(${shared_styp}){.mtx = {0}, .val =')
 				}
 			}
-			last_stmt_pos := if g.stmt_path_pos.len > 0 { g.stmt_path_pos.last() } else { 0 }
+			stmt_before_call_expr_pos := if g.stmt_path_pos.len > 0 {
+				g.stmt_path_pos.last()
+			} else {
+				0
+			}
+
 			g.call_expr(node)
 			if g.is_autofree && !g.is_builtin_mod && !g.is_js_call && g.strs_to_free0.len == 0
 				&& !g.inside_lambda {
@@ -3130,7 +3131,8 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 				// so just skip it
 				g.autofree_call_pregen(node)
 				if g.strs_to_free0.len > 0 {
-					g.insert_at(last_stmt_pos, g.strs_to_free0.join('\n') + '/* inserted before */')
+					g.insert_at(stmt_before_call_expr_pos, g.strs_to_free0.join('\n') +
+						'/* inserted before */')
 				}
 				g.strs_to_free0 = []
 			}
@@ -3306,8 +3308,7 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 			} else if node.op == .question {
 				cur_line := g.go_before_stmt(0).trim_space()
 				mut expr_str := ''
-				if mut node.expr is ast.ComptimeSelector
-					&& (node.expr as ast.ComptimeSelector).left is ast.Ident {
+				if mut node.expr is ast.ComptimeSelector && node.expr.left is ast.Ident {
 					// val.$(field.name)?
 					expr_str = '${node.expr.left.str()}.${g.comptime_for_field_value.name}'
 				} else if mut node.expr is ast.Ident && g.is_comptime_var(node.expr) {
@@ -3717,8 +3718,8 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 		}
 	}
 	// var?.field_opt
-	field_is_opt := (node.expr is ast.Ident && node.expr.is_auto_heap()
-		&& node.expr.or_expr.kind != .absent && field_typ.has_flag(.option))
+	field_is_opt := node.expr is ast.Ident && node.expr.is_auto_heap()
+		&& node.expr.or_expr.kind != .absent && field_typ.has_flag(.option)
 	if field_is_opt {
 		g.write('((${g.base_type(field_typ)})')
 	}
@@ -4192,14 +4193,14 @@ fn (mut g Gen) select_expr(node ast.SelectExpr) {
 
 [inline]
 pub fn (mut g Gen) is_generic_param_var(node ast.Expr) bool {
-	return node is ast.Ident && node.info is ast.IdentVar
-		&& (node as ast.Ident).obj is ast.Var && ((node as ast.Ident).obj as ast.Var).ct_type_var == .generic_param
+	return node is ast.Ident && node.info is ast.IdentVar && node.obj is ast.Var
+		&& ((node as ast.Ident).obj as ast.Var).ct_type_var == .generic_param
 }
 
 [inline]
 pub fn (mut g Gen) is_comptime_var(node ast.Expr) bool {
-	return node is ast.Ident && node.info is ast.IdentVar
-		&& (node as ast.Ident).obj is ast.Var && ((node as ast.Ident).obj as ast.Var).ct_type_var != .no_comptime
+	return node is ast.Ident && node.info is ast.IdentVar && node.obj is ast.Var
+		&& ((node as ast.Ident).obj as ast.Var).ct_type_var != .no_comptime
 }
 
 fn (mut g Gen) ident(node ast.Ident) {
@@ -4731,7 +4732,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 
 	if node.exprs.len > 0 {
 		// skip `return $vweb.html()`
-		if node.exprs[0] is ast.ComptimeCall && (node.exprs[0] as ast.ComptimeCall).is_vweb {
+		if node.exprs[0] is ast.ComptimeCall && node.exprs[0].is_vweb {
 			g.inside_return_tmpl = true
 			g.expr(node.exprs[0])
 			g.inside_return_tmpl = false
@@ -5485,7 +5486,7 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 			if g.pref.translated {
 				def_builder.write_string(' = ${g.expr_string(field.expr)}')
 			} else if (field.expr.is_literal() && should_init) || cinit
-				|| (field.expr is ast.ArrayInit && (field.expr as ast.ArrayInit).is_fixed)
+				|| (field.expr is ast.ArrayInit && field.expr.is_fixed)
 				|| (is_simple_unsafe_expr && should_init) {
 				// Simple literals can be initialized right away in global scope in C.
 				// e.g. `int myglobal = 10;`
@@ -6114,18 +6115,14 @@ fn (mut g Gen) or_block(var_name string, or_block ast.OrExpr, return_type ast.Ty
 	}
 	if or_block.kind == .block {
 		g.or_expr_return_type = return_type.clear_flags(.option, .result)
-		if g.inside_or_block {
-			g.writeln('\terr = ${cvar_name}.err;')
-		} else {
-			g.writeln('\tIError err = ${cvar_name}.err;')
-		}
+		g.writeln('\tIError err = ${cvar_name}.err;')
+
 		g.inside_or_block = true
 		defer {
 			g.inside_or_block = false
 		}
 		stmts := or_block.stmts
-		if stmts.len > 0 && stmts.last() is ast.ExprStmt
-			&& (stmts.last() as ast.ExprStmt).typ != ast.void_type {
+		if stmts.len > 0 && stmts.last() is ast.ExprStmt && stmts.last().typ != ast.void_type {
 			g.gen_or_block_stmts(cvar_name, mr_styp, stmts, return_type, true)
 		} else {
 			g.stmts(stmts)

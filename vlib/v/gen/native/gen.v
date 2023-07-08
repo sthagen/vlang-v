@@ -78,6 +78,7 @@ mut:
 	call_fn(node ast.CallExpr)
 	call(addr int) i64
 	cjmp(op JumpOp) int
+	cmp_to_stack_top(r Register)
 	cmp_var_reg(var Var, reg Register, config VarConfig)
 	cmp_var(var Var, val int, config VarConfig)
 	cmp_zero(reg Register)
@@ -86,7 +87,6 @@ mut:
 	convert_rune_to_string(r Register, buffer int, var Var, config VarConfig)
 	dec_var(var Var, config VarConfig)
 	fn_decl(node ast.FnDecl)
-	for_in_stmt(node ast.ForInStmt)
 	gen_asm_stmt(asm_node ast.AsmStmt)
 	gen_assert(assert_node ast.AssertStmt)
 	gen_cast_expr(expr ast.CastExpr)
@@ -118,6 +118,7 @@ mut:
 	mov64(r Register, val i64)
 	movabs(reg Register, val i64)
 	prefix_expr(node ast.PrefixExpr)
+	push(r Register)
 	ret()
 	return_stmt(node ast.Return)
 	reverse_string(r Register)
@@ -127,6 +128,17 @@ mut:
 }
 
 type Register = Amd64Register | Arm64Register
+
+fn (r Register) str() string {
+	return match r {
+		Amd64Register {
+			'${r as Amd64Register}'
+		}
+		Arm64Register {
+			'${r as Arm64Register}'
+		}
+	}
+}
 
 enum RelocType {
 	rel8
@@ -322,6 +334,7 @@ pub fn gen(files []&ast.File, table &ast.Table, out_name string, pref_ &pref.Pre
 		structs: []Struct{len: table.type_symbols.len}
 		eval: eval.new_eval(table, pref_)
 	}
+
 	g.code_gen.g = g
 	g.generate_header()
 	g.init_builtins()
@@ -976,10 +989,7 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 	} else {
 		node.name
 	}
-	if node.no_body || !g.is_used_by_main(node) {
-		if g.pref.is_verbose {
-			println(term.italic(term.green('\n-> skipping unused function `${name}`')))
-		}
+	if node.no_body || !g.is_used_by_main(node) || g.is_blacklisted(name, node.is_builtin) {
 		return
 	}
 	if g.pref.is_verbose {
@@ -987,9 +997,6 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 	}
 	if node.is_deprecated {
 		g.warning('fn_decl: ${name} is deprecated', node.pos)
-	}
-	if node.is_builtin {
-		g.warning('fn_decl: ${name} is builtin', node.pos)
 	}
 
 	g.stack_var_pos = 0
