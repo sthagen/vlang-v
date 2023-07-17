@@ -150,11 +150,12 @@ mut:
 	loop_depth                int
 	ternary_names             map[string]string
 	ternary_level_names       map[string][]string
-	arraymap_set_pos          int   // map or array set value position
-	stmt_path_pos             []int // positions of each statement start, for inserting C statements before the current statement
-	skip_stmt_pos             bool  // for handling if expressions + autofree (since both prepend C statements)
-	left_is_opt               bool  // left hand side on assignment is an option
-	right_is_opt              bool  // right hand side on assignment is an option
+	arraymap_set_pos          int      // map or array set value position
+	stmt_path_pos             []int    // positions of each statement start, for inserting C statements before the current statement
+	skip_stmt_pos             bool     // for handling if expressions + autofree (since both prepend C statements)
+	left_is_opt               bool     // left hand side on assignment is an option
+	right_is_opt              bool     // right hand side on assignment is an option
+	assign_ct_type            ast.Type // left hand side resolved comptime type
 	indent                    int
 	empty_line                bool
 	assign_op                 token.Kind // *=, =, etc (for array_set)
@@ -1064,9 +1065,12 @@ fn (mut g Gen) expr_string_surround(prepend string, expr ast.Expr, append string
 // all unified in one place so that it doesnt break
 // if one location changes
 fn (mut g Gen) option_type_name(t ast.Type) (string, string) {
-	base := g.base_type(t)
+	mut base := g.base_type(t)
 	mut styp := ''
 	sym := g.table.sym(t)
+	if sym.info is ast.FnType {
+		base = 'anon_fn_${g.table.fn_type_signature(sym.info.func)}'
+	}
 	if sym.language == .c && sym.kind == .struct_ {
 		styp = '${c.option_name}_${base.replace(' ', '_')}'
 	} else {
@@ -1086,6 +1090,9 @@ fn (mut g Gen) result_type_name(t ast.Type) (string, string) {
 	}
 	mut styp := ''
 	sym := g.table.sym(t)
+	if sym.info is ast.FnType {
+		base = 'anon_fn_${g.table.fn_type_signature(sym.info.func)}'
+	}
 	if sym.language == .c && sym.kind == .struct_ {
 		styp = '${c.result_name}_${base.replace(' ', '_')}'
 	} else {
@@ -1898,7 +1905,7 @@ fn (mut g Gen) expr_with_tmp_var(expr ast.Expr, expr_typ ast.Type, ret_typ ast.T
 		}
 		if ret_typ.has_flag(.option) {
 			if expr_typ.has_flag(.option) && expr in [ast.StructInit, ast.ArrayInit, ast.MapInit] {
-				if expr is ast.StructInit && (expr as ast.StructInit).init_fields.len > 0 {
+				if expr is ast.StructInit && expr.init_fields.len > 0 {
 					g.write('_option_ok(&(${styp}[]) { ')
 				} else {
 					g.write('_option_none(&(${styp}[]) { ')
@@ -4194,13 +4201,13 @@ fn (mut g Gen) select_expr(node ast.SelectExpr) {
 [inline]
 pub fn (mut g Gen) is_generic_param_var(node ast.Expr) bool {
 	return node is ast.Ident && node.info is ast.IdentVar && node.obj is ast.Var
-		&& ((node as ast.Ident).obj as ast.Var).ct_type_var == .generic_param
+		&& (node.obj as ast.Var).ct_type_var == .generic_param
 }
 
 [inline]
 pub fn (mut g Gen) is_comptime_var(node ast.Expr) bool {
 	return node is ast.Ident && node.info is ast.IdentVar && node.obj is ast.Var
-		&& ((node as ast.Ident).obj as ast.Var).ct_type_var != .no_comptime
+		&& (node.obj as ast.Var).ct_type_var != .no_comptime
 }
 
 fn (mut g Gen) ident(node ast.Ident) {
@@ -4753,7 +4760,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 	fn_return_is_multi := sym.kind == .multi_return
 	fn_return_is_option := fn_ret_type.has_flag(.option)
 	fn_return_is_result := fn_ret_type.has_flag(.result)
-	fn_return_is_fixed_array := sym.kind == .array_fixed && !fn_ret_type.has_flag(.option)
+	fn_return_is_fixed_array := sym.is_array_fixed() && !fn_ret_type.has_flag(.option)
 
 	mut has_semicolon := false
 	if node.exprs.len == 0 {
@@ -4775,6 +4782,21 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 	mut ret_typ := g.typ(g.unwrap_generic(fn_ret_type))
 	if fn_ret_type.has_flag(.generic) && fn_return_is_fixed_array {
 		ret_typ = '_v_${ret_typ}'
+	} else if sym.kind == .alias && fn_return_is_fixed_array {
+		ret_typ = '_v_' + g.typ((sym.info as ast.Alias).parent_type)
+	}
+	if node.exprs.len == 1 {
+		// `return fn_call_opt()`
+		if (fn_return_is_option || fn_return_is_result) && node.exprs[0] is ast.CallExpr
+			&& node.exprs[0].return_type == g.fn_decl.return_type
+			&& node.exprs[0].or_block.kind == .absent {
+			g.write('${ret_typ} ${tmpvar} = ')
+			g.expr(node.exprs[0])
+			g.writeln(';')
+			g.write_defer_stmts_when_needed()
+			g.writeln('return ${tmpvar};')
+			return
+		}
 	}
 	mut use_tmp_var := g.defer_stmts.len > 0 || g.defer_profile_code.len > 0
 		|| g.cur_lock.lockeds.len > 0

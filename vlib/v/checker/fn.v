@@ -129,8 +129,6 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 						node.return_type_pos)
 				}
 			}
-		} else if c.table.sym(node.return_type).kind == .alias && return_sym.kind == .array_fixed {
-			c.error('fixed array cannot be returned by function using alias', node.return_type_pos)
 		}
 		// Ensure each generic type of the parameter was declared in the function's definition
 		if node.return_type.has_flag(.generic) {
@@ -211,7 +209,9 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 	if node.language == .v {
 		// Make sure all types are valid
 		for mut param in node.params {
-			c.ensure_type_exists(param.typ, param.type_pos) or { return }
+			if !c.ensure_type_exists(param.typ, param.type_pos) {
+				return
+			}
 			if reserved_type_names_chk.matches(param.name) {
 				c.error('invalid use of reserved type `${param.name}` as a parameter name',
 					param.pos)
@@ -279,7 +279,9 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 		c.error('top level declaration cannot shadow builtin type', node.pos)
 	}
 	if node.return_type != ast.Type(0) {
-		c.ensure_type_exists(node.return_type, node.return_type_pos) or { return }
+		if !c.ensure_type_exists(node.return_type, node.return_type_pos) {
+			return
+		}
 		if node.language == .v && node.is_method && node.name == 'str' {
 			if node.return_type != ast.string_type {
 				c.error('.str() methods should return `string`', node.pos)
@@ -983,7 +985,7 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 			node.concrete_list_pos)
 	}
 	for concrete_type in node.concrete_types {
-		c.ensure_type_exists(concrete_type, node.concrete_list_pos) or {}
+		c.ensure_type_exists(concrete_type, node.concrete_list_pos)
 	}
 	if func.generic_names.len > 0 && node.args.len == 0 && node.concrete_types.len == 0 {
 		c.error('no argument generic function must add concrete types, e.g. foo[int]()',
@@ -1521,6 +1523,16 @@ fn (mut c Checker) cast_fixed_array_ret(typ ast.Type, sym ast.TypeSymbol) ast.Ty
 	return typ
 }
 
+// cast_to_fixed_array_ret casts a ArrayFixed type created to do not return to a returning one
+fn (mut c Checker) cast_to_fixed_array_ret(typ ast.Type, sym ast.TypeSymbol) ast.Type {
+	if sym.kind == .array_fixed && !(sym.info as ast.ArrayFixed).is_fn_ret {
+		info := sym.info as ast.ArrayFixed
+		return c.table.find_or_register_array_fixed(info.elem_type, info.size, info.size_expr,
+			true)
+	}
+	return typ
+}
+
 fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 	left_type := c.expr(mut node.left)
 	if left_type == ast.void_type {
@@ -1869,7 +1881,7 @@ fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 			node.concrete_list_pos)
 	}
 	for concrete_type in node.concrete_types {
-		c.ensure_type_exists(concrete_type, node.concrete_list_pos) or {}
+		c.ensure_type_exists(concrete_type, node.concrete_list_pos)
 	}
 	if method.return_type == ast.void_type && method.is_conditional
 		&& method.ctdefine_idx != ast.invalid_type_idx {
