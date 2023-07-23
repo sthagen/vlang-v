@@ -614,6 +614,16 @@ and use a reference to the sum type instead: `var := &${node.name}(${variant_nam
 				}
 			}
 		} else if sym.info is ast.FnType {
+			if sym.info.func.generic_names.len > 0 {
+				if !variant.typ.has_flag(.generic) {
+					c.error('generic fntype `${sym.name}` must specify generic type names, e.g. ${sym.name}[T]',
+						variant.pos)
+				}
+				if node.generic_types.len == 0 {
+					c.error('generic sumtype `${node.name}` must specify generic type names, e.g. ${node.name}[T]',
+						node.name_pos)
+				}
+			}
 			if c.table.sym(sym.info.func.return_type).name.ends_with('.${node.name}') {
 				c.error('sum type `${node.name}` cannot be defined recursively', variant.pos)
 			}
@@ -2889,6 +2899,11 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 	if to_type.has_flag(.option) && from_type == ast.none_type {
 		// allow conversion from none to every option type
 	} else if to_sym.kind == .sum_type {
+		to_sym_info := to_sym.info as ast.SumType
+		if to_sym_info.generic_types.len > 0 && to_sym_info.concrete_types.len == 0 {
+			c.error('generic sumtype `${to_sym.name}` must specify type parameter, e.g. ${to_sym.name}[int]',
+				node.pos)
+		}
 		if from_type in [ast.int_literal_type, ast.float_literal_type] {
 			xx := if from_type == ast.int_literal_type { ast.int_type } else { ast.f64_type }
 			node.expr_type = c.promote_num(node.expr_type, xx)
@@ -3635,6 +3650,7 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 			mut smartcasts := []ast.Type{}
 			mut is_already_casted := false
 			mut orig_type := 0
+			mut is_inherited := false
 			if mut expr.obj is ast.Var {
 				is_mut = expr.obj.is_mut
 				smartcasts << expr.obj.smartcasts
@@ -3642,6 +3658,7 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 				if orig_type == 0 {
 					orig_type = expr.obj.typ
 				}
+				is_inherited = expr.obj.is_inherited
 			}
 			// smartcast either if the value is immutable or if the mut argument is explicitly given
 			if (!is_mut || expr.is_mut) && !is_already_casted {
@@ -3652,6 +3669,7 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 					pos: expr.pos
 					is_used: true
 					is_mut: expr.is_mut
+					is_inherited: is_inherited
 					smartcasts: smartcasts
 					orig_type: orig_type
 				})
@@ -4061,9 +4079,9 @@ fn (mut c Checker) check_index(typ_sym &ast.TypeSymbol, index ast.Expr, index_ty
 			&& (index_type_sym.info as ast.Alias).parent_type.is_int())
 			|| (c.pref.translated && index_type.is_any_kind_of_pointer())) {
 			type_str := if typ_sym.kind == .string {
-				'non-integer string index `${index_type_sym.name}`'
+				'non-integer string index `${c.table.type_to_str(index_type)}`'
 			} else {
-				'non-integer index `${index_type_sym.name}` (array type `${typ_sym.name}`)'
+				'non-integer index `${c.table.type_to_str(index_type)}` (array type `${typ_sym.name}`)'
 			}
 			c.error('${type_str}', pos)
 		}

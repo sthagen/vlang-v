@@ -410,6 +410,19 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 			c.table.fns[node.name].dep_names = dep_names
 		}
 	}
+
+	// vweb checks
+	if node.attrs.len > 0 && c.file.imports.filter(it.mod == 'vweb').len > 0 {
+		// If it's a vweb action (has the ['/url'] attribute), make sure it returns a vweb.Result
+		for attr in node.attrs {
+			if attr.name.starts_with('/') {
+				if c.table.sym(node.return_type).name != 'vweb.Result' {
+					c.error('vweb actions must return `vweb.Result`', node.pos)
+				}
+				break
+			}
+		}
+	}
 }
 
 // check_same_type_ignoring_pointers util function to check if the Types are the same, including all
@@ -2175,6 +2188,7 @@ fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 			}
 		}
 	}
+
 	return node.return_type
 }
 
@@ -2261,7 +2275,7 @@ fn (mut c Checker) post_process_generic_fns() ! {
 		for concrete_types in gtypes {
 			c.table.cur_concrete_types = concrete_types
 			c.fn_decl(mut node)
-			if node.name == 'vweb.run' {
+			if node.name in ['vweb.run', 'vweb.run_at'] {
 				for ct in concrete_types {
 					if ct !in c.vweb_gen_types {
 						c.vweb_gen_types << ct

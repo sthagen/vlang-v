@@ -1917,6 +1917,9 @@ fn (mut g Gen) expr_with_tmp_var(expr ast.Expr, expr_typ ast.Type, ret_typ ast.T
 				// option ptr assignment simplification
 				if is_ptr_to_ptr_assign {
 					g.write('${tmp_var} = ')
+				} else if expr is ast.PrefixExpr && expr.right is ast.StructInit
+					&& (expr.right as ast.StructInit).init_fields.len == 0 {
+					g.write('_option_none(&(${styp}[]) { ')
 				} else {
 					g.write('_option_ok(&(${styp}[]) { ')
 				}
@@ -3792,6 +3795,7 @@ fn (mut g Gen) enum_decl(node ast.EnumDecl) {
 	if g.pref.ccompiler == 'msvc' {
 		mut last_value := '0'
 		enum_typ_name := g.table.get_type_name(node.typ)
+		g.enum_typedefs.writeln('')
 		g.enum_typedefs.writeln('typedef ${enum_typ_name} ${enum_name};')
 		for i, field in node.fields {
 			g.enum_typedefs.write_string('\t#define ${enum_name}__${field.name} ')
@@ -3813,6 +3817,7 @@ fn (mut g Gen) enum_decl(node ast.EnumDecl) {
 		}
 		return
 	}
+	g.enum_typedefs.writeln('')
 	if node.typ != ast.int_type {
 		g.enum_typedefs.writeln('#pragma pack(push, 1)')
 	}
@@ -4348,6 +4353,9 @@ fn (mut g Gen) ident(node ast.Ident) {
 						} else {
 							mut is_ptr := false
 							if i == 0 {
+								if node.obj.is_inherited {
+									g.write(closure_ctx + '->')
+								}
 								g.write(name)
 								if node.obj.orig_type.is_ptr() {
 									is_ptr = true
@@ -4587,7 +4595,7 @@ fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 			guarded_include = '#include ${node.main}'
 		}
 		if node.main.contains('.m') {
-			g.definitions.writeln('\n')
+			g.definitions.writeln('')
 			if ct_condition.len > 0 {
 				g.definitions.writeln('#if ${ct_condition}')
 			}
@@ -4598,9 +4606,8 @@ fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 			if ct_condition.len > 0 {
 				g.definitions.writeln('#endif // \$if ${ct_condition}')
 			}
-			g.definitions.writeln('\n')
 		} else {
-			g.includes.writeln('\n')
+			g.includes.writeln('')
 			if ct_condition.len > 0 {
 				g.includes.writeln('#if ${ct_condition}')
 			}
@@ -4609,7 +4616,6 @@ fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 			if ct_condition.len > 0 {
 				g.includes.writeln('#endif // \$if ${ct_condition}')
 			}
-			g.includes.writeln('\n')
 		}
 	} else if node.kind == 'preinclude' {
 		mut missing_message := 'Header file ${node.main}, needed for module `${node.mod}` was not found.'
@@ -4626,7 +4632,7 @@ fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 		if node.main.contains('.m') {
 			// Might need to support '#preinclude' for .m files as well but for the moment
 			// this does the same as '#include' for them
-			g.definitions.writeln('\n')
+			g.definitions.writeln('')
 			if ct_condition.len > 0 {
 				g.definitions.writeln('#if ${ct_condition}')
 			}
@@ -4637,9 +4643,8 @@ fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 			if ct_condition.len > 0 {
 				g.definitions.writeln('#endif // \$if ${ct_condition}')
 			}
-			g.definitions.writeln('\n')
 		} else {
-			g.preincludes.writeln('\n')
+			g.preincludes.writeln('')
 			if ct_condition.len > 0 {
 				g.preincludes.writeln('#if ${ct_condition}')
 			}
@@ -4648,7 +4653,6 @@ fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 			if ct_condition.len > 0 {
 				g.preincludes.writeln('#endif // \$if ${ct_condition}')
 			}
-			g.preincludes.writeln('\n')
 		}
 	} else if node.kind == 'insert' {
 		if ct_condition.len > 0 {
@@ -5159,7 +5163,7 @@ fn (mut g Gen) const_decl(node ast.ConstDecl) {
 		field_expr := field.expr
 		match field.expr {
 			ast.ArrayInit {
-				if field.expr.is_fixed {
+				if field.expr.is_fixed && g.pref.build_mode != .build_module {
 					styp := g.typ(field.expr.typ)
 					val := g.expr_string(field.expr)
 					g.global_const_defs[util.no_dots(field.name)] = GlobalConstDef{
@@ -5218,7 +5222,7 @@ fn (mut g Gen) const_decl(node ast.ConstDecl) {
 					g.const_decl_simple_define(field.mod, field.name, g.expr_string(field_expr))
 				} else if field.expr is ast.CastExpr {
 					if field.expr.expr is ast.ArrayInit {
-						if field.expr.expr.is_fixed {
+						if field.expr.expr.is_fixed && g.pref.build_mode != .build_module {
 							styp := g.typ(field.expr.typ)
 							val := g.expr_string(field.expr.expr)
 							g.global_const_defs[util.no_dots(field.name)] = GlobalConstDef{
@@ -5868,7 +5872,6 @@ fn (mut g Gen) write_types(symbols []&ast.TypeSymbol) {
 					}
 				}
 				g.type_definitions.writeln('};')
-				g.type_definitions.writeln('')
 			}
 			ast.ArrayFixed {
 				elem_sym := g.table.sym(sym.info.elem_type)
