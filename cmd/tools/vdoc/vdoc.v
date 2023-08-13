@@ -16,7 +16,6 @@ const (
 	allowed_formats = ['md', 'markdown', 'json', 'text', 'stdout', 'html', 'htm']
 	vexe            = os.getenv_opt('VEXE') or { @VEXE }
 	vroot           = os.dir(vexe)
-	tabs            = ['\t\t', '\t\t\t\t\t\t', '\t\t\t\t\t\t\t']
 )
 
 enum OutputType {
@@ -233,6 +232,9 @@ fn (vd VDoc) get_readme(path string) string {
 		}
 	}
 	if fname == '' {
+		if path.all_after_last(os.path_separator) == 'src' {
+			return vd.get_readme(path.all_before_last(os.path_separator))
+		}
 		return ''
 	}
 	readme_path := os.join_path(path, '${fname}.md')

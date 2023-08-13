@@ -106,6 +106,7 @@ pub mut:
 	warnings       []errors.Warning
 	notices        []errors.Notice
 	vet_errors     []vet.Error
+	vet_notices    []vet.Error
 	template_paths []string // record all compiled $tmpl files; needed for `v watch run webserver.v`
 }
 
@@ -254,7 +255,7 @@ pub fn parse_file(path string, table &ast.Table, comments_mode scanner.CommentsM
 	return res
 }
 
-pub fn parse_vet_file(path string, table_ &ast.Table, pref_ &pref.Preferences) (&ast.File, []vet.Error) {
+pub fn parse_vet_file(path string, table_ &ast.Table, pref_ &pref.Preferences) (&ast.File, []vet.Error, []vet.Error) {
 	$if trace_parse_vet_file ? {
 		eprintln('> ${@MOD}.${@FN} path: ${path}')
 	}
@@ -290,7 +291,7 @@ pub fn parse_vet_file(path string, table_ &ast.Table, pref_ &pref.Preferences) (
 	p.vet_errors << p.scanner.vet_errors
 	file := p.parse()
 	unsafe { p.free_scanner() }
-	return file, p.vet_errors
+	return file, p.vet_errors, p.vet_notices
 }
 
 pub fn (mut p Parser) parse() &ast.File {
@@ -763,7 +764,7 @@ fn (mut p Parser) top_stmt() ast.Stmt {
 						expr: if_expr
 						pos: if_expr.pos
 					}
-					if comptime_if_expr_contains_top_stmt(if_expr) {
+					if p.pref.is_fmt || comptime_if_expr_contains_top_stmt(if_expr) {
 						return cur_stmt
 					} else {
 						return p.other_stmts(cur_stmt)
@@ -2063,6 +2064,20 @@ fn (mut p Parser) vet_error(msg string, line int, fix vet.FixKind, typ vet.Error
 		file_path: p.scanner.file_path
 		pos: pos
 		kind: .error
+		fix: fix
+		typ: typ
+	}
+}
+
+fn (mut p Parser) vet_notice(msg string, line int, fix vet.FixKind, typ vet.ErrorType) {
+	pos := token.Pos{
+		line_nr: line + 1
+	}
+	p.vet_notices << vet.Error{
+		message: msg
+		file_path: p.scanner.file_path
+		pos: pos
+		kind: .notice
 		fix: fix
 		typ: typ
 	}
@@ -3698,10 +3713,13 @@ fn (mut p Parser) const_decl() ast.ConstDecl {
 		if p.tok.kind == .comma {
 			p.error_with_pos('const declaration do not support multiple assign yet', p.tok.pos())
 		}
+		// Allow for `const x := 123`, and for `const x = 123` too.
+		// Supporting `const x := 123` in addition to `const x = 123`, makes extracting local variables to constants much less annoying, while prototyping:
 		if p.tok.kind == .decl_assign {
-			p.error_with_pos('cannot use `:=` to declare a const, use `=` instead', p.tok.pos())
+			p.check(.decl_assign)
+		} else {
+			p.check(.assign)
 		}
-		p.check(.assign)
 		end_comments << p.eat_comments()
 		if p.tok.kind == .key_fn {
 			p.error('const initializer fn literal is not a constant')
@@ -3712,6 +3730,10 @@ fn (mut p Parser) const_decl() ast.ConstDecl {
 			return ast.ConstDecl{}
 		}
 		expr := p.expr(0)
+		if expr is ast.ArrayInit && !expr.is_fixed && p.pref.is_vet {
+			p.vet_notice('use a fixed array, instead of a dynamic one', pos.line_nr, vet.FixKind.unknown,
+				.default)
+		}
 		field := ast.ConstField{
 			name: full_name
 			mod: p.mod
@@ -3992,7 +4014,8 @@ fn (mut p Parser) enum_decl() ast.EnumDecl {
 		}
 		is_pub: is_pub
 	})
-	if idx == -1 {
+	if idx in [ast.invalid_type_idx, ast.string_type_idx, ast.rune_type_idx, ast.array_type_idx,
+		ast.map_type_idx] {
 		p.error_with_pos('cannot register enum `${name}`, another type with this name exists',
 			end_pos)
 	}
@@ -4090,7 +4113,8 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 			}
 			is_pub: is_pub
 		})
-		if typ == ast.invalid_type_idx {
+		if typ in [ast.invalid_type_idx, ast.string_type_idx, ast.rune_type_idx, ast.array_type_idx,
+			ast.map_type_idx] {
 			p.error_with_pos('cannot register sum type `${name}`, another type with this name exists',
 				name_pos)
 			return ast.SumTypeDecl{}
@@ -4130,7 +4154,8 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 		is_pub: is_pub
 	})
 	type_end_pos := p.prev_tok.pos()
-	if idx == ast.invalid_type_idx {
+	if idx in [ast.invalid_type_idx, ast.string_type_idx, ast.rune_type_idx, ast.array_type_idx,
+		ast.map_type_idx] {
 		p.error_with_pos('cannot register alias `${name}`, another type with this name exists',
 			name_pos)
 		return ast.AliasTypeDecl{}

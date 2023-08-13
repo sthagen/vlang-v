@@ -12,7 +12,7 @@ import term
 
 const (
 	base_os      = 'linux'
-	os_names     = ['linux', 'macos', 'windows']
+	os_names     = ['linux', 'macos', 'windows', 'freebsd', 'openbsd', 'solaris', 'termux']
 	skip_modules = [
 		'builtin.bare',
 		'builtin.linux_bare.old',
@@ -103,7 +103,7 @@ fn (app App) gen_api_for_module_in_os(mod_name string, os_name string) string {
 		for s in f.stmts {
 			if s is ast.FnDecl {
 				if s.is_pub {
-					fn_signature := s.stringify_fn_decl(b.table, mod_name, map[string]string{})
+					fn_signature := b.table.stringify_fn_decl(&s, mod_name, map[string]string{})
 					fn_mod := s.modname()
 					if fn_mod == mod_name {
 						fline := '${fn_mod}: ${fn_signature}'

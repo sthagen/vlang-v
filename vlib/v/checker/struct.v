@@ -11,6 +11,7 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 		util.timing_measure_cumulative(@METHOD)
 	}
 	mut struct_sym, struct_typ_idx := c.table.find_sym_and_type_idx(node.name)
+	// struct_sym.jj0
 	mut has_generic_types := false
 	if mut struct_sym.info is ast.Struct {
 		if node.language == .v && !c.is_builtin_mod && !struct_sym.info.is_anon {
@@ -70,6 +71,19 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 					}
 				}
 			}
+			// Do not allow uninitialized `fn` fields, or force `?fn`
+			// (allow them in `C.` structs)
+			if !c.is_builtin_mod && node.language == .v {
+				sym := c.table.sym(field.typ)
+				if sym.kind == .function {
+					if !field.typ.has_flag(.option) && !field.has_default_expr
+						&& field.attrs.filter(it.name == 'required').len == 0 {
+						error_msg := 'uninitialized `fn` struct fields are not allowed, since they can result in segfaults; use `?fn` or `[required]` or initialize the field with `=` (if you absolutely want to have unsafe function pointers, use `= unsafe { nil }`)'
+						c.note(error_msg, field.pos)
+					}
+				}
+			}
+
 			if field.has_default_expr {
 				c.expected_type = field.typ
 				field.default_expr_typ = c.expr(mut field.default_expr)
@@ -155,6 +169,9 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 									true)
 							}
 						}
+					} else if c.table.final_sym(field.typ).kind == .function
+						&& field.default_expr_typ.is_pointer() {
+						continue
 					} else {
 						c.error('incompatible initializer for field `${field.name}`: ${err.msg()}',
 							field.default_expr.pos())
@@ -315,6 +332,9 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 		}
 	}
 	struct_sym := c.table.sym(node.typ)
+	mut old_inside_generic_struct_init := false
+	mut old_cur_struct_generic_types := []ast.Type{}
+	mut old_cur_struct_concrete_types := []ast.Type{}
 	if struct_sym.info is ast.Struct {
 		// check if the generic param types have been defined
 		for ct in struct_sym.info.concrete_types {
@@ -351,6 +371,20 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 		if node.generic_types.len > 0 && struct_sym.info.generic_types.len == 0 {
 			c.error('a non generic struct `${node.typ_str}` used like a generic struct',
 				node.name_pos)
+		}
+		if struct_sym.info.generic_types.len > 0
+			&& struct_sym.info.generic_types.len == struct_sym.info.concrete_types.len {
+			old_inside_generic_struct_init = c.inside_generic_struct_init
+			old_cur_struct_generic_types = c.cur_struct_generic_types.clone()
+			old_cur_struct_concrete_types = c.cur_struct_concrete_types.clone()
+			c.inside_generic_struct_init = true
+			c.cur_struct_generic_types = struct_sym.info.generic_types.clone()
+			c.cur_struct_concrete_types = struct_sym.info.concrete_types.clone()
+			defer {
+				c.inside_generic_struct_init = old_inside_generic_struct_init
+				c.cur_struct_generic_types = old_cur_struct_generic_types
+				c.cur_struct_concrete_types = old_cur_struct_concrete_types
+			}
 		}
 	} else if struct_sym.info is ast.Alias {
 		parent_sym := c.table.sym(struct_sym.info.parent_type)
@@ -613,10 +647,10 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 			// and the second part is all fields embedded in the structure
 			// If the return value data composition form in `c.table.struct_fields()` is modified,
 			// need to modify here accordingly.
-			fields := c.table.struct_fields(type_sym)
+			mut fields := c.table.struct_fields(type_sym)
 			mut checked_types := []ast.Type{}
 
-			for i, field in fields {
+			for i, mut field in fields {
 				if field.name in inited_fields {
 					continue
 				}
@@ -628,7 +662,7 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 				}
 				if field.has_default_expr {
 					if i < info.fields.len && field.default_expr_typ == 0 {
-						if field.default_expr is ast.StructInit {
+						if mut field.default_expr is ast.StructInit {
 							idx := c.table.find_type_idx(field.default_expr.typ_str)
 							if idx != 0 {
 								info.fields[i].default_expr_typ = ast.new_type(idx)
@@ -637,6 +671,9 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 							if field.typ.is_any_kind_of_pointer() {
 								info.fields[i].default_expr_typ = field.typ
 							}
+						} else if field.default_expr is ast.Ident
+							&& field.default_expr.info is ast.IdentFn {
+							c.expr(mut field.default_expr)
 						} else {
 							if const_field := c.table.global_scope.find_const('${field.default_expr}') {
 								info.fields[i].default_expr_typ = const_field.typ

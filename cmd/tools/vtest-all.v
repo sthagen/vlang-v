@@ -142,25 +142,28 @@ fn get_all_commands() []Command {
 			line: '${vexe} run examples/v_script.vsh > /dev/null'
 			okmsg: 'V can run the .VSH script file examples/v_script.vsh'
 		}
+		// Note: -experimental is used here, just to suppress the warningss,
+		// that are otherwise printed by the native backend,
+		// until globals and hash statements *are implemented*:
 		$if linux {
 			res << Command{
-				line: '${vexe} -b native run examples/native/hello_world.v > /dev/null'
+				line: '${vexe} -experimental -b native run examples/native/hello_world.v > /dev/null'
 				okmsg: 'V compiles and runs examples/native/hello_world.v on the native backend for linux'
 			}
 		}
 		// only compilation:
 		res << Command{
-			line: '${vexe} -os linux -b native -o hw.linux examples/hello_world.v'
+			line: '${vexe} -os linux -experimental -b native -o hw.linux examples/hello_world.v'
 			okmsg: 'V compiles hello_world.v on the native backend for linux'
 			rmfile: 'hw.linux'
 		}
 		res << Command{
-			line: '${vexe} -os macos -b native -o hw.macos examples/hello_world.v'
+			line: '${vexe} -os macos -experimental -b native -o hw.macos examples/hello_world.v'
 			okmsg: 'V compiles hello_world.v on the native backend for macos'
 			rmfile: 'hw.macos'
 		}
 		res << Command{
-			line: '${vexe} -os windows -b native -o hw.exe examples/hello_world.v'
+			line: '${vexe} -os windows -experimental -b native -o hw.exe examples/hello_world.v'
 			okmsg: 'V compiles hello_world.v on the native backend for windows'
 			rmfile: 'hw.exe'
 		}
@@ -179,6 +182,15 @@ fn get_all_commands() []Command {
 			line: '${vexe} -skip-unused examples/2048'
 			okmsg: 'V can compile 2048 with -skip-unused.'
 			rmfile: 'examples/2048/2048'
+		}
+		if _ := os.find_abs_path_of_executable('emcc') {
+			res << Command{
+				line: '${vexe} -os wasm32_emscripten examples/2048'
+				okmsg: 'V can compile 2048 with -os wasm32_emscripten, using emcc.'
+				rmfile: 'examples/2048/2048'
+			}
+		} else {
+			println('> emcc not found, skipping `v -os wasm32_emscripten examples/2048`.')
 		}
 		res << Command{
 			line: '${vexe} -skip-unused  -live examples/hot_reload/bounce.v'

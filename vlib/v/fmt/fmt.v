@@ -813,8 +813,14 @@ pub fn (mut f Fmt) assert_stmt(node ast.AssertStmt) {
 }
 
 pub fn (mut f Fmt) assign_stmt(node ast.AssignStmt) {
-	f.comments(node.comments)
+	mut sum_len := 0
 	for i, left in node.left {
+		pre_comments := node.comments[sum_len..].filter(it.pos.pos < left.pos().pos)
+		sum_len += pre_comments.len
+		if pre_comments.len > 0 {
+			f.comments(pre_comments)
+			f.write(' ')
+		}
 		f.expr(left)
 		if i < node.left.len - 1 {
 			f.write(', ')
@@ -823,6 +829,12 @@ pub fn (mut f Fmt) assign_stmt(node ast.AssignStmt) {
 	f.is_assign = true
 	f.write(' ${node.op.str()} ')
 	for i, val in node.right {
+		pre_comments := node.comments[sum_len..].filter(it.pos.pos < val.pos().pos)
+		sum_len += pre_comments.len
+		if pre_comments.len > 0 {
+			f.comments(pre_comments)
+			f.write(' ')
+		}
 		f.expr(val)
 		if i < node.right.len - 1 {
 			f.write(', ')
@@ -1007,7 +1019,7 @@ pub fn (mut f Fmt) enum_decl(node ast.EnumDecl) {
 
 pub fn (mut f Fmt) fn_decl(node ast.FnDecl) {
 	f.attrs(node.attrs)
-	f.write(node.stringify_fn_decl(f.table, f.cur_mod, f.mod2alias)) // `Expr` instead of `ast.Expr` in mod ast
+	f.write(f.table.stringify_fn_decl(&node, f.cur_mod, f.mod2alias))
 	// Handle trailing comments after fn header declarations
 	if node.no_body && node.end_comments.len > 0 {
 		first_comment := node.end_comments[0]
@@ -1032,7 +1044,7 @@ pub fn (mut f Fmt) fn_decl(node ast.FnDecl) {
 }
 
 pub fn (mut f Fmt) anon_fn(node ast.AnonFn) {
-	f.write(node.stringify_anon_decl(f.table, f.cur_mod, f.mod2alias)) // `Expr` instead of `ast.Expr` in mod ast
+	f.write(f.table.stringify_anon_decl(&node, f.cur_mod, f.mod2alias)) // `Expr` instead of `ast.Expr` in mod ast
 	f.fn_body(node.decl)
 }
 
@@ -1045,9 +1057,11 @@ fn (mut f Fmt) fn_body(node ast.FnDecl) {
 	if node.language == .v {
 		if !node.no_body {
 			f.write(' {')
-			f.comments(node.comments, inline: true)
+			pre_comments := node.comments.filter(it.pos.pos < node.name_pos.pos)
+			body_comments := node.comments[pre_comments.len..]
+			f.comments(body_comments, inline: true)
 			if node.stmts.len > 0 || node.pos.line_nr < node.pos.last_line {
-				if node.comments.len == 0 {
+				if body_comments.len == 0 {
 					f.writeln('')
 				}
 				f.stmts(node.stmts)
@@ -1090,21 +1104,40 @@ pub fn (mut f Fmt) for_c_stmt(node ast.ForCStmt) {
 	if node.label.len > 0 {
 		f.write('${node.label}: ')
 	}
-	if node.comments.len > 0 {
-		f.comments(node.comments)
-	}
+	init_comments := node.comments.filter(it.pos.pos < node.init.pos.pos)
+	cond_comments := node.comments[init_comments.len..].filter(it.pos.pos < node.cond.pos().pos)
+	inc_comments := node.comments[(init_comments.len + cond_comments.len)..].filter(it.pos.pos < node.inc.pos.pos)
+	after_inc_comments := node.comments[(init_comments.len + cond_comments.len + inc_comments.len)..]
 	f.write('for ')
 	if node.has_init {
+		if init_comments.len > 0 {
+			f.comments(init_comments)
+			f.write(' ')
+		}
 		f.single_line_if = true // to keep all for ;; exprs on the same line
 		f.stmt(node.init)
 		f.single_line_if = false
 	}
 	f.write('; ')
+	if cond_comments.len > 0 {
+		f.comments(cond_comments)
+		f.write(' ')
+	}
 	f.expr(node.cond)
 	f.write('; ')
+	if inc_comments.len > 0 {
+		f.comments(inc_comments)
+		f.write(' ')
+	}
 	f.stmt(node.inc)
 	f.remove_new_line()
-	f.write(' {')
+	if after_inc_comments.len > 0 {
+		f.comments(after_inc_comments)
+	}
+	if f.out.len > 1 && !f.out.last_n(1)[0].is_space() {
+		f.write(' ')
+	}
+	f.write('{')
 	if node.stmts.len > 0 || node.pos.line_nr < node.pos.last_line {
 		f.writeln('')
 		f.stmts(node.stmts)
@@ -1116,10 +1149,14 @@ pub fn (mut f Fmt) for_in_stmt(node ast.ForInStmt) {
 	if node.label.len > 0 {
 		f.write('${node.label}: ')
 	}
-	if node.comments.len > 0 {
-		f.comments(node.comments)
-	}
+	kv_comments := node.comments.filter(it.pos.pos < node.kv_pos.pos)
+	cond_comments := node.comments[kv_comments.len..].filter(it.pos.pos < node.cond.pos().pos)
+	after_comments := node.comments[(kv_comments.len + cond_comments.len)..]
 	f.write('for ')
+	if kv_comments.len > 0 {
+		f.comments(kv_comments)
+		f.write(' ')
+	}
 	if node.key_var != '' {
 		f.write(node.key_var)
 	}
@@ -1133,12 +1170,22 @@ pub fn (mut f Fmt) for_in_stmt(node ast.ForInStmt) {
 		f.write(node.val_var)
 	}
 	f.write(' in ')
+	if cond_comments.len > 0 {
+		f.comments(cond_comments)
+		f.write(' ')
+	}
 	f.expr(node.cond)
 	if node.is_range {
 		f.write(' .. ')
 		f.expr(node.high)
 	}
-	f.write(' {')
+	if after_comments.len > 0 {
+		f.comments(after_comments)
+	}
+	if f.out.len > 1 && !f.out.last_n(1)[0].is_space() {
+		f.write(' ')
+	}
+	f.write('{')
 	if node.stmts.len > 0 || node.pos.line_nr < node.pos.last_line {
 		f.writeln('')
 		f.stmts(node.stmts)
@@ -1150,12 +1197,12 @@ pub fn (mut f Fmt) for_stmt(node ast.ForStmt) {
 	if node.label.len > 0 {
 		f.write('${node.label}: ')
 	}
+	f.write('for ')
 	if node.comments.len > 0 {
 		f.comments(node.comments)
 	}
-	f.write('for ')
 	f.expr(node.cond)
-	if !node.is_inf {
+	if f.out.len > 1 && !f.out.last_n(1)[0].is_space() {
 		f.write(' ')
 	}
 	f.write('{')
@@ -1290,13 +1337,14 @@ pub fn (mut f Fmt) interface_decl(node ast.InterfaceDecl) {
 
 pub fn (mut f Fmt) interface_field(field ast.StructField) {
 	ft := f.no_cur_mod(f.table.type_to_str_using_aliases(field.typ, f.mod2alias))
-	end_pos := field.pos.pos + field.pos.len
 	before_comments := field.comments.filter(it.pos.pos < field.pos.pos)
-	between_comments := field.comments[before_comments.len..].filter(it.pos.pos < end_pos)
-	after_type_comments := field.comments[(before_comments.len + between_comments.len)..]
+	end_comments := field.comments.filter(it.pos.pos > field.pos.pos)
+	if before_comments.len > 0 {
+		f.comments(before_comments, level: .indent)
+	}
 	f.write('\t${field.name} ${ft}')
-	if after_type_comments.len > 0 {
-		f.comments(after_type_comments, level: .indent)
+	if end_comments.len > 0 {
+		f.comments(end_comments, level: .indent)
 	} else {
 		f.writeln('')
 	}
@@ -1304,9 +1352,14 @@ pub fn (mut f Fmt) interface_field(field ast.StructField) {
 }
 
 pub fn (mut f Fmt) interface_method(method ast.FnDecl) {
+	before_comments := method.comments.filter(it.pos.pos < method.pos.pos)
+	end_comments := method.comments.filter(it.pos.pos > method.pos.pos)
+	if before_comments.len > 0 {
+		f.comments(before_comments, level: .indent)
+	}
 	f.write('\t')
-	f.write(method.stringify_fn_decl(f.table, f.cur_mod, f.mod2alias).all_after_first('fn '))
-	f.comments(method.comments, inline: true, has_nl: false, level: .indent)
+	f.write(f.table.stringify_fn_decl(&method, f.cur_mod, f.mod2alias).all_after_first('fn '))
+	f.comments(end_comments, inline: true, has_nl: false, level: .indent)
 	f.writeln('')
 	f.comments(method.next_comments, inline: false, has_nl: true, level: .indent)
 	for param in method.params {
@@ -1328,12 +1381,18 @@ pub fn (mut f Fmt) module_stmt(mod ast.Module) {
 }
 
 pub fn (mut f Fmt) return_stmt(node ast.Return) {
-	f.comments(node.comments)
 	f.write('return')
 	if node.exprs.len > 0 {
 		f.write(' ')
+		mut sum_len := 0
 		// Loop over all return values. In normal returns this will only run once.
 		for i, expr in node.exprs {
+			pre_comments := node.comments[sum_len..].filter(it.pos.pos < expr.pos().pos)
+			sum_len += pre_comments.len
+			if pre_comments.len > 0 {
+				f.comments(pre_comments)
+				f.write(' ')
+			}
 			if expr is ast.ParExpr {
 				f.expr(expr.expr)
 			} else {
@@ -1585,7 +1644,7 @@ pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
 				f.comment(c, level: .indent)
 				f.writeln('')
 			} else {
-				f.comment(c, level: .indent, iembed: true)
+				f.comment(c, level: .indent)
 				f.write(' ')
 			}
 		} else {
@@ -1600,7 +1659,7 @@ pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
 					f.writeln('')
 				}
 			} else {
-				f.comment(c, level: .indent, iembed: true)
+				f.comment(c, level: .indent)
 				if node.exprs.len > 0 {
 					f.write(' ')
 				}
@@ -1682,18 +1741,13 @@ pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
 						set_comma = true
 					}
 				}
-				mut next_pos := expr_pos
-				if i + 1 < node.exprs.len {
-					next_pos = node.exprs[i + 1].pos()
-				}
 				if cmt.pos.line_nr > expr_pos.last_line {
-					embed := i + 1 < node.exprs.len && next_pos.line_nr == cmt.pos.last_line
 					f.writeln('')
-					f.comment(cmt, iembed: embed)
+					f.comment(cmt)
 				} else {
 					if cmt.is_inline {
 						f.write(' ')
-						f.comment(cmt, iembed: true)
+						f.comment(cmt)
 						if !set_comma && cmt.pos.line_nr == expr_pos.last_line
 							&& cmt.pos.pos < expr_pos.pos {
 							f.write(',')
@@ -1711,7 +1765,7 @@ pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
 							set_comma = true
 						}
 						f.write(' ')
-						f.comment(cmt, iembed: false)
+						f.comment(cmt)
 					}
 				}
 				last_comment_was_inline = cmt.is_inline
@@ -1787,10 +1841,6 @@ pub fn (mut f Fmt) at_expr(node ast.AtExpr) {
 }
 
 pub fn (mut f Fmt) call_expr(node ast.CallExpr) {
-	for arg in node.args {
-		f.comments(arg.comments)
-	}
-
 	mut is_method_newline := false
 	if node.is_method {
 		if node.name in ['map', 'filter', 'all', 'any'] {
@@ -1887,6 +1937,12 @@ pub fn (mut f Fmt) call_args(args []ast.CallArg) {
 		f.use_short_fn_args = old_short_arg_state
 	}
 	for i, arg in args {
+		pre_comments := arg.comments.filter(it.pos.pos < arg.expr.pos().pos)
+		post_comments := arg.comments[pre_comments.len..]
+		if pre_comments.len > 0 {
+			f.comments(pre_comments)
+			f.write(' ')
+		}
 		if i == args.len - 1 && arg.expr is ast.StructInit {
 			if arg.expr.typ == ast.void_type {
 				f.use_short_fn_args = true
@@ -1899,6 +1955,10 @@ pub fn (mut f Fmt) call_args(args []ast.CallArg) {
 			f.wrap_long_line(3, true)
 		}
 		f.expr(arg.expr)
+		if post_comments.len > 0 {
+			f.comments(post_comments)
+			f.write(' ')
+		}
 		if i < args.len - 1 {
 			f.write(', ')
 		}
@@ -2127,14 +2187,16 @@ pub fn (mut f Fmt) if_expr(node ast.IfExpr) {
 	start_len := f.line_len
 	for {
 		for i, branch in node.branches {
-			if i == 0 {
-				// first `if`
-				f.comments(branch.comments)
-			} else {
+			mut sum_len := 0
+			if i > 0 {
 				// `else`, close previous branch
 				if branch.comments.len > 0 {
 					f.writeln('}')
-					f.comments(branch.comments)
+					pre_comments := branch.comments.filter(it.pos.pos < branch.pos.pos)
+					sum_len += pre_comments.len
+					if pre_comments.len > 0 {
+						f.comments(pre_comments)
+					}
 				} else {
 					f.write('} ')
 				}
@@ -2143,7 +2205,18 @@ pub fn (mut f Fmt) if_expr(node ast.IfExpr) {
 			if i < node.branches.len - 1 || !node.has_else {
 				f.write('${dollar}if ')
 				cur_pos := f.out.len
+				pre_comments := branch.comments[sum_len..].filter(it.pos.pos < branch.cond.pos().pos)
+				sum_len += pre_comments.len
+				post_comments := branch.comments[sum_len..]
+				if pre_comments.len > 0 {
+					f.comments(pre_comments)
+					f.write(' ')
+				}
 				f.expr(branch.cond)
+				if post_comments.len > 0 {
+					f.comments(post_comments)
+					f.write(' ')
+				}
 				cond_len := f.out.len - cur_pos
 				is_cond_wrapped := cond_len > 0 && branch.cond in [ast.IfGuardExpr, ast.CallExpr]
 					&& f.out.last_n(cond_len).contains('\n')
@@ -2249,7 +2322,7 @@ pub fn (mut f Fmt) infix_expr(node ast.InfixExpr) {
 		f.expr(node.left)
 	}
 	if node.before_op_comments.len > 0 {
-		f.comments(node.before_op_comments, iembed: node.before_op_comments[0].is_inline)
+		f.comments(node.before_op_comments)
 	}
 	is_one_val_array_init := node.op in [.key_in, .not_in] && node.right is ast.ArrayInit
 		&& node.right.exprs.len == 1
@@ -2264,7 +2337,7 @@ pub fn (mut f Fmt) infix_expr(node ast.InfixExpr) {
 		f.write(' ${node.op.str()} ')
 	}
 	if node.after_op_comments.len > 0 {
-		f.comments(node.after_op_comments, iembed: node.after_op_comments[0].is_inline)
+		f.comments(node.after_op_comments)
 		f.write(' ')
 	}
 	if is_one_val_array_init && !f.inside_comptime_if {
@@ -2509,7 +2582,7 @@ fn (mut f Fmt) match_branch(branch ast.MatchBranch, single_line bool) {
 			f.write(estr)
 			if j < branch.ecmnts.len && branch.ecmnts[j].len > 0 {
 				f.write(' ')
-				f.comments(branch.ecmnts[j], iembed: true)
+				f.comments(branch.ecmnts[j])
 			}
 			if j < branch.exprs.len - 1 {
 				f.write(', ')

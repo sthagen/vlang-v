@@ -36,7 +36,7 @@ pub fn (t Time) local() Time {
 	}
 	loc_tm := C.tm{}
 	C.localtime_r(voidptr(&t.unix), &loc_tm)
-	return convert_ctime(loc_tm, t.microsecond)
+	return convert_ctime(loc_tm, t.nanosecond)
 }
 
 // in most systems, these are __quad_t, which is an i64
@@ -58,7 +58,7 @@ pub fn sys_mono_now() u64 {
 	} $else {
 		ts := C.timespec{}
 		C.clock_gettime(C.CLOCK_MONOTONIC, &ts)
-		return u64(ts.tv_sec) * 1000000000 + u64(ts.tv_nsec)
+		return u64(ts.tv_sec) * 1_000_000_000 + u64(ts.tv_nsec)
 	}
 }
 
@@ -68,7 +68,7 @@ pub fn sys_mono_now() u64 {
 fn vpc_now() u64 {
 	ts := C.timespec{}
 	C.clock_gettime(C.CLOCK_MONOTONIC, &ts)
-	return u64(ts.tv_sec) * 1000000000 + u64(ts.tv_nsec)
+	return u64(ts.tv_sec) * 1_000_000_000 + u64(ts.tv_nsec)
 }
 
 // The linux_* functions are placed here, since they're used on Android as well
@@ -83,7 +83,7 @@ fn linux_now() Time {
 	C.clock_gettime(C.CLOCK_REALTIME, &ts)
 	loc_tm := C.tm{}
 	C.localtime_r(voidptr(&ts.tv_sec), &loc_tm)
-	return convert_ctime(loc_tm, int(ts.tv_nsec / 1000))
+	return convert_ctime(loc_tm, int(ts.tv_nsec))
 }
 
 fn linux_utc() Time {
@@ -91,23 +91,17 @@ fn linux_utc() Time {
 	// and use the nanoseconds part
 	mut ts := C.timespec{}
 	C.clock_gettime(C.CLOCK_REALTIME, &ts)
-	return unix2(i64(ts.tv_sec), int(ts.tv_nsec / 1000))
+	return unix_nanosecond(i64(ts.tv_sec), int(ts.tv_nsec))
 }
 
 // dummy to compile with all compilers
-pub fn win_now() Time {
+fn win_now() Time {
 	return Time{}
 }
 
 // dummy to compile with all compilers
-pub fn win_utc() Time {
+fn win_utc() Time {
 	return Time{}
-}
-
-// dummy to compile with all compilers
-pub struct C.timeval {
-	tv_sec  u64
-	tv_usec u64
 }
 
 // return absolute timespec for now()+d
@@ -125,15 +119,6 @@ pub fn (d Duration) timespec() C.timespec {
 	return ts
 }
 
-// zero_timespec returns the calendar time in seconds and nanoseconds of the beginning of the Unix epoch.
-pub fn zero_timespec() C.timespec {
-	ts := C.timespec{
-		tv_sec: 0
-		tv_nsec: 0
-	}
-	return ts
-}
-
 // sleep suspends the execution of the calling thread for a given duration (in nanoseconds).
 pub fn sleep(duration Duration) {
 	mut req := C.timespec{duration / second, duration % second}
@@ -145,17 +130,5 @@ pub fn sleep(duration Duration) {
 		} else {
 			break
 		}
-	}
-}
-
-// some *nix system functions (e.g. `C.poll()`, C.epoll_wait()) accept an `int`
-// value as *timeout in milliseconds* with the special value `-1` meaning "infinite"
-pub fn (d Duration) sys_milliseconds() int {
-	if d > C.INT32_MAX * millisecond { // treat 2147483647000001 .. C.INT64_MAX as "infinite"
-		return -1
-	} else if d <= 0 {
-		return 0 // treat negative timeouts as 0 - consistent with Unix behaviour
-	} else {
-		return int(d / millisecond)
 	}
 }
