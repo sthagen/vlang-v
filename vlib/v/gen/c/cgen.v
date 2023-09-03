@@ -3603,7 +3603,7 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 	if node.or_block.kind != .absent && !g.is_assign_lhs && g.table.sym(node.typ).kind != .chan {
 		is_ptr := sym.kind in [.interface_, .sum_type]
 		stmt_str := g.go_before_stmt(0).trim_space()
-		styp := g.typ(node.typ)
+		styp := g.typ(g.unwrap_generic(node.typ))
 		g.empty_line = true
 		tmp_var := g.new_tmp_var()
 		g.write('${styp} ${tmp_var} = ')
@@ -3875,7 +3875,16 @@ fn (mut g Gen) enum_decl(node ast.EnumDecl) {
 		if field.has_expr {
 			g.enum_typedefs.write_string(' = ')
 			expr_str := g.expr_string(field.expr)
-			g.enum_typedefs.write_string(expr_str)
+			if field.expr is ast.Ident && field.expr.kind == .constant {
+				const_def := g.global_const_defs[util.no_dots(field.expr.name)]
+				if const_def.def.starts_with('#define') {
+					g.enum_typedefs.write_string(const_def.def.all_after_last(' '))
+				} else {
+					g.enum_typedefs.write_string(expr_str)
+				}
+			} else {
+				g.enum_typedefs.write_string(expr_str)
+			}
 			cur_enum_expr = expr_str
 			cur_enum_offset = 0
 		} else if is_flag {
@@ -6945,9 +6954,9 @@ pub fn get_guarded_include_text(iname string, imessage string) string {
 	return res
 }
 
-fn (mut g Gen) trace(fbase string, message string) {
+fn (mut g Gen) trace[T](fbase string, x &T) {
 	if g.file.path_base == fbase {
-		println('> g.trace | ${fbase:-10s} | ${message}')
+		println('> g.trace | ${fbase:-10s} | ${voidptr(x):16} | ${x}')
 	}
 }
 

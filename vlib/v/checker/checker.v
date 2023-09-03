@@ -12,6 +12,7 @@ import v.util
 import v.util.version
 import v.errors
 import v.pkgconfig
+import strings
 
 const (
 	int_min                                        = int(0x80000000)
@@ -25,12 +26,17 @@ const (
 )
 
 pub const (
+	// array_builtin_methods contains a list of all methods on array, that return other typed arrays,
+	// i.e. that act as *pseudogeneric* methods, that need compiler support, so that the types of the results
+	// are properly checked.
+	// Note that methods that do not return anything, or that return known types, are not listed here, since they are just ordinary non generic methods.
 	array_builtin_methods       = ['filter', 'clone', 'repeat', 'reverse', 'map', 'slice', 'sort',
-		'contains', 'index', 'wait', 'any', 'all', 'first', 'last', 'pop', 'delete']
+		'sorted', 'sorted_with_compare', 'contains', 'index', 'wait', 'any', 'all', 'first', 'last',
+		'pop', 'delete']
 	array_builtin_methods_chk   = token.new_keywords_matcher_from_array_trie(array_builtin_methods)
 	// TODO: remove `byte` from this list when it is no longer supported
 	reserved_type_names         = ['byte', 'bool', 'char', 'i8', 'i16', 'int', 'i64', 'u8', 'u16',
-		'u32', 'u64', 'f32', 'f64', 'map', 'string', 'rune', 'usize', 'isize', 'voidptr']
+		'u32', 'u64', 'f32', 'f64', 'map', 'string', 'rune', 'usize', 'isize', 'voidptr', 'thread']
 	reserved_type_names_chk     = token.new_keywords_matcher_from_array_trie(reserved_type_names)
 	vroot_is_deprecated_message = '@VROOT is deprecated, use @VMODROOT or @VEXEROOT instead'
 )
@@ -116,7 +122,8 @@ mut:
 	inside_decl_rhs                  bool
 	inside_if_guard                  bool // true inside the guard condition of `if x := opt() {}`
 	inside_assign                    bool
-	doing_line_info                  int // a quick single file run when called with v -line-info (contains line nr to inspect)
+	doing_line_info                  int    // a quick single file run when called with v -line-info (contains line nr to inspect)
+	doing_line_path                  string // same, but stores the path being parsed
 	is_index_assign                  bool
 	comptime_call_pos                int // needed for correctly checking use before decl for templates
 	goto_labels                      map[string]ast.GotoLabel // to check for unused goto labels
@@ -1062,23 +1069,32 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 	return true
 }
 
-fn (mut c Checker) expr_or_block_err(kind ast.OrKind, expr_name string, pos token.Pos, is_field bool) {
-	obj_does_not_return_or_is_not := if is_field {
+// helper for expr_or_block_err
+fn is_field_to_description(expr_name string, is_field bool) string {
+	return if is_field {
 		'field `${expr_name}` is not'
 	} else {
 		'function `${expr_name}` does not return'
 	}
+}
+
+fn (mut c Checker) expr_or_block_err(kind ast.OrKind, expr_name string, pos token.Pos, is_field bool) {
 	match kind {
-		.absent {}
+		.absent {
+			// do nothing, most common case; do not be tempted to move the call to is_field_to_description above it, since that will slow it down
+		}
 		.block {
+			obj_does_not_return_or_is_not := is_field_to_description(expr_name, is_field)
 			c.error('unexpected `or` block, the ${obj_does_not_return_or_is_not} an Option or a Result',
 				pos)
 		}
 		.propagate_option {
+			obj_does_not_return_or_is_not := is_field_to_description(expr_name, is_field)
 			c.error('unexpected `?`, the ${obj_does_not_return_or_is_not} an Option',
 				pos)
 		}
 		.propagate_result {
+			obj_does_not_return_or_is_not := is_field_to_description(expr_name, is_field)
 			c.error('unexpected `!`, the ${obj_does_not_return_or_is_not} a Result', pos)
 		}
 	}
@@ -1086,74 +1102,85 @@ fn (mut c Checker) expr_or_block_err(kind ast.OrKind, expr_name string, pos toke
 
 // return the actual type of the expression, once the option is handled
 fn (mut c Checker) check_expr_opt_call(expr ast.Expr, ret_type ast.Type) ast.Type {
-	if expr is ast.CallExpr {
-		mut expr_ret_type := expr.return_type
-		if expr_ret_type != 0 && c.table.sym(expr_ret_type).kind == .alias {
-			unaliased_ret_type := c.table.unaliased_type(expr_ret_type)
-			if unaliased_ret_type.has_flag(.option) || unaliased_ret_type.has_flag(.result) {
-				expr_ret_type = unaliased_ret_type
+	match expr {
+		ast.CallExpr {
+			mut expr_ret_type := expr.return_type
+			if expr_ret_type != 0 && c.table.sym(expr_ret_type).kind == .alias {
+				unaliased_ret_type := c.table.unaliased_type(expr_ret_type)
+				if unaliased_ret_type.has_flag(.option) || unaliased_ret_type.has_flag(.result) {
+					expr_ret_type = unaliased_ret_type
+				}
 			}
-		}
-		if expr_ret_type.has_flag(.option) || expr_ret_type.has_flag(.result) {
-			return_modifier_kind := if expr_ret_type.has_flag(.option) {
-				'an Option'
-			} else {
-				'a Result'
-			}
-			return_modifier := if expr_ret_type.has_flag(.option) { '?' } else { '!' }
-			if expr_ret_type.has_flag(.result) && expr.or_block.kind == .absent {
-				if c.inside_defer {
-					c.error('${expr.name}() returns ${return_modifier_kind}, so it should have an `or {}` block at the end',
-						expr.pos)
+			if expr_ret_type.has_flag(.option) || expr_ret_type.has_flag(.result) {
+				return_modifier_kind := if expr_ret_type.has_flag(.option) {
+					'an Option'
 				} else {
-					c.error('${expr.name}() returns ${return_modifier_kind}, so it should have either an `or {}` block, or `${return_modifier}` at the end',
-						expr.pos)
+					'a Result'
 				}
-			} else {
-				if expr.or_block.kind != .absent {
-					c.check_or_expr(expr.or_block, ret_type, expr_ret_type, expr)
-				}
-			}
-			return ret_type.clear_flag(.result)
-		} else {
-			c.expr_or_block_err(expr.or_block.kind, expr.name, expr.or_block.pos, false)
-		}
-	} else if expr is ast.SelectorExpr && c.table.sym(ret_type).kind != .chan {
-		if expr.typ.has_flag(.option) || expr.typ.has_flag(.result) {
-			with_modifier_kind := if expr.typ.has_flag(.option) {
-				'an Option'
-			} else {
-				'a Result'
-			}
-			with_modifier := if expr.typ.has_flag(.option) { '?' } else { '!' }
-			if expr.typ.has_flag(.result) && expr.or_block.kind == .absent {
-				if c.inside_defer {
-					c.error('field `${expr.field_name}` is ${with_modifier_kind}, so it should have an `or {}` block at the end',
-						expr.pos)
+				return_modifier := if expr_ret_type.has_flag(.option) { '?' } else { '!' }
+				if expr_ret_type.has_flag(.result) && expr.or_block.kind == .absent {
+					if c.inside_defer {
+						c.error('${expr.name}() returns ${return_modifier_kind}, so it should have an `or {}` block at the end',
+							expr.pos)
+					} else {
+						c.error('${expr.name}() returns ${return_modifier_kind}, so it should have either an `or {}` block, or `${return_modifier}` at the end',
+							expr.pos)
+					}
 				} else {
-					c.error('field `${expr.field_name}` is ${with_modifier_kind}, so it should have either an `or {}` block, or `${with_modifier}` at the end',
-						expr.pos)
+					if expr.or_block.kind != .absent {
+						c.check_or_expr(expr.or_block, ret_type, expr_ret_type, expr)
+					}
 				}
+				return ret_type.clear_flag(.result)
 			} else {
-				if expr.or_block.kind != .absent {
-					c.check_or_expr(expr.or_block, ret_type, expr.typ, expr)
+				c.expr_or_block_err(expr.or_block.kind, expr.name, expr.or_block.pos,
+					false)
+			}
+		}
+		ast.SelectorExpr {
+			if c.table.sym(ret_type).kind != .chan {
+				if expr.typ.has_flag(.option) || expr.typ.has_flag(.result) {
+					with_modifier_kind := if expr.typ.has_flag(.option) {
+						'an Option'
+					} else {
+						'a Result'
+					}
+					with_modifier := if expr.typ.has_flag(.option) { '?' } else { '!' }
+					if expr.typ.has_flag(.result) && expr.or_block.kind == .absent {
+						if c.inside_defer {
+							c.error('field `${expr.field_name}` is ${with_modifier_kind}, so it should have an `or {}` block at the end',
+								expr.pos)
+						} else {
+							c.error('field `${expr.field_name}` is ${with_modifier_kind}, so it should have either an `or {}` block, or `${with_modifier}` at the end',
+								expr.pos)
+						}
+					} else {
+						if expr.or_block.kind != .absent {
+							c.check_or_expr(expr.or_block, ret_type, expr.typ, expr)
+						}
+					}
+					return ret_type.clear_flag(.result)
+				} else {
+					c.expr_or_block_err(expr.or_block.kind, expr.field_name, expr.or_block.pos,
+						true)
 				}
 			}
-			return ret_type.clear_flag(.result)
-		} else {
-			c.expr_or_block_err(expr.or_block.kind, expr.field_name, expr.or_block.pos,
-				true)
 		}
-	} else if expr is ast.IndexExpr {
-		if expr.or_expr.kind != .absent {
-			c.check_or_expr(expr.or_expr, ret_type, ret_type.set_flag(.result), expr)
+		ast.IndexExpr {
+			if expr.or_expr.kind != .absent {
+				c.check_or_expr(expr.or_expr, ret_type, ret_type.set_flag(.result), expr)
+			}
 		}
-	} else if expr is ast.CastExpr {
-		c.check_expr_opt_call(expr.expr, ret_type)
-	} else if expr is ast.AsCast {
-		c.check_expr_opt_call(expr.expr, ret_type)
-	} else if expr is ast.ParExpr {
-		c.check_expr_opt_call(expr.expr, ret_type)
+		ast.CastExpr {
+			c.check_expr_opt_call(expr.expr, ret_type)
+		}
+		ast.AsCast {
+			c.check_expr_opt_call(expr.expr, ret_type)
+		}
+		ast.ParExpr {
+			c.check_expr_opt_call(expr.expr, ret_type)
+		}
+		else {}
 	}
 	return ret_type
 }
@@ -1646,6 +1673,13 @@ fn (mut c Checker) const_decl(mut node ast.ConstDecl) {
 					field.expr.is_expr = true
 					field.expr.typ = (branch.stmts.last() as ast.ExprStmt).typ
 					field.typ = field.expr.typ
+					// update ConstField object's type in table
+					if mut obj := c.file.global_scope.find(field.name) {
+						if mut obj is ast.ConstField {
+							obj.typ = field.typ
+						}
+					}
+					break
 				}
 			}
 		}
@@ -1807,6 +1841,13 @@ fn (mut c Checker) enum_decl(mut node ast.EnumDecl) {
 				else {
 					if mut field.expr is ast.Ident {
 						if field.expr.language == .c {
+							continue
+						}
+						if field.expr.kind == .unresolved {
+							c.ident(mut field.expr)
+						}
+						if field.expr.kind == .constant && field.expr.obj.typ.is_int() {
+							/* accepts int constants as enum value */
 							continue
 						}
 					}
@@ -3190,6 +3231,11 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 				}
 			}
 		}
+		// don't allow casting `string` to `enum`, and suggest using `enum_name.type_to_string(str)` instead
+		if mut node.expr is ast.StringLiteral {
+			c.add_error_detail('use ${c.table.type_to_str(node.typ)}.from_string(\'${node.expr.val}\') instead')
+			c.error('cannot cast `string` to `enum`', node.pos)
+		}
 	}
 	node.typname = c.table.sym(node.typ).name
 	return node.typ
@@ -3279,18 +3325,38 @@ fn (mut c Checker) at_expr(mut node ast.AtExpr) ast.Type {
 	return ast.string_type
 }
 
+struct ACFieldMethod {
+	name string
+	typ  string
+}
+
 fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 	if c.doing_line_info > 0 {
+		mut sb := strings.new_builder(10)
 		// Mini LS hack (v -line-info "a.v:16")
 		// println('line_nr=${node.pos.line_nr} doing line nr=${c.doing_line_info}')
-		if node.pos.line_nr == c.doing_line_info {
-			println('===')
+		// println('Start line_nr=${node.pos.line_nr}  line2=${c.doing_line_info} file="${c.file.path}", pppp="${c.doing_line_path}"')
+		if node.pos.line_nr == c.doing_line_info && c.file.path == c.doing_line_path {
+			sb.writeln('===')
 			sym := c.table.sym(node.obj.typ)
-			println('VAR ${node.name}:${sym.name}')
-			struct_info := sym.info as ast.Struct
+			sb.writeln('VAR ${node.name}:${sym.name}')
+			mut struct_info := sym.info as ast.Struct
+			mut fields := []ACFieldMethod{cap: struct_info.fields.len}
 			for field in struct_info.fields {
 				field_sym := c.table.sym(field.typ)
-				println('${field.name}:${field_sym.name}')
+				fields << ACFieldMethod{field.name, field_sym.name}
+			}
+			for method in sym.methods {
+				method_ret_type := c.table.sym(method.return_type)
+				fields << ACFieldMethod{method.name + '()', method_ret_type.name}
+			}
+			fields.sort(a.name < b.name)
+			for field in fields {
+				sb.writeln('${field.name}:${field.typ}')
+			}
+			res := sb.str().trim_space()
+			if res != '' {
+				println(res)
 			}
 		}
 	}
@@ -4596,9 +4662,9 @@ fn (mut c Checker) fetch_field_name(field ast.StructField) string {
 	return name
 }
 
-fn (mut c Checker) trace(fbase string, message string) {
+fn (mut c Checker) trace[T](fbase string, x &T) {
 	if c.file.path_base == fbase {
-		println('> c.trace | ${fbase:-10s} | ${message}')
+		println('> c.trace | ${fbase:-10s} | ${x}')
 	}
 }
 

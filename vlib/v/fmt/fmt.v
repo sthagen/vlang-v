@@ -1393,7 +1393,7 @@ pub fn (mut f Fmt) return_stmt(node ast.Return) {
 				f.comments(pre_comments)
 				f.write(' ')
 			}
-			if expr is ast.ParExpr {
+			if expr is ast.ParExpr && expr.comments.len == 0 {
 				f.expr(expr.expr)
 			} else {
 				f.expr(expr)
@@ -1876,8 +1876,8 @@ pub fn (mut f Fmt) call_expr(node ast.CallExpr) {
 			f.write('${node.name.after_char(`.`)}')
 		} else {
 			name := f.short_module(node.name)
-			f.mark_import_as_used(name)
 			if node.name.contains('__static__') {
+				f.mark_import_as_used(node.name.split('__static__')[0])
 				if name.contains('.') {
 					indx := name.index('.') or { -1 } + 1
 					f.write(name[0..indx] + name[indx..].replace('__static__', '.').capitalize())
@@ -1885,6 +1885,7 @@ pub fn (mut f Fmt) call_expr(node ast.CallExpr) {
 					f.write(name.replace('__static__', '.').capitalize())
 				}
 			} else {
+				f.mark_import_as_used(name)
 				f.write(name)
 			}
 		}
@@ -2697,12 +2698,22 @@ pub fn (mut f Fmt) par_expr(node ast.ParExpr) {
 	for mut expr is ast.ParExpr {
 		expr = expr.expr
 	}
-	requires_paren := expr !is ast.Ident
+	requires_paren := expr !is ast.Ident || node.comments.len > 0
 	if requires_paren {
 		f.par_level++
 		f.write('(')
 	}
+	pre_comments := node.comments.filter(it.pos.pos < expr.pos().pos)
+	post_comments := node.comments[pre_comments.len..]
+	if pre_comments.len > 0 {
+		f.comments(pre_comments)
+		f.write(' ')
+	}
 	f.expr(expr)
+	if post_comments.len > 0 {
+		f.comments(post_comments)
+		f.write(' ')
+	}
 	if requires_paren {
 		f.par_level--
 		f.write(')')
@@ -3005,8 +3016,8 @@ pub fn (mut f Fmt) unsafe_expr(node ast.UnsafeExpr) {
 	f.write('}')
 }
 
-fn (mut f Fmt) trace(fbase string, message string) {
+fn (mut f Fmt) trace[T](fbase string, x &T) {
 	if f.file.path_base == fbase {
-		println('> f.trace | ${fbase:-10s} | ${message}')
+		println('> f.trace | ${fbase:-10s} | ${voidptr(x):16} | ${x}')
 	}
 }

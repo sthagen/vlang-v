@@ -28,8 +28,9 @@ pub enum DOMEventType {
 	update_cursor
 	quit_requested
 	clipboard_pasted
-	files_droped
+	files_dropped
 	num
+	files_droped  [deprecated: 'use files_dropped instead'; deprecated_after: '2023-08-21']
 }
 
 pub struct Event {
@@ -250,9 +251,9 @@ pub:
 	native_rendering  bool // Cocoa on macOS/iOS, GDI+ on Windows
 	// drag&drop
 	enable_dragndrop             bool // enable file dropping (drag'n'drop), default is false
-	max_dropped_files            int = 1 // max number of dropped files to process (default: 1)
-	max_dropped_file_path_length int = 2048 // max length in bytes of a dropped UTF-8 file path (default: 2048)
-	canvas                       string
+	max_dropped_files            int    = 1 // max number of dropped files to process (default: 1)
+	max_dropped_file_path_length int    = 2048 // max length in bytes of a dropped UTF-8 file path (default: 2048)
+	html5_canvas_name            string = 'canvas' // the id/name of the canvas element, that will be used to render GG apps
 }
 
 const size = Size{0, 0}
@@ -330,8 +331,8 @@ pub fn new_context(cfg Config) &Context {
 	g.config = cfg
 	g.window = dom.window()
 	document := dom.document
-	canvas_elem := document.getElementById(cfg.canvas.str) or {
-		panic('gg: cannot get canvas element')
+	canvas_elem := document.getElementById(cfg.html5_canvas_name.str) or {
+		panic('gg: cannot get canvas element from cfg.html5_canvas_name.str')
 	}
 	canvas := get_canvas(canvas_elem)
 	g.canvas = canvas

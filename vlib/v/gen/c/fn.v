@@ -804,7 +804,7 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 				unwrapped_typ = unaliased_type.clear_flags(.option, .result)
 			}
 		}
-		unwrapped_styp := g.typ(unwrapped_typ)
+		mut unwrapped_styp := g.typ(unwrapped_typ)
 		if g.infix_left_var_name.len > 0 {
 			g.indent--
 			g.writeln('}')
@@ -814,6 +814,11 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 			g.write('\n ${cur_line}')
 		} else if !g.inside_curry_call {
 			if !g.inside_const_opt_or_res {
+				if g.assign_ct_type != 0
+					&& node.or_block.kind in [.propagate_option, .propagate_result] {
+					unwrapped_styp = g.typ(g.assign_ct_type.derive(node.return_type).clear_flags(.option,
+						.result))
+				}
 				g.write('\n ${cur_line} (*(${unwrapped_styp}*)${tmp_opt}.data)')
 			} else {
 				g.write('\n ${cur_line} ${tmp_opt}')
@@ -890,6 +895,10 @@ fn (mut g Gen) gen_array_method_call(node ast.CallExpr, left_type ast.Type) bool
 		}
 		'sort' {
 			g.gen_array_sort(node)
+			return true
+		}
+		'sorted' {
+			g.gen_array_sorted(node)
 			return true
 		}
 		'insert' {
@@ -1298,7 +1307,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		receiver_type_name = 'map'
 	}
 	if final_left_sym.kind == .array && !(left_sym.kind == .alias && left_sym.has_method(node.name))
-		&& node.name in ['clear', 'repeat', 'sort_with_compare', 'free', 'push_many', 'trim', 'first', 'last', 'pop', 'clone', 'reverse', 'slice', 'pointers'] {
+		&& node.name in ['clear', 'repeat', 'sort_with_compare', 'sorted_with_compare', 'free', 'push_many', 'trim', 'first', 'last', 'pop', 'clone', 'reverse', 'slice', 'pointers'] {
 		if !(left_sym.info is ast.Alias && typ_sym.has_method(node.name)) {
 			// `array_Xyz_clone` => `array_clone`
 			receiver_type_name = 'array'
@@ -1718,6 +1727,14 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 		if g.pref.is_debug && node.name == 'panic' {
 			paline, pafile, pamod, pafn := g.panic_debug_info(node.pos)
 			g.write('panic_debug(${paline}, tos3("${pafile}"), tos3("${pamod}"), tos3("${pafn}"),  ')
+			g.call_args(node)
+			g.write(')')
+		} else if node.name.ends_with('__static__from_string') && !g.table.known_fn(node.name) {
+			if node.name !in g.str_fn_names {
+				g.gen_enum_static_from_string(node.name)
+				g.str_fn_names << node.name
+			}
+			g.write('${node.name}(')
 			g.call_args(node)
 			g.write(')')
 		} else {

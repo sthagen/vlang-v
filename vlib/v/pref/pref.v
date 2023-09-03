@@ -163,6 +163,7 @@ pub mut:
 	m64                bool         // true = generate 64-bit code, defaults to x64
 	ccompiler          string       // the name of the C compiler used
 	ccompiler_type     CompilerType // the type of the C compiler used
+	cppcompiler        string       // the name of the CPP compiler used
 	third_party_option string
 	building_v         bool
 	no_bounds_checking bool // `-no-bounds-checking` turns off *all* bounds checks for all functions at runtime, as if they all had been tagged with `[direct_array_access]`
@@ -229,6 +230,7 @@ pub mut:
 	// checker settings:
 	checker_match_exhaustive_cutoff_limit int = 12
 	thread_stack_size                     int = 8388608 // Change with `-thread-stack-size 4194304`. Note: on macos it was 524288, which is too small for more complex programs with many nested callexprs.
+	wasm_stack_top                        int = 1024 + (16 * 1024) // stack size for webassembly backend
 	wasm_validate                         bool // validate webassembly code, by calling `wasm-validate`
 }
 
@@ -307,6 +309,10 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 		match arg {
 			'-wasm-validate' {
 				res.wasm_validate = true
+			}
+			'-wasm-stack-top' {
+				res.wasm_stack_top = cmdline.option(current_args, arg, res.wasm_stack_top.str()).int()
+				i++
 			}
 			'-apk' {
 				res.is_apk = true
@@ -736,6 +742,10 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 			'-cc' {
 				res.ccompiler = cmdline.option(current_args, '-cc', 'cc')
 				res.build_options << '${arg} "${res.ccompiler}"'
+				i++
+			}
+			'-c++' {
+				res.cppcompiler = cmdline.option(current_args, '-c++', 'c++')
 				i++
 			}
 			'-checker-match-exhaustive-cutoff-limit' {
