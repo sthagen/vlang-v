@@ -1924,7 +1924,7 @@ fn (mut g Gen) expr_with_tmp_var(expr ast.Expr, expr_typ ast.Type, ret_typ ast.T
 		panic('cgen: parameter `ret_typ` of function `expr_with_tmp_var()` must be an Option or Result')
 	}
 
-	stmt_str := g.go_before_stmt(0).trim_space()
+	stmt_str := g.go_before_last_stmt().trim_space()
 	mut styp := g.base_type(ret_typ)
 	g.empty_line = true
 
@@ -2468,7 +2468,7 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 				fname := g.get_sumtype_casting_fn(unwrapped_got_type, unwrapped_expected_type)
 
 				if expr is ast.ArrayInit && got_sym.kind == .array_fixed {
-					stmt_str := g.go_before_stmt(0).trim_space()
+					stmt_str := g.go_before_last_stmt().trim_space()
 					g.empty_line = true
 					tmp_var := g.new_tmp_var()
 					g.write('${got_styp} ${tmp_var} = ')
@@ -3362,7 +3362,7 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 				g.expr(node.expr)
 				g.write(')')
 			} else if node.op == .question {
-				cur_line := g.go_before_stmt(0).trim_space()
+				cur_line := g.go_before_last_stmt().trim_space()
 				mut expr_str := ''
 				if mut node.expr is ast.ComptimeSelector && node.expr.left is ast.Ident {
 					// val.$(field.name)?
@@ -3403,7 +3403,7 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 				elem_type := right_inf.elem_type
 				is_gen_or_and_assign_rhs := gen_or && !g.discard_or_result
 				cur_line := if is_gen_or_and_assign_rhs {
-					line := g.go_before_stmt(0)
+					line := g.go_before_last_stmt()
 					g.out.write_string(util.tabs(g.indent))
 					line
 				} else {
@@ -3602,7 +3602,7 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 
 	if node.or_block.kind != .absent && !g.is_assign_lhs && g.table.sym(node.typ).kind != .chan {
 		is_ptr := sym.kind in [.interface_, .sum_type]
-		stmt_str := g.go_before_stmt(0).trim_space()
+		stmt_str := g.go_before_last_stmt().trim_space()
 		styp := g.typ(g.unwrap_generic(node.typ))
 		g.empty_line = true
 		tmp_var := g.new_tmp_var()
@@ -3935,7 +3935,7 @@ fn (mut g Gen) lock_expr(node ast.LockExpr) {
 	mut cur_line := ''
 	if node.is_expr {
 		styp := g.typ(node.typ)
-		cur_line = g.go_before_stmt(0)
+		cur_line = g.go_before_last_stmt()
 		g.writeln('${styp} ${tmp_result};')
 	}
 	mut mtxs := ''
@@ -4109,7 +4109,7 @@ fn (mut g Gen) select_expr(node ast.SelectExpr) {
 	is_expr := node.is_expr || g.inside_ternary > 0
 	cur_line := if is_expr {
 		g.empty_line = true
-		g.go_before_stmt(0)
+		g.go_before_last_stmt()
 	} else {
 		''
 	}
@@ -4270,6 +4270,19 @@ pub fn (mut g Gen) is_comptime_var(node ast.Expr) bool {
 		&& (node.obj as ast.Var).ct_type_var != .no_comptime
 }
 
+fn (mut g Gen) get_const_name(node ast.Ident) string {
+	if g.pref.translated && !g.is_builtin_mod
+		&& !util.module_is_builtin(node.name.all_before_last('.')) {
+		mut x := util.no_dots(node.name)
+		if x.starts_with('main__') {
+			x = x['main__'.len..]
+		}
+		return x
+	} else {
+		return '_const_' + g.get_ternary_name(c_name(node.name))
+	}
+}
+
 fn (mut g Gen) ident(node ast.Ident) {
 	prevent_sum_type_unwrapping_once := g.prevent_sum_type_unwrapping_once
 	g.prevent_sum_type_unwrapping_once = false
@@ -4293,6 +4306,14 @@ fn (mut g Gen) ident(node ast.Ident) {
 			g.write(x)
 			return
 		} else {
+			if g.inside_opt_or_res && node.or_expr.kind != .absent && node.obj.typ.has_flag(.option) {
+				styp := g.base_type(node.obj.typ)
+				g.write('(*(${styp}*)')
+
+				defer {
+					g.write('.data)')
+				}
+			}
 			// TODO globals hack
 			g.write('_const_')
 		}
@@ -4324,7 +4345,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 				}
 				if node.or_expr.kind != .absent && !(g.inside_opt_or_res && g.inside_assign
 					&& !g.is_assign_lhs) {
-					stmt_str := g.go_before_stmt(0).trim_space()
+					stmt_str := g.go_before_last_stmt().trim_space()
 					g.empty_line = true
 					var_name := if !g.is_assign_lhs && is_auto_heap { '(*${name})' } else { name }
 					g.or_block(var_name, node.or_expr, comptime_type)
@@ -4368,7 +4389,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 			}
 			if node.or_expr.kind != .absent && !(g.inside_opt_or_res && g.inside_assign
 				&& !g.is_assign_lhs) {
-				stmt_str := g.go_before_stmt(0).trim_space()
+				stmt_str := g.go_before_last_stmt().trim_space()
 				g.empty_line = true
 				var_name := if !g.is_assign_lhs && is_auto_heap {
 					'(*${name})'
@@ -4465,7 +4486,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 		}
 	}
 	if node.or_expr.kind != .absent && !(g.inside_opt_or_res && g.inside_assign && !g.is_assign_lhs) {
-		stmt_str := g.go_before_stmt(0).trim_space()
+		stmt_str := g.go_before_last_stmt().trim_space()
 		g.empty_line = true
 		var_opt := if is_auto_heap { '(*${name})' } else { name }
 		g.or_block(var_opt, node.or_expr, node.obj.typ)
@@ -4528,7 +4549,7 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 		} else if node.typ.has_flag(.option) {
 			if sym.kind == .alias {
 				if (sym.info as ast.Alias).parent_type.has_flag(.option) {
-					cur_stmt := g.go_before_stmt(0)
+					cur_stmt := g.go_before_last_stmt()
 					g.empty_line = true
 					parent_type := (sym.info as ast.Alias).parent_type
 					tmp_var := g.new_tmp_var()
@@ -4970,18 +4991,18 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 				mut tmp := g.new_tmp_var()
 				if !call_expr.return_type.has_flag(.option)
 					&& !call_expr.return_type.has_flag(.result) {
-					line := g.go_before_stmt(0)
+					line := g.go_before_last_stmt()
 					expr_styp := g.typ(call_expr.return_type)
 					g.write('${expr_styp} ${tmp}=')
 					g.expr(expr)
 					g.writeln(';')
-					multi_unpack += g.go_before_stmt(0)
+					multi_unpack += g.go_before_last_stmt()
 					g.write(line)
 				} else {
-					line := g.go_before_stmt(0)
+					line := g.go_before_last_stmt()
 					g.tmp_count--
 					g.expr(expr)
-					multi_unpack += g.go_before_stmt(0)
+					multi_unpack += g.go_before_last_stmt()
 					g.write(line)
 					expr_styp := g.base_type(call_expr.return_type)
 					tmp = ('(*(${expr_styp}*)${tmp}.data)')
@@ -6302,7 +6323,7 @@ fn (mut g Gen) type_default(typ_ ast.Type) string {
 		.string {
 			return '(string){.str=(byteptr)"", .is_lit=1}'
 		}
-		.interface_, .sum_type, .array_fixed, .multi_return {
+		.interface_, .sum_type, .array_fixed, .multi_return, .thread {
 			return '{0}'
 		}
 		.alias {

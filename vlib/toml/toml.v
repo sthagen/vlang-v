@@ -23,6 +23,9 @@ pub fn decode[T](toml_txt string) !T {
 			return typ
 		}
 	}
+	$if T !is $struct {
+		return error('toml.decode: expected struct, found ${T.name}')
+	}
 	decode_struct[T](doc.to_any(), mut typ)
 	return typ
 }
@@ -247,6 +250,16 @@ fn parse_array_key(key string) (string, int) {
 		}
 	}
 	return k, index
+}
+
+// decode decodes a TOML `string` into the target struct type `T`.
+pub fn (d Doc) decode[T]() !T {
+	$if T !is $struct {
+		return error('Doc.decode: expected struct, found ${T.name}')
+	}
+	mut typ := T{}
+	decode_struct(d.to_any(), mut typ)
+	return typ
 }
 
 // to_any converts the `Doc` to toml.Any type.
