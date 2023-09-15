@@ -85,12 +85,12 @@ pub fn fmt(file ast.File, table &ast.Table, pref_ &pref.Preferences, is_debug bo
 		imp_str := f.out_imports.str().trim_space()
 		if imp_str.len > 0 {
 			return res + '\n' + imp_str + '\n'
-		} else {
-			return res
 		}
-	} else {
-		return res[..f.import_pos] + f.out_imports.str() + res[f.import_pos..]
+		return res
 	}
+	source_for_imports := res[..f.import_pos] + f.out_imports.str()
+	source_after_imports := res[f.import_pos..]
+	return source_for_imports + source_after_imports
 }
 
 pub fn (mut f Fmt) process_file_imports(file &ast.File) {
@@ -405,6 +405,9 @@ fn (f Fmt) should_insert_newline_before_node(node ast.Node, prev_node ast.Node) 
 					return true
 				}
 			}
+			ast.SemicolonStmt {
+				return false
+			}
 			// Force a newline after struct declarations
 			ast.StructDecl {
 				return true
@@ -552,6 +555,7 @@ pub fn (mut f Fmt) stmt(node ast.Stmt) {
 		ast.Return {
 			f.return_stmt(node)
 		}
+		ast.SemicolonStmt {}
 		ast.SqlStmt {
 			f.sql_stmt(node)
 		}
@@ -568,6 +572,7 @@ fn stmt_is_single_line(stmt ast.Stmt) bool {
 	return match stmt {
 		ast.ExprStmt, ast.AssertStmt { expr_is_single_line(stmt.expr) }
 		ast.Return, ast.AssignStmt, ast.BranchStmt { true }
+		ast.SemicolonStmt { true }
 		else { false }
 	}
 }
@@ -876,7 +881,7 @@ pub fn (mut f Fmt) comptime_for(node ast.ComptimeFor) {
 	f.writeln('}')
 }
 
-struct ConstAlignInfo {
+struct ValAlignInfo {
 mut:
 	max      int
 	last_idx int
@@ -896,10 +901,10 @@ pub fn (mut f Fmt) const_decl(node ast.ConstDecl) {
 		f.inside_const = false
 	}
 	f.write('const ')
-	mut align_infos := []ConstAlignInfo{}
+	mut align_infos := []ValAlignInfo{}
 	if node.is_block {
 		f.writeln('(')
-		mut info := ConstAlignInfo{}
+		mut info := ValAlignInfo{}
 		for i, field in node.fields {
 			if field.name.len > info.max {
 				info.max = field.name.len
@@ -907,14 +912,14 @@ pub fn (mut f Fmt) const_decl(node ast.ConstDecl) {
 			if !expr_is_single_line(field.expr) {
 				info.last_idx = i
 				align_infos << info
-				info = ConstAlignInfo{}
+				info = ValAlignInfo{}
 			}
 		}
 		info.last_idx = node.fields.len
 		align_infos << info
 		f.indent++
 	} else {
-		align_infos << ConstAlignInfo{0, 1}
+		align_infos << ValAlignInfo{0, 1}
 	}
 	mut prev_field := if node.fields.len > 0 {
 		ast.Node(node.fields[0])
@@ -1002,9 +1007,29 @@ pub fn (mut f Fmt) enum_decl(node ast.EnumDecl) {
 	}
 	f.writeln('enum ${name} {')
 	f.comments(node.comments, same_line: true, level: .indent)
-	for field in node.fields {
+	mut align_infos := []ValAlignInfo{}
+	mut info := ValAlignInfo{}
+	for i, field in node.fields {
+		if field.name.len > info.max {
+			info.max = field.name.len
+		}
+		if !expr_is_single_line(field.expr) {
+			info.last_idx = i
+			align_infos << info
+			info = ValAlignInfo{}
+		}
+	}
+	info.last_idx = node.fields.len
+	align_infos << info
+
+	mut align_idx := 0
+	for i, field in node.fields {
+		if i > align_infos[align_idx].last_idx {
+			align_idx++
+		}
 		f.write('\t${field.name}')
 		if field.has_expr {
+			f.write(strings.repeat(` `, align_infos[align_idx].max - field.name.len))
 			f.write(' = ')
 			f.expr(field.expr)
 		}

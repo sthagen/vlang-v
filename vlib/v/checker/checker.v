@@ -2099,6 +2099,7 @@ fn (mut c Checker) stmt(mut node ast.Stmt) {
 			c.return_stmt(mut node)
 			c.scope_returns = true
 		}
+		ast.SemicolonStmt {}
 		ast.SqlStmt {
 			c.sql_stmt(mut node)
 		}
@@ -3177,6 +3178,10 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 		c.error('casting a function value from one function signature, to another function signature, should be done inside `unsafe{}` blocks',
 			node.pos)
 	}
+	if to_type.is_ptr() && to_sym.kind == .alias && from_sym.kind == .map {
+		c.error('cannot cast to alias pointer `${c.table.type_to_str(to_type)}` because `${c.table.type_to_str(from_type)}` is a value',
+			node.pos)
+	}
 
 	if to_type == ast.string_type {
 		if from_type in [ast.u8_type, ast.bool_type] {
@@ -3281,7 +3286,6 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 				}
 			}
 		}
-		// don't allow casting `string` to `enum`, and suggest using `enum_name.type_to_string(str)` instead
 		if mut node.expr is ast.StringLiteral {
 			c.add_error_detail('use ${c.table.type_to_str(node.typ)}.from_string(\'${node.expr.val}\') instead')
 			c.error('cannot cast `string` to `enum`', node.pos)
