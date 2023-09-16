@@ -1502,6 +1502,17 @@ pub fn (mut f Fmt) alias_type_decl(node ast.AliasTypeDecl) {
 	if node.is_pub {
 		f.write('pub ')
 	}
+	// aliases of anon struct: `type Foo = struct {}`
+	sym := f.table.sym(node.parent_type)
+	if sym.info is ast.Struct {
+		if sym.info.is_anon {
+			f.write('type ${node.name} = ')
+			f.struct_decl(ast.StructDecl{ fields: sym.info.fields }, true)
+			f.comments(node.comments, has_nl: false)
+			f.mark_types_import_as_used(node.parent_type)
+			return
+		}
+	}
 	ptype := f.table.type_to_str_using_aliases(node.parent_type, f.mod2alias)
 	f.write('type ${node.name} = ${ptype}')
 
