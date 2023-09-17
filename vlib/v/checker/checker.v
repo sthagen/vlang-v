@@ -458,7 +458,7 @@ fn (mut c Checker) check_valid_snake_case(name string, identifier string, pos to
 	if c.pref.translated || c.file.is_translated {
 		return
 	}
-	if !c.pref.is_vweb && name.len > 0 && (name[0] == `_` || name.contains('._')) {
+	if !c.pref.is_vweb && name.len > 1 && (name[0] == `_` || name.contains('._')) {
 		c.error('${identifier} `${name}` cannot start with `_`', pos)
 	}
 	if !c.pref.experimental && util.contains_capital(name) {
@@ -1957,7 +1957,7 @@ fn (mut c Checker) check_loop_label(label string, pos token.Pos) {
 
 fn (mut c Checker) stmt(mut node ast.Stmt) {
 	$if trace_checker ? {
-		ntype := typeof(node).replace('v.ast.', '')
+		ntype := typeof(*node).replace('v.ast.', '')
 		eprintln('checking: ${c.file.path:-30} | pos: ${node.pos.line_str():-39} | node: ${ntype} | ${node}')
 	}
 	c.expected_type = ast.void_type
