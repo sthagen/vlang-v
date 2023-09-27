@@ -1027,17 +1027,11 @@ pub fn (s string) split_into_lines() []string {
 	return res
 }
 
-// used internally for [2..4]
-[inline]
-fn (s string) substr2(start int, _end int, end_max bool) string {
-	end := if end_max { s.len } else { _end }
-	return s.substr(start, end)
-}
-
 // substr returns the string between index positions `start` and `end`.
 // Example: assert 'ABCD'.substr(1,3) == 'BC'
 [direct_array_access]
-pub fn (s string) substr(start int, end int) string {
+pub fn (s string) substr(start int, _end int) string {
+	end := if _end == 2147483647 { s.len } else { _end } // max_int
 	$if !no_bounds_checking {
 		if start > end || start > s.len || end > s.len || start < 0 || end < 0 {
 			panic('substr(${start}, ${end}) out of bounds (len=${s.len})')
@@ -1061,7 +1055,8 @@ pub fn (s string) substr(start int, end int) string {
 // version of `substr()` that is used in `a[start..end] or {`
 // return an error when the index is out of range
 [direct_array_access]
-pub fn (s string) substr_with_check(start int, end int) !string {
+pub fn (s string) substr_with_check(start int, _end int) !string {
+	end := if _end == 2147483647 { s.len } else { _end } // max_int
 	if start > end || start > s.len || end > s.len || start < 0 || end < 0 {
 		return error('substr(${start}, ${end}) out of bounds (len=${s.len})')
 	}
@@ -1085,7 +1080,7 @@ pub fn (s string) substr_with_check(start int, end int) !string {
 [direct_array_access]
 pub fn (s string) substr_ni(_start int, _end int) string {
 	mut start := _start
-	mut end := _end
+	mut end := if _end == 2147483647 { s.len } else { _end } // max_int
 
 	// borders math
 	if start < 0 {
