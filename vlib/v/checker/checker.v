@@ -93,6 +93,8 @@ pub mut:
 	smartcast_mut_pos          token.Pos // match mut foo, if mut foo is Foo
 	smartcast_cond_pos         token.Pos // match cond
 	ct_cond_stack              []ast.Expr
+	ct_user_defines            map[string]ComptimeBranchSkipState
+	ct_system_defines          map[string]ComptimeBranchSkipState
 mut:
 	stmt_level int // the nesting level inside each stmts list;
 	// .stmt_level is used to check for `evaluated but not used` ExprStmts like `1 << 1`
@@ -499,7 +501,7 @@ fn (mut c Checker) type_decl(node ast.TypeDecl) {
 }
 
 fn (mut c Checker) alias_type_decl(node ast.AliasTypeDecl) {
-	if c.file.mod.name != 'builtin' && c.file.mod.name != 'time' {
+	if c.file.mod.name != 'builtin' && !node.name.starts_with('C.') {
 		c.check_valid_pascal_case(node.name, 'type alias', node.pos)
 	}
 	if !c.ensure_type_exists(node.parent_type, node.type_pos) {
