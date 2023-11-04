@@ -18,15 +18,19 @@ mut:
 }
 
 struct VCS {
-	cmd            string
-	dir            string
-	update_arg     string
-	install_arg    string
-	outdated_steps []string
+	dir  string
+	cmd  string
+	args struct {
+		install  string
+		path     string // the flag used to specify a path. E.g., used to explictly work on a path during multithreaded updating.
+		update   string
+		outdated []string
+	}
 }
 
 const (
 	settings                = &VpmSettings{}
+	no_dl_count_increment   = os.getenv('VPM_NO_INCREMENT') == '1'
 	default_vpm_server_urls = ['https://vpm.vlang.io', 'https://vpm.url4e.com']
 	vpm_server_urls         = rand.shuffle_clone(default_vpm_server_urls) or { [] } // ensure that all queries are distributed fairly
 	valid_vpm_commands      = ['help', 'search', 'install', 'update', 'upgrade', 'outdated', 'list',
@@ -34,18 +38,24 @@ const (
 	excluded_dirs           = ['cache', 'vlib']
 	supported_vcs           = {
 		'git': VCS{
-			cmd: 'git'
 			dir: '.git'
-			update_arg: 'pull --recurse-submodules' // pulling with `--depth=1` leads to conflicts, when the upstream is more than 1 commit newer
-			install_arg: 'clone --depth=1 --recursive --shallow-submodules'
-			outdated_steps: ['fetch', 'rev-parse @', 'rev-parse @{u}']
+			cmd: 'git'
+			args: struct {
+				install: 'clone --depth=1 --recursive --shallow-submodules'
+				update: 'pull --recurse-submodules' // pulling with `--depth=1` leads to conflicts, when the upstream is more than 1 commit newer
+				path: '-C'
+				outdated: ['fetch', 'rev-parse @', 'rev-parse @{u}']
+			}
 		}
 		'hg':  VCS{
-			cmd: 'hg'
 			dir: '.hg'
-			update_arg: 'pull --update'
-			install_arg: 'clone'
-			outdated_steps: ['incoming']
+			cmd: 'hg'
+			args: struct {
+				install: 'clone'
+				update: 'pull --update'
+				path: '-R'
+				outdated: ['incoming']
+			}
 		}
 	}
 )
