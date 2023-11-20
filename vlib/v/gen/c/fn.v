@@ -457,7 +457,7 @@ fn (mut g Gen) c_fn_name(node &ast.FnDecl) string {
 	if node.language == .c {
 		name = util.no_dots(name)
 	} else {
-		name = c_name(name)
+		name = c_fn_name(name)
 	}
 
 	if node.generic_names.len > 0 {
@@ -1235,7 +1235,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			g.expr(node.left)
 		}
 		dot := g.dot_or_ptr(left_type)
-		mname := c_name(node.name)
+		mname := c_fn_name(node.name)
 		g.write('${dot}_typ]._method_${mname}(')
 		if node.left.is_auto_deref_var() && left_type.nr_muls() > 1 {
 			g.write('(')
@@ -1412,6 +1412,8 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	}
 	is_array_method_first_last_repeat := final_left_sym.kind == .array
 		&& node.name in ['first', 'last', 'repeat']
+	is_interface := left_sym.kind == .interface_
+		&& g.table.sym(node.receiver_type).kind == .interface_
 	if node.receiver_type.is_ptr() && (!left_type.is_ptr()
 		|| node.from_embed_types.len != 0 || (left_type.has_flag(.shared_f) && node.name != 'str')) {
 		// The receiver is a reference, but the caller provided a value
@@ -1461,7 +1463,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			g.write('(map[]){')
 			g.expr(node.left)
 			g.write('}[0]')
-		} else if node.from_embed_types.len > 0 {
+		} else if !is_interface && node.from_embed_types.len > 0 {
 			n_ptr := node.left_type.nr_muls() - 1
 			if n_ptr > 0 {
 				g.write('(')
@@ -1471,23 +1473,56 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			} else {
 				g.expr(node.left)
 			}
+		} else if is_interface && node.from_embed_types.len > 0 {
+			if g.out.last_n(1) == '&' {
+				g.go_back(1)
+			}
+			if node.receiver_type.is_ptr() && left_type.is_ptr() {
+				// (main__IFoo*)bar
+				g.write('(')
+				g.write(g.table.sym(node.from_embed_types.last()).cname)
+				g.write('*)')
+				g.expr(node.left)
+			} else if node.receiver_type.is_ptr() && !left_type.is_ptr() {
+				// (main__IFoo*)&bar
+				g.write('(')
+				g.write(g.table.sym(node.from_embed_types.last()).cname)
+				g.write('*)&')
+				g.expr(node.left)
+			} else if !node.receiver_type.is_ptr() && left_type.is_ptr() {
+				// *((main__IFoo*)bar)
+				g.write('*((')
+				g.write(g.table.sym(node.from_embed_types.last()).cname)
+				g.write('*)')
+				g.expr(node.left)
+				g.write(')')
+			} else {
+				// *((main__IFoo*)&bar)
+				g.write('*((')
+				g.write(g.table.sym(node.from_embed_types.last()).cname)
+				g.write('*)&')
+				g.expr(node.left)
+				g.write(')')
+			}
 		} else {
 			g.expr(node.left)
 		}
-		for i, embed in node.from_embed_types {
-			embed_sym := g.table.sym(embed)
-			embed_name := embed_sym.embed_name()
-			is_left_ptr := if i == 0 {
-				left_type.is_ptr()
-			} else {
-				node.from_embed_types[i - 1].is_ptr()
+		if !is_interface || node.from_embed_types.len == 0 {
+			for i, embed in node.from_embed_types {
+				embed_sym := g.table.sym(embed)
+				embed_name := embed_sym.embed_name()
+				is_left_ptr := if i == 0 {
+					left_type.is_ptr()
+				} else {
+					node.from_embed_types[i - 1].is_ptr()
+				}
+				if is_left_ptr {
+					g.write('->')
+				} else {
+					g.write('.')
+				}
+				g.write(embed_name)
 			}
-			if is_left_ptr {
-				g.write('->')
-			} else {
-				g.write('.')
-			}
-			g.write(embed_name)
 		}
 		if left_type.has_flag(.shared_f)
 			&& (left_type != node.receiver_type || is_array_method_first_last_repeat) {
@@ -1585,7 +1620,7 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 			ast_type := node.args[0].expr as ast.TypeNode
 			// `json.decode(User, s)` => json.decode_User(s)
 			typ := c_name(g.typ(ast_type.typ))
-			fn_name := c_name(name) + '_' + typ
+			fn_name := c_fn_name(name) + '_' + typ
 			g.gen_json_for_type(ast_type.typ)
 			g.empty_line = true
 			g.writeln('// json.decode')
@@ -1612,7 +1647,7 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 		// Skip "C."
 		name = util.no_dots(name[2..])
 	} else {
-		name = c_name(name)
+		name = c_fn_name(name)
 	}
 	if g.pref.translated || g.file.is_translated || node.is_file_translated {
 		// For `[c: 'P_TryMove'] fn p_trymove( ... `
@@ -1660,9 +1695,9 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 	if is_print && (node.args[0].typ != ast.string_type
 		|| g.comptime_for_method.len > 0
 		|| g.table.is_comptime_var(node.args[0].expr)) {
-		g.inside_casting_to_str = true
+		g.inside_interface_deref = true
 		defer {
-			g.inside_casting_to_str = false
+			g.inside_interface_deref = false
 		}
 		mut typ := node.args[0].typ
 		if g.table.is_comptime_var(node.args[0].expr) {
@@ -1678,7 +1713,7 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 			expr := node.args[0].expr
 			typ_sym := g.table.sym(typ)
 			if typ_sym.kind == .interface_ && (typ_sym.info as ast.Interface).defines_method('str') {
-				g.write('${c_name(print_method)}(')
+				g.write('${c_fn_name(print_method)}(')
 				rec_type_name := util.no_dots(g.cc_type(typ, false))
 				g.write('${c_name(rec_type_name)}_name_table[')
 				g.expr(expr)
@@ -1694,9 +1729,9 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 				tmp := g.new_tmp_var()
 				g.write('string ${tmp} = ')
 				g.gen_expr_to_string(expr, typ)
-				g.writeln('; ${c_name(print_method)}(${tmp}); string_free(&${tmp});')
+				g.writeln('; ${c_fn_name(print_method)}(${tmp}); string_free(&${tmp});')
 			} else {
-				g.write('${c_name(print_method)}(')
+				g.write('${c_fn_name(print_method)}(')
 				if expr is ast.ComptimeSelector {
 					key_str := g.get_comptime_selector_key_type(expr)
 					if key_str != '' {
@@ -1733,9 +1768,9 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 	}
 	if !print_auto_str {
 		if is_print {
-			g.inside_casting_to_str = true
+			g.inside_interface_deref = true
 			defer {
-				g.inside_casting_to_str = false
+				g.inside_interface_deref = false
 			}
 		}
 		if g.pref.is_debug && node.name == 'panic' {
