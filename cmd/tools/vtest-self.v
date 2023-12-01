@@ -109,9 +109,19 @@ const skip_fsanitize_too_slow = [
 	'vlib/v/slow_tests/profile/profile_test.v',
 	'vlib/v/slow_tests/repl/repl_test.v',
 	'vlib/v/slow_tests/valgrind/valgrind_test.v',
+	'cmd/tools/vpm/dependency_test.v',
+	'cmd/tools/vpm/install_test.v',
+	'cmd/tools/vpm/install_version_input_test.v',
+	'cmd/tools/vpm/install_version_test.v',
+	'cmd/tools/vpm/update_test.v',
 ]
 const skip_with_fsanitize_memory = [
 	'do_not_remove',
+	'cmd/tools/vpm/dependency_test.v', // known flaky, for fsanitize_memory, due to using mbedtls
+	'cmd/tools/vpm/install_test.v', // known flaky, for fsanitize_memory, due to using mbedtls
+	'cmd/tools/vpm/install_version_input_test.v', // known flaky, for fsanitize_memory, due to using mbedtls
+	'cmd/tools/vpm/install_version_test.v', // known flaky, for fsanitize_memory, due to using mbedtls
+	'cmd/tools/vpm/update_test.v', // known flaky, for fsanitize_memory, due to using mbedtls
 	'vlib/net/tcp_simple_client_server_test.v',
 	'vlib/net/http/cookie_test.v',
 	'vlib/net/http/http_test.v',
@@ -136,6 +146,7 @@ const skip_with_fsanitize_memory = [
 	'vlib/orm/orm_custom_operators_test.v',
 	'vlib/orm/orm_fk_test.v',
 	'vlib/orm/orm_references_test.v',
+	'vlib/orm/orm_option_array_test.v',
 	'vlib/orm/orm_option_time_test.v',
 	'vlib/db/sqlite/sqlite_test.v',
 	'vlib/db/sqlite/sqlite_orm_test.v',
@@ -224,6 +235,7 @@ const skip_on_ubuntu_musl = [
 	'vlib/orm/orm_custom_operators_test.v',
 	'vlib/orm/orm_fk_test.v',
 	'vlib/orm/orm_references_test.v',
+	'vlib/orm/orm_option_array_test.v',
 	'vlib/orm/orm_option_time_test.v',
 	'vlib/v/tests/orm_enum_test.v',
 	'vlib/v/tests/orm_sub_struct_test.v',
