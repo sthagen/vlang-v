@@ -91,7 +91,7 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 				sym := c.table.sym(field.typ)
 				if sym.kind == .function {
 					if !field.typ.has_flag(.option) && !field.has_default_expr
-						&& field.attrs.filter(it.name == 'required').len == 0 {
+						&& field.attrs.all(it.name != 'required') {
 						error_msg := 'uninitialized `fn` struct fields are not allowed, since they can result in segfaults; use `?fn` or `[required]` or initialize the field with `=` (if you absolutely want to have unsafe function pointers, use `= unsafe { nil }`)'
 						c.note(error_msg, field.pos)
 					}
@@ -475,7 +475,7 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 	if type_sym.kind == .struct_ {
 		info := type_sym.info as ast.Struct
 		if info.attrs.len > 0 && info.attrs.contains('noinit') && type_sym.mod != c.mod {
-			c.error('struct `${type_sym.name}` is declared with a `[noinit]` attribute, so ' +
+			c.error('struct `${type_sym.name}` is declared with a `@[noinit]` attribute, so ' +
 				'it cannot be initialized with `${type_sym.name}{}`', node.pos)
 		}
 	}
@@ -498,6 +498,10 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 			sym := c.table.sym(c.unwrap_generic(node.typ))
 			if sym.kind == .struct_ {
 				info := sym.info as ast.Struct
+				if info.attrs.len > 0 && info.attrs.contains('noinit') && sym.mod != c.mod {
+					c.error('struct `${sym.name}` is declared with a `@[noinit]` attribute, so ' +
+						'it cannot be initialized with `${sym.name}{}`', node.pos)
+				}
 				if node.no_keys && node.init_fields.len != info.fields.len {
 					fname := if info.fields.len != 1 { 'fields' } else { 'field' }
 					c.error('initializing struct `${sym.name}` needs `${info.fields.len}` ${fname}, but got `${node.init_fields.len}`',
