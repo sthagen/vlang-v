@@ -474,6 +474,7 @@ fn main() {
 	$if !macos {
 		tsession.skip_files << skip_on_non_macos
 	}
+	tsession.skip_files = tsession.skip_files.map(os.abs_path)
 	tsession.test()
 	eprintln(tsession.benchmark.total_message(title))
 	if tsession.benchmark.nfail > 0 {
