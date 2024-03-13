@@ -180,12 +180,13 @@ pub struct C.GC_stack_base {
 	// reg_base voidptr
 }
 
-fn C.GC_get_stack_base(voidptr)
+fn C.GC_get_stack_base(voidptr) int
 fn C.GC_register_my_thread(voidptr) int
 fn C.GC_unregister_my_thread() int
 
 // fn C.GC_get_my_stackbottom(voidptr) voidptr
-// fn C.GC_set_stackbottom(voidptr, voidptr)
+fn C.GC_set_stackbottom(voidptr, voidptr)
+
 // fn C.GC_push_all_stacks()
 
 fn C.GC_add_roots(voidptr, voidptr)
