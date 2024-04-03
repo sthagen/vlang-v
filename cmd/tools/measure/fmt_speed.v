@@ -1,6 +1,7 @@
 import os
 import time
 import v.ast
+import v.fmt
 import v.pref
 import v.parser
 import v.errors
@@ -9,7 +10,7 @@ import term
 
 const skip_tests = os.getenv_opt('SKIP_TESTS') or { '' }.bool()
 const comments_mode = scanner.CommentsMode.from(os.getenv('SCANNER_MODE')) or {
-	scanner.CommentsMode.skip_comments
+	scanner.CommentsMode.parse_comments
 }
 
 fn main() {
@@ -25,11 +26,11 @@ fn main() {
 }
 
 fn hline() {
-	println('---------------------------------------------------------------------------------------------------------------------------------------------------')
+	println('----------------------------------------------------------------------------------------------------------------------------------------------------------')
 }
 
 fn theader() {
-	println('        Time     Tokens      Bytes      Lines   Bytes/Token     Errors')
+	println('        Time     Tokens      Bytes      Lines   Bytes/Token     Errors   FMT.len')
 }
 
 fn process_files(files []string) ! {
@@ -45,6 +46,7 @@ fn process_files(files []string) ! {
 	mut total_lines := i64(0)
 	mut total_errors := i64(0)
 	mut total_files := i64(0)
+	mut total_fmt_len := i64(0)
 	for f in files {
 		mut table := ast.new_table()
 		if f == '' {
@@ -54,26 +56,29 @@ fn process_files(files []string) ! {
 			continue
 		}
 		total_files++
-		// do not measure the scanning, but only the parsing:
 		mut p := new_parser(f, comments_mode, table, pref_)
-		///
-		sw.restart()
 		ast_file := p.parse()
+		///
+		// do not measure the scanning, and parsing, but only the formatting:
+		sw.restart()
+		formatted_content := fmt.fmt(ast_file, mut table, pref_, false)
 		f_us := sw.elapsed().microseconds()
+		// eprint(formatted_content) // this should be identical to the output of `v fmt file.v`
 		///
 		total_us += f_us
 		total_bytes += p.scanner.text.len
 		total_tokens += p.scanner.all_tokens.len
 		total_lines += ast_file.nr_lines
 		total_errors += p.errors.len
-		println('${f_us:10}us ${p.scanner.all_tokens.len:10} ${p.scanner.text.len:10} ${ast_file.nr_lines:10} ${(f64(p.scanner.text.len) / p.scanner.all_tokens.len):13.3} ${p.errors.len:10}   ${f}')
+		total_fmt_len += formatted_content.len
+		println('${f_us:10}us ${p.scanner.all_tokens.len:10} ${p.scanner.text.len:10} ${ast_file.nr_lines:10} ${(f64(p.scanner.text.len) / p.scanner.all_tokens.len):13.3} ${p.errors.len:10}  ${formatted_content.len:8}   ${f}')
 	}
 	hline()
 	theader()
 	hline()
 	speed_mb_s := term.colorize(term.bright_yellow, '${(f64(total_bytes) / total_us):6.3f} MB/s')
 	speed_lines_s := term.colorize(term.bright_yellow, '${(1_000_000 * f64(total_lines) / total_us):10.1f} lines/s')
-	println('${total_us:10}us ${total_tokens:10} ${total_bytes:10} ${total_lines:10} ${(f64(total_bytes) / total_tokens):13.3} ${total_errors:10}   Parser speed: ${speed_mb_s}, ${speed_lines_s}, ${nthreads:3} thread(s), ${total_files:5} files.')
+	println('${total_us:10}us ${total_tokens:10} ${total_bytes:10} ${total_lines:10} ${(f64(total_bytes) / total_tokens):13.3} ${total_errors:10}   ${total_fmt_len:7}   FMT speed: ${speed_mb_s}, ${speed_lines_s}, ${nthreads:3} thread(s), ${total_files:5} files.')
 }
 
 fn new_parser(path string, comments_mode scanner.CommentsMode, table &ast.Table, pref_ &pref.Preferences) &parser.Parser {
