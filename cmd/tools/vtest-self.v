@@ -84,6 +84,7 @@ const essential_list = [
 ]
 const skip_test_files = [
 	'do_not_remove',
+	'cmd/tools/vdoc/utils_test.v', // markdown not installed
 	'vlib/context/deadline_test.v', // sometimes blocks
 	'vlib/context/onecontext/onecontext_test.v', // backtrace_symbols is missing
 	'vlib/db/mysql/mysql_orm_test.v', // mysql not installed
@@ -127,7 +128,6 @@ const skip_with_fsanitize_memory = [
 	'vlib/net/http/cookie_test.v',
 	'vlib/net/http/http_test.v',
 	'vlib/net/http/status_test.v',
-	'vlib/net/http/http_httpbin_test.v',
 	'vlib/net/http/header_test.v',
 	'vlib/net/http/server_test.v',
 	'vlib/net/udp_test.v',
@@ -218,7 +218,6 @@ const skip_on_ubuntu_musl = [
 	'do_not_remove',
 	//'vlib/v/gen/js/jsgen_test.v',
 	'vlib/net/http/cookie_test.v',
-	'vlib/net/http/http_test.v',
 	'vlib/net/http/status_test.v',
 	'vlib/db/sqlite/sqlite_test.v',
 	'vlib/db/sqlite/sqlite_orm_test.v',
@@ -255,7 +254,6 @@ const skip_on_ubuntu_musl = [
 	'vlib/net/http/request_test.v',
 	'vlib/vweb/route_test.v',
 	'vlib/net/websocket/websocket_test.v',
-	'vlib/net/http/http_httpbin_test.v',
 	'vlib/net/http/header_test.v',
 	'vlib/net/http/server_test.v',
 	'vlib/net/http/response_test.v',
@@ -338,8 +336,6 @@ const skip_on_sandboxed_packaging = [
 	'vlib/v/gen/c/coutput_test.v',
 ]
 
-// Note: musl misses openssl, thus the http tests can not be done there
-// Note: http_httpbin_test.v: fails with 'cgen error: json: map_string_string is not struct'
 fn main() {
 	vexe := os.real_path(os.getenv_opt('VEXE') or { @VEXE })
 	vroot := os.dir(vexe)

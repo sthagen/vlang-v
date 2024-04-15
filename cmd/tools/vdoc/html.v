@@ -132,7 +132,7 @@ fn (mut vd VDoc) collect_search_index(out Output) {
 			doc.head.merge_comments_without_examples()
 		}
 		vd.search_module_data << SearchModuleResult{
-			description: trim_doc_node_description(comments)
+			description: trim_doc_node_description(mod, comments)
 			link: vd.get_file_name(mod, out)
 		}
 		for _, dn in doc.contents {
@@ -151,7 +151,7 @@ fn (mut vd VDoc) create_search_results(mod string, dn doc.DocNode, out Output) {
 	} else {
 		dn.merge_comments_without_examples()
 	}
-	dn_description := trim_doc_node_description(comments)
+	dn_description := trim_doc_node_description(dn.name, comments)
 	vd.search_index << dn.name
 	vd.search_data << SearchResult{
 		prefix: if dn.parent_name != '' { '${dn.kind} (${dn.parent_name})' } else { '${dn.kind} ' }
@@ -506,35 +506,12 @@ fn html_highlight(code string, tb &ast.Table) string {
 fn doc_node_html(dn doc.DocNode, link string, head bool, include_examples bool, tb &ast.Table) string {
 	mut dnw := strings.new_builder(200)
 	head_tag := if head { 'h1' } else { 'h2' }
-	// Allow README.md to go through unescaped except for script tags
-	escaped_html := if head && is_module_readme(dn) {
-		readme_lines := dn.comments[0].text.split_into_lines()
-		mut merged_lines := []string{}
-		mut is_codeblock := false
-		for i := 0; i < readme_lines.len - 1; i++ {
-			l := readme_lines[i]
-			nl := readme_lines[i + 1]
-			if l.trim_left('\x01').trim_space().starts_with('```') {
-				is_codeblock = !is_codeblock
-			}
-			if !is_codeblock && l != '' && nl != ''
-				&& !nl.trim_left('\x01').trim_space().starts_with('```') {
-				merged_lines << '${l} ${nl}'
-				i++
-				continue
-			}
-			merged_lines << l
-		}
-		merged_lines.join_lines()
-	} else {
-		dn.merge_comments_without_examples()
-	}
 	mut renderer := markdown.HtmlRenderer{
 		transformer: &MdHtmlCodeHighlighter{
 			table: tb
 		}
 	}
-	md_content := markdown.render(escaped_html, mut renderer) or { '' }
+	md_content := markdown.render(dn.merge_comments_without_examples(), mut renderer) or { '' }
 	highlighted_code := html_highlight(dn.content, tb)
 	node_class := if dn.kind == .const_group { ' const' } else { '' }
 	sym_name := get_sym_name(dn)
