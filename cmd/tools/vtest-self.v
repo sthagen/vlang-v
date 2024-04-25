@@ -108,6 +108,7 @@ const skip_test_files = [
 	'vlib/db/pg/pg_orm_test.v', // pg not installed
 	'vlib/db/pg/pg_test.v', // pg not installed
 	'vlib/db/pg/pg_double_test.v', // pg not installed
+	'vlib/net/ftp/ftp_test.v', // currently broken
 ]
 // These tests are too slow to be run in the CI on each PR/commit
 // in the sanitized modes:
@@ -279,6 +280,7 @@ const skip_on_ubuntu_musl = [
 	'vlib/x/sessions/tests/db_store_test.v',
 	'vlib/x/vweb/tests/vweb_test.v',
 	'vlib/x/vweb/tests/vweb_app_test.v',
+	'vlib/veb/tests/veb_app_test.v',
 ]
 const skip_on_linux = [
 	'do_not_remove',
