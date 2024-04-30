@@ -73,21 +73,6 @@ pub enum CompilerType {
 	cplusplus
 }
 
-pub enum Arch {
-	_auto
-	amd64 // aka x86_64
-	arm64 // 64-bit arm
-	arm32 // 32-bit arm
-	rv64 // 64-bit risc-v
-	rv32 // 32-bit risc-v
-	i386
-	js_node
-	js_browser
-	js_freestanding
-	wasm32
-	_max
-}
-
 pub const list_of_flags_with_param = ['b', 'd', 'e', 'o', 'define', 'backend', 'cc', 'os', 'cflags',
 	'ldflags', 'path', 'arch']
 
@@ -861,13 +846,12 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 				b := backend_from_string(sbackend) or {
 					eprintln_exit('Unknown V backend: ${sbackend}\nValid -backend choices are: c, go, interpret, js, js_node, js_browser, js_freestanding, native, wasm')
 				}
-				if b.is_js() {
-					res.output_cross_c = true
-				}
 				if b == .wasm {
 					res.compile_defines << 'wasm'
 					res.compile_defines_all << 'wasm'
 					res.arch = .wasm32
+				} else if b.is_js() {
+					res.output_cross_c = true
 				}
 				res.backend = b
 				i++
@@ -1115,53 +1099,6 @@ pub fn (pref &Preferences) should_output_to_stdout() bool {
 	return pref.out_name.ends_with('/-') || pref.out_name.ends_with(r'\-')
 }
 
-pub fn arch_from_string(arch_str string) !Arch {
-	match arch_str {
-		'amd64', 'x86_64', 'x64', 'x86' { // amd64 recommended
-
-			return .amd64
-		}
-		'aarch64', 'arm64' { // arm64 recommended
-
-			return .arm64
-		}
-		'aarch32', 'arm32', 'arm' { // arm32 recommended
-
-			return .arm32
-		}
-		'rv64', 'riscv64', 'risc-v64', 'riscv', 'risc-v' { // rv64 recommended
-
-			return .rv64
-		}
-		'rv32', 'riscv32' { // rv32 recommended
-
-			return .rv32
-		}
-		'x86_32', 'x32', 'i386', 'IA-32', 'ia-32', 'ia32' { // i386 recommended
-
-			return .i386
-		}
-		'js', 'js_node' {
-			return .js_node
-		}
-		'js_browser' {
-			return .js_browser
-		}
-		'js_freestanding' {
-			return .js_freestanding
-		}
-		'wasm32', 'wasm' {
-			return .wasm32
-		}
-		'' {
-			return ._auto
-		}
-		else {
-			return error('invalid arch: ${arch_str}')
-		}
-	}
-}
-
 fn must_exist(path string) {
 	if !os.exists(path) {
 		eprintln_exit('v expects that `${path}` exists, but it does not')
@@ -1176,59 +1113,34 @@ fn is_source_file(path string) bool {
 pub fn backend_from_string(s string) !Backend {
 	// TODO: unify the "different js backend" options into a single `-b js`
 	// + a separate option, to choose the wanted JS output.
-	match s {
-		'c' { return .c }
-		'go' { return .golang }
-		'interpret' { return .interpret }
-		'js' { return .js_node }
-		'js_node' { return .js_node }
-		'js_browser' { return .js_browser }
-		'js_freestanding' { return .js_freestanding }
-		'native' { return .native }
-		'wasm' { return .wasm }
-		else { return error('Unknown backend type ${s}') }
+	return match s {
+		'c' { .c }
+		'interpret' { .interpret }
+		'js', 'js_node' { .js_node }
+		'js_browser' { .js_browser }
+		'js_freestanding' { .js_freestanding }
+		'wasm' { .wasm }
+		'native' { .native }
+		'go' { .golang }
+		else { error('Unknown backend type ${s}') }
 	}
 }
 
 // Helper function to convert string names to CC enum
-pub fn cc_from_string(cc_str string) CompilerType {
-	if cc_str.len == 0 {
+pub fn cc_from_string(s string) CompilerType {
+	if s == '' {
 		return .gcc
 	}
-	// TODO
-	normalized_cc := cc_str.replace('\\', '/')
-	normalized_cc_array := normalized_cc.split('/')
-	last_elem := normalized_cc_array.last()
-	cc := last_elem.all_before('.')
-	if cc.contains('++') {
-		return .cplusplus
+	cc := os.file_name(s).to_lower()
+	return match true {
+		cc.contains('tcc') || cc.contains('tinyc') { .tinyc }
+		cc.contains('gcc') { .gcc }
+		cc.contains('clang') { .clang }
+		cc.contains('msvc') { .msvc }
+		cc.contains('mingw') { .mingw }
+		cc.contains('++') { .cplusplus }
+		else { .gcc }
 	}
-	if cc.contains('tcc') || cc.contains('tinyc') {
-		return .tinyc
-	}
-	if cc.contains('clang') {
-		return .clang
-	}
-	if cc.contains('mingw') {
-		return .mingw
-	}
-	if cc.contains('msvc') {
-		return .msvc
-	}
-	return .gcc
-}
-
-pub fn get_host_arch() Arch {
-	// Note: we can not use `$if arch` here, because V skips cgen for the non
-	// current comptime branches by default, so there is a bootstrapping
-	// problem => the __V_architecture macro is used to resolve it.
-	// TODO: think about how to solve it for non C backends, perhaps we
-	// need a comptime `$if native {` too, and/or a mechanism to always
-	// generate all branches for specific functions?
-	if C.__V_architecture <= int(Arch._auto) || C.__V_architecture >= int(Arch._max) {
-		return Arch.amd64
-	}
-	return unsafe { Arch(C.__V_architecture) }
 }
 
 fn (mut prefs Preferences) parse_define(define string) {
