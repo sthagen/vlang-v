@@ -4901,7 +4901,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 	g.write(g.get_ternary_name(name))
 	if is_auto_heap {
 		g.write('))')
-		if is_option {
+		if is_option && node.or_expr.kind != .absent {
 			g.write('.data')
 		}
 	}
@@ -6095,6 +6095,9 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 	if node.attrs.contains('export') {
 		attributes += 'VV_EXPORTED_SYMBOL '
 	}
+	if attr := node.attrs.find_first('_linker_section') {
+		attributes += '__attribute__ ((section ("${attr.arg}"))) '
+	}
 	for field in node.fields {
 		if g.pref.skip_unused {
 			if field.name !in g.table.used_globals {
@@ -6989,7 +6992,7 @@ fn (mut g Gen) or_block(var_name string, or_block ast.OrExpr, return_type ast.Ty
 			if g.fn_decl.return_type == ast.void_type {
 				g.writeln('\treturn;')
 			} else {
-				styp := g.typ(g.fn_decl.return_type)
+				styp := g.typ(g.fn_decl.return_type).replace('*', '_ptr')
 				err_obj := g.new_tmp_var()
 				g.writeln('\t${styp} ${err_obj};')
 				g.writeln('\tmemcpy(&${err_obj}, &${cvar_name}, sizeof(_option));')
