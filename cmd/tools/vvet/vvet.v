@@ -4,10 +4,8 @@ module main
 
 import os
 import os.cmdline
-import v.vet
 import v.pref
 import v.parser
-import v.token
 import v.ast
 import v.help
 import term
@@ -15,9 +13,9 @@ import term
 struct Vet {
 mut:
 	opt            Options
-	errors         []vet.Error
-	warns          []vet.Error
-	notices        []vet.Error
+	errors         []VetError
+	warns          []VetError
+	notices        []VetError
 	file           string
 	filtered_lines FilteredLines
 }
@@ -110,7 +108,7 @@ fn (mut vt Vet) vet_file(path string) {
 	prefs.is_vsh = path.ends_with('.vsh')
 	mut table := ast.new_table()
 	vt.vprintln("vetting file '${path}'...")
-	file := parser.parse_vet_file(path, mut table, prefs)
+	file := parser.parse_file(path, mut table, .parse_comments, prefs)
 	vt.stmts(file.stmts)
 	source_lines := os.read_lines(vt.file) or { []string{} }
 	for ln, line in source_lines {
@@ -326,21 +324,6 @@ fn (vt &Vet) vprintln(s string) {
 	println(s)
 }
 
-fn (vt &Vet) e2string(err vet.Error) string {
-	mut kind := '${err.kind}:'
-	mut location := '${err.file_path}:${err.pos.line_nr}:'
-	if vt.opt.use_color {
-		kind = match err.kind {
-			.warning { term.magenta(kind) }
-			.error { term.red(kind) }
-			.notice { term.yellow(kind) }
-		}
-		kind = term.bold(kind)
-		location = term.bold(location)
-	}
-	return '${location} ${kind} ${err.message}'
-}
-
 fn (mut vt Vet) vet_in_condition(expr ast.InfixExpr) {
 	if expr.right is ast.ArrayInit && expr.right.exprs.len == 1 && expr.op in [.key_in, .not_in] {
 		left := expr.left.str()
@@ -348,53 +331,5 @@ fn (mut vt Vet) vet_in_condition(expr ast.InfixExpr) {
 		eq := if expr.op == .key_in { '==' } else { '!=' }
 		vt.error('Use `${left} ${eq} ${right}` instead of `${left} ${expr.op} [${right}]`',
 			expr.pos.line_nr, .vfmt)
-	}
-}
-
-fn (mut vt Vet) error(msg string, line int, fix vet.FixKind) {
-	pos := token.Pos{
-		line_nr: line + 1
-	}
-	vt.errors << vet.Error{
-		message: msg
-		file_path: vt.file
-		pos: pos
-		kind: .error
-		fix: fix
-		typ: .default
-	}
-}
-
-fn (mut vt Vet) warn(msg string, line int, fix vet.FixKind) {
-	pos := token.Pos{
-		line_nr: line + 1
-	}
-	mut w := vet.Error{
-		message: msg
-		file_path: vt.file
-		pos: pos
-		kind: .warning
-		fix: fix
-		typ: .default
-	}
-	if vt.opt.is_werror {
-		w.kind = .error
-		vt.errors << w
-	} else {
-		vt.warns << w
-	}
-}
-
-fn (mut vt Vet) notice(msg string, line int, fix vet.FixKind) {
-	pos := token.Pos{
-		line_nr: line + 1
-	}
-	vt.notices << vet.Error{
-		message: msg
-		file_path: vt.file
-		pos: pos
-		kind: .notice
-		fix: fix
-		typ: .default
 	}
 }
