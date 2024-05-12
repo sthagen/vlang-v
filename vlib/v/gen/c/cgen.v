@@ -2960,6 +2960,7 @@ fn (mut g Gen) gen_clone_assignment(var_type ast.Type, val ast.Expr, typ ast.Typ
 }
 
 fn (mut g Gen) autofree_scope_vars(pos int, line_nr int, free_parent_scopes bool) {
+	// g.writeln('// afsv pos=${pos} line_nr=${line_nr} freeparent_scopes=${free_parent_scopes}')
 	g.autofree_scope_vars_stop(pos, line_nr, free_parent_scopes, -1)
 }
 
@@ -2974,6 +2975,7 @@ fn (mut g Gen) autofree_scope_vars_stop(pos int, line_nr int, free_parent_scopes
 	}
 	// eprintln('> free_scope_vars($pos)')
 	scope := g.file.scope.innermost(pos)
+	// g.writeln('// scope start pos=${scope.start_pos} ')
 	if scope.start_pos == 0 {
 		// TODO: why can scope.pos be 0? (only outside fns?)
 		return
@@ -2988,7 +2990,17 @@ fn (mut g Gen) trace_autofree(line string) {
 	g.writeln(line)
 }
 
+//@[if print_autofree_vars ?]
+// fn (mut g Gen) print_autofree_var(var string, position string, comment string) {
+fn (mut g Gen) print_autofree_var(var ast.Var, comment string) {
+	if !g.pref.print_autofree_vars && g.pref.print_autofree_vars_in_fn == '' {
+		return
+	}
+	println('autofree: ${g.file.path}:${var.pos.line_nr}: skipping `${var.name}` in fn `${g.last_fn_c_name}`. ${comment}')
+}
+
 fn (mut g Gen) autofree_scope_vars2(scope &ast.Scope, start_pos int, end_pos int, line_nr int, free_parent_scopes bool, stop_pos int) {
+	g.writeln('// scopeobjects.len == ${scope.objects.len}')
 	if scope == unsafe { nil } {
 		return
 	}
@@ -2997,6 +3009,7 @@ fn (mut g Gen) autofree_scope_vars2(scope &ast.Scope, start_pos int, end_pos int
 			ast.Var {
 				g.trace_autofree('// var "${obj.name}" var.pos=${obj.pos.pos} var.line_nr=${obj.pos.line_nr}')
 				if obj.name == g.returned_var_name {
+					g.print_autofree_var(obj, 'returned from function')
 					g.trace_autofree('// skipping returned var')
 					continue
 				}
@@ -3008,10 +3021,12 @@ fn (mut g Gen) autofree_scope_vars2(scope &ast.Scope, start_pos int, end_pos int
 				}
 				if obj.is_tmp {
 					// Skip for loop vars
+					g.print_autofree_var(obj, 'tmp var (loop?)')
 					g.trace_autofree('// skipping tmp var "${obj.name}"')
 					continue
 				}
 				if obj.is_inherited {
+					g.print_autofree_var(obj, 'inherited')
 					g.trace_autofree('// skipping inherited var "${obj.name}"')
 					continue
 				}
@@ -3075,6 +3090,7 @@ fn (mut g Gen) autofree_variable(v ast.Var, is_option bool) {
 		// Don't free simple string literals.
 		match v.expr {
 			ast.StringLiteral {
+				g.print_autofree_var(v, 'string literal')
 				g.trace_autofree('// str literal')
 			}
 			else {
@@ -3095,9 +3111,15 @@ fn (mut g Gen) autofree_variable(v ast.Var, is_option bool) {
 		g.autofree_var_call('string_free', v)
 		return
 	}
-	if g.pref.experimental && v.typ.is_ptr() && sym.name.after('.')[0].is_capital() {
-		// Free user reference types
-		g.autofree_var_call('free', v)
+	// Free user reference types
+	is_user_ref := v.typ.is_ptr() && sym.name.after('.')[0].is_capital()
+	// if g.pref.experimental && v.typ.is_ptr() && sym.name.after('.')[0].is_capital() {
+	if is_user_ref {
+		if g.pref.experimental {
+			g.autofree_var_call('free', v)
+		} else {
+			g.print_autofree_var(v, 'user reference type, use -experimental to autofree those')
+		}
 	}
 	if sym.has_method('free') {
 		g.autofree_var_call(free_fn, v)
@@ -5281,6 +5303,10 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 		g.write_defer_stmts_when_needed()
 		if fn_return_is_option || fn_return_is_result {
 			styp := g.typ(fn_ret_type)
+			if g.is_autofree {
+				g.trace_autofree('// free before return (no values returned)')
+				g.autofree_scope_vars(node.pos.pos, node.pos.line_nr, false)
+			}
 			g.writeln('return (${styp}){0};')
 		} else {
 			if g.is_autofree {
