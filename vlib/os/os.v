@@ -568,6 +568,8 @@ pub fn is_file(path string) bool {
 
 // join_path joins any number of path elements into a single path, separating
 // them with a platform-specific path_separator. Empty elements are ignored.
+// Windows platform output will rewrite forward slashes to backslash.
+// Consider looking at the unit tests in os_test.v for semi-formal API.
 @[manualfree]
 pub fn join_path(base string, dirs ...string) string {
 	// TODO: fix freeing of `dirs` when the passed arguments are variadic,
@@ -587,13 +589,10 @@ pub fn join_path(base string, dirs ...string) string {
 			sb.write_string(d)
 		}
 	}
+	normalize_path_in_builder(mut sb)
 	mut res := sb.str()
-	if sbase == '' {
+	if base == '' {
 		res = res.trim_left(path_separator)
-	}
-	if res.contains('/./') {
-		// Fix `join_path("/foo/bar", "./file.txt")` => `/foo/bar/./file.txt`
-		res = res.replace('/./', '/')
 	}
 	return res
 }
@@ -612,12 +611,54 @@ pub fn join_path_single(base string, elem string) string {
 	defer {
 		unsafe { sbase.free() }
 	}
-	if base != '' {
-		sb.write_string(sbase)
+	sb.write_string(sbase)
+	if elem != '' {
 		sb.write_string(path_separator)
+		sb.write_string(elem)
 	}
-	sb.write_string(elem)
-	return sb.str()
+	normalize_path_in_builder(mut sb)
+	mut res := sb.str()
+	if base == '' {
+		res = res.trim_left(path_separator)
+	}
+	return res
+}
+
+@[direct_array_access]
+fn normalize_path_in_builder(mut sb strings.Builder) {
+	mut fs := `\\`
+	mut rs := `/`
+	$if windows {
+		fs = `/`
+		rs = `\\`
+	}
+	for idx in 0 .. sb.len {
+		unsafe {
+			if sb[idx] == fs {
+				sb[idx] = rs
+			}
+		}
+	}
+	for idx in 0 .. sb.len - 3 {
+		if sb[idx] == rs && sb[idx + 1] == `.` && sb[idx + 2] == rs {
+			unsafe {
+				// let `/foo/./bar.txt` become `/foo/bar.txt` in place
+				for j := idx + 1; j < sb.len - 2; j++ {
+					sb[j] = sb[j + 2]
+				}
+				sb.len -= 2
+			}
+		}
+		if sb[idx] == rs && sb[idx + 1] == rs {
+			unsafe {
+				// let `/foo//bar.txt` become `/foo/bar.txt` in place
+				for j := idx + 1; j < sb.len - 1; j++ {
+					sb[j] = sb[j + 1]
+				}
+				sb.len -= 1
+			}
+		}
+	}
 }
 
 // walk_ext returns a recursive list of all files in `path` ending with `ext`.
