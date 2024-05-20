@@ -1056,7 +1056,8 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 		inter_sym.methods
 	}
 	// voidptr is an escape hatch, it should be allowed to be passed
-	if utyp != ast.voidptr_type && utyp != ast.nil_type {
+	if utyp != ast.voidptr_type && utyp != ast.nil_type && !(interface_type.has_flag(.option)
+		&& utyp == ast.none_type) {
 		mut are_methods_implemented := true
 
 		// Verify methods
@@ -1126,7 +1127,8 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 				}
 			}
 		}
-		if utyp != ast.voidptr_type && utyp != ast.nil_type && !inter_sym.info.types.contains(utyp) {
+		if utyp != ast.voidptr_type && utyp != ast.nil_type && utyp != ast.none_type
+			&& !inter_sym.info.types.contains(utyp) {
 			inter_sym.info.types << utyp
 		}
 		if !inter_sym.info.types.contains(ast.voidptr_type) {
@@ -5080,9 +5082,9 @@ fn (mut c Checker) fail_if_stack_struct_action_outside_unsafe(mut ident ast.Iden
 			sym := c.table.sym(obj.typ.set_nr_muls(0))
 			if !sym.is_heap() && !c.pref.translated && !c.file.is_translated {
 				suggestion := if sym.kind == .struct_ {
-					'declaring `${sym.name}` as `[heap]`'
+					'declaring `${sym.name}` as `@[heap]`'
 				} else {
-					'wrapping the `${sym.name}` object in a `struct` declared as `[heap]`'
+					'wrapping the `${sym.name}` object in a `struct` declared as `@[heap]`'
 				}
 				c.error('`${ident.name}` cannot be ${failed_action} outside `unsafe` blocks as it might refer to an object stored on stack. Consider ${suggestion}.',
 					ident.pos)
