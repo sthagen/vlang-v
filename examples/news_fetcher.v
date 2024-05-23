@@ -18,6 +18,7 @@ fn worker_fetch(mut p pool.PoolProcessor, cursor int, worker_id int) voidptr {
 	}
 	story := json2.decode[Story](resp.body) or {
 		println('failed to decode a story')
+		// println(resp.body)
 		return pool.no_result
 	}
 	println('# ${cursor}) ${story.title} | ${story.url}')
@@ -30,12 +31,14 @@ fn main() {
 		println('failed to fetch data from /v0/topstories.json')
 		return
 	}
-	println(resp.body)
+	// TODO bring back once json2 can decode []int
 	/*
 	ids := json2.decode[[]int](resp.body) or {
 		println('failed to decode topstories.json $err')
 		return
 	}#[0..10]
+	*/
+	ids := resp.body.replace_once('[', '').replace_once(']', '').split(',').map(it.int())#[0..10]
 	mut fetcher_pool := pool.new_pool_processor(
 		callback: worker_fetch
 	)
@@ -45,5 +48,4 @@ fn main() {
 	// by setting the VJOBS environment variable too.
 	// fetcher_pool.set_max_jobs( 4 )
 	fetcher_pool.work_on_items(ids)
-	*/
 }
