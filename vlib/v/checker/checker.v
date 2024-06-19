@@ -2428,6 +2428,13 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 				}
 				node.main = env
 			}
+			if flag.contains('\$d(') {
+				d := util.resolve_d_value(c.pref.compile_values, flag) or {
+					c.error(err.msg(), node.pos)
+					return
+				}
+				node.main = d
+			}
 			flag_no_comment := flag.all_before('//').trim_space()
 			if node.kind == 'include' || node.kind == 'preinclude' {
 				if !((flag_no_comment.starts_with('"') && flag_no_comment.ends_with('"'))
@@ -2507,6 +2514,12 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 			}
 			if flag.contains('\$env(') {
 				flag = util.resolve_env_value(flag, true) or {
+					c.error(err.msg(), node.pos)
+					return
+				}
+			}
+			if flag.contains('\$d(') {
+				flag = util.resolve_d_value(c.pref.compile_values, flag) or {
 					c.error(err.msg(), node.pos)
 					return
 				}
@@ -2820,7 +2833,7 @@ pub fn (mut c Checker) expr(mut node ast.Expr) ast.Type {
 			} else {
 				tsym.cname
 			}
-			c.table.dumps[int(unwrapped_expr_type.clear_flag(.result).clear_flag(.atomic_f))] = type_cname
+			c.table.dumps[int(unwrapped_expr_type.clear_flags(.result, .atomic_f))] = type_cname
 			node.cname = type_cname
 			return node.expr_type
 		}
