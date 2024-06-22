@@ -301,13 +301,15 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 			if key_str != '' {
 				var_type = g.comptime.type_map[key_str] or { var_type }
 			}
+			g.assign_ct_type = var_type
 			if val is ast.ComptimeSelector {
 				key_str_right := g.comptime.get_comptime_selector_key_type(val)
 				if key_str_right != '' {
 					val_type = g.comptime.type_map[key_str_right] or { var_type }
 				}
+			} else if val is ast.CallExpr {
+				g.assign_ct_type = g.comptime.comptime_for_field_type
 			}
-			g.assign_ct_type = var_type
 		} else if mut left is ast.IndexExpr && val is ast.ComptimeSelector {
 			key_str := g.comptime.get_comptime_selector_key_type(val)
 			if key_str != '' {
@@ -520,7 +522,9 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 					g.expr(left)
 					g.write(' ${extracted_op} ')
 					g.expr(val)
-					g.write(';')
+					if !g.inside_for_c_stmt {
+						g.write(';')
+					}
 					return
 				} else {
 					g.write(' = ${styp}_${util.replace_op(extracted_op)}(')
