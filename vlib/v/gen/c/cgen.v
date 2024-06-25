@@ -2186,6 +2186,9 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 			// }
 			old_is_void_expr_stmt := g.is_void_expr_stmt
 			g.is_void_expr_stmt = !node.is_expr
+			if node.expr.is_auto_deref_var() {
+				g.write('*')
+			}
 			if node.typ != ast.void_type && g.expected_cast_type != 0
 				&& node.expr !in [ast.IfExpr, ast.MatchExpr] {
 				g.expr_with_cast(node.expr, node.typ, g.expected_cast_type)
@@ -4928,7 +4931,14 @@ fn (mut g Gen) ident(node ast.Ident) {
 								if node.obj.is_inherited {
 									g.write(closure_ctx + '->')
 								}
-								g.write(name)
+								if node.obj.typ.nr_muls() > 1 {
+									g.write('(')
+									g.write('*'.repeat(node.obj.typ.nr_muls() - 1))
+									g.write(name)
+									g.write(')')
+								} else {
+									g.write(name)
+								}
 								if node.obj.orig_type.is_ptr() {
 									is_ptr = true
 								}

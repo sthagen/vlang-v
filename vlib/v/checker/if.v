@@ -324,7 +324,7 @@ fn (mut c Checker) if_expr(mut node ast.IfExpr) ast.Type {
 			}
 			if !c.skip_flags {
 				if node_is_expr {
-					c.stmts_ending_with_expression(mut branch.stmts)
+					c.stmts_ending_with_expression(mut branch.stmts, c.expected_or_type)
 				} else {
 					c.stmts(mut branch.stmts)
 					c.check_non_expr_branch_last_stmt(branch.stmts)
@@ -341,7 +341,7 @@ fn (mut c Checker) if_expr(mut node ast.IfExpr) ast.Type {
 					node.branches[i].stmts = []
 				}
 				if node_is_expr {
-					c.stmts_ending_with_expression(mut branch.stmts)
+					c.stmts_ending_with_expression(mut branch.stmts, c.expected_or_type)
 				} else {
 					c.stmts(mut branch.stmts)
 					c.check_non_expr_branch_last_stmt(branch.stmts)
@@ -364,7 +364,7 @@ fn (mut c Checker) if_expr(mut node ast.IfExpr) ast.Type {
 			// smartcast sumtypes and interfaces when using `is`
 			c.smartcast_if_conds(mut branch.cond, mut branch.scope)
 			if node_is_expr {
-				c.stmts_ending_with_expression(mut branch.stmts)
+				c.stmts_ending_with_expression(mut branch.stmts, c.expected_or_type)
 			} else {
 				c.stmts(mut branch.stmts)
 				c.check_non_expr_branch_last_stmt(branch.stmts)
@@ -420,7 +420,11 @@ fn (mut c Checker) if_expr(mut node ast.IfExpr) ast.Type {
 						if node.typ == ast.void_type {
 							// first branch of if expression
 							node.is_expr = true
-							node.typ = stmt.typ
+							if stmt.expr.is_auto_deref_var() {
+								node.typ = stmt.typ.deref()
+							} else {
+								node.typ = stmt.typ
+							}
 							continue
 						} else if node.typ in [ast.float_literal_type, ast.int_literal_type] {
 							if node.typ == ast.int_literal_type {
