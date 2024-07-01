@@ -218,10 +218,11 @@ mut:
 	// where an aggregate (at least two types) is generated
 	// sum type deref needs to know which index to deref because unions take care of the correct field
 	aggregate_type_idx  int
-	arg_no_auto_deref   bool   // smartcast must not be dereferenced
-	branch_parent_pos   int    // used in BranchStmt (continue/break) for autofree stop position
-	returned_var_name   string // to detect that a var doesn't need to be freed since it's being returned
-	infix_left_var_name string // a && if expr
+	arg_no_auto_deref   bool     // smartcast must not be dereferenced
+	branch_parent_pos   int      // used in BranchStmt (continue/break) for autofree stop position
+	returned_var_name   string   // to detect that a var doesn't need to be freed since it's being returned
+	infix_left_var_name string   // a && if expr
+	curr_var_name       []string // curr var name on assignment
 	called_fn_name      string
 	timers              &util.Timers = util.get_timers()
 	force_main_console  bool // true when [console] used on fn main()
@@ -4166,6 +4167,9 @@ fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 	mut count := 1
 	outer: for _, obj in scope_vars {
 		if obj.name !in vars {
+			if obj.name in g.curr_var_name {
+				continue
+			}
 			if obj is ast.Var && g.check_var_scope(obj, node.pos.pos) {
 				keys.write_string('_SLIT("${obj.name}")')
 				var_typ := if obj.ct_type_var != .no_comptime {
@@ -4291,7 +4295,7 @@ fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 fn (mut g Gen) enum_decl(node ast.EnumDecl) {
 	enum_name := util.no_dots(node.name)
 	is_flag := node.is_flag
-	if g.pref.ccompiler == 'msvc' {
+	if g.is_cc_msvc {
 		mut last_value := '0'
 		enum_typ_name := g.table.get_type_name(node.typ)
 		g.enum_typedefs.writeln('')
@@ -6274,6 +6278,8 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 			default_initializer := g.type_default(field.typ)
 			if default_initializer == '{0}' && should_init {
 				def_builder.write_string(' = {0}')
+			} else if default_initializer == '{EMPTY_STRUCT_INITIALIZATION}' && should_init {
+				init = '\tmemcpy(${field.name}, (${styp}){${g.type_default(field.typ)}}, sizeof(${styp})); // global'
 			} else {
 				if field.name !in ['as_cast_type_indexes', 'g_memory_block', 'global_allocator'] {
 					init = '\t${field.name} = *(${styp}*)&((${styp}[]){${g.type_default(field.typ)}}[0]); // global'
@@ -7157,7 +7163,13 @@ fn (mut g Gen) type_default(typ_ ast.Type) string {
 		.string {
 			return '(string){.str=(byteptr)"", .is_lit=1}'
 		}
-		.interface_, .sum_type, .array_fixed, .multi_return, .thread {
+		.array_fixed {
+			if sym.is_empty_struct_array() {
+				return '{EMPTY_STRUCT_INITIALIZATION}'
+			}
+			return '{0}'
+		}
+		.interface_, .sum_type, .multi_return, .thread {
 			return '{0}'
 		}
 		.alias {
