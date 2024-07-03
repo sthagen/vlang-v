@@ -129,6 +129,20 @@ fn (mut c Checker) check_types(got ast.Type, expected ast.Type) bool {
 			return true
 		}
 	}
+
+	if (exp_idx == ast.nil_type_idx && got_idx == ast.string_type_idx)
+		|| (got_idx == ast.nil_type_idx && exp_idx == ast.string_type_idx) {
+		got_sym := c.table.sym(got)
+		exp_sym := c.table.sym(expected)
+
+		if expected.is_ptr() || got.is_ptr() {
+			return true
+		}
+		if got_sym.language != .c || exp_sym.language != .c {
+			return false
+		}
+	}
+
 	// allow direct int-literal assignment for pointers for now
 	// maybe in the future options should be used for that
 	if expected.is_any_kind_of_pointer() {
@@ -599,7 +613,8 @@ fn (mut c Checker) check_shift(mut node ast.InfixExpr, left_type_ ast.Type, righ
 	return left_type
 }
 
-fn (mut c Checker) promote_keeping_aliases(left_type ast.Type, right_type ast.Type, left_kind ast.Kind, right_kind ast.Kind) ast.Type {
+fn (mut c Checker) promote_keeping_aliases(left_type ast.Type, right_type ast.Type, left_kind ast.Kind,
+	right_kind ast.Kind) ast.Type {
 	if left_type == right_type && left_kind == .alias && right_kind == .alias {
 		return left_type
 	}
