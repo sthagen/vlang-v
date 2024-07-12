@@ -36,7 +36,6 @@ fn main() {
 }
 
 fn rain(mut app App) {
-	// Create the drawing context
 	app.ctx = gg.new_context(
 		bg_color: gx.rgb(0, 0, 0)
 		width: app.screen_size.width
@@ -59,7 +58,7 @@ fn rain(mut app App) {
 			if event.typ == .key_up && event.key_code == .up {
 				app.delay = app.delay + 50 * time.millisecond
 			}
-			if event.typ == .key_down && event.key_code == .down {
+			if event.typ == .key_up && event.key_code == .down {
 				new_delay := app.delay - 50 * time.millisecond
 				app.delay = if new_delay > 0 { new_delay } else { 0 }
 			}
@@ -84,6 +83,9 @@ fn frame(mut app App) {
 		update_rain_column(mut rc, app.cols, app.rows)
 		draw_rain_column(rc, app)
 	}
+	app.ctx.draw_text(app.screen_size.width / 2 - 190, app.screen_size.height - 15, 'press `f` to toggle fullscreen, Up/Down arrows to change speed',
+		color: gx.gray
+	)
 	app.ctx.end()
 	vprintln('frame: ${app.ctx.frame} | app.cols: ${app.cols} | app.rows: ${app.rows} | app.rain_columns.len: ${app.rain_columns.len} | app.delay: ${app.delay}')
 	time.sleep(app.delay)
@@ -148,6 +150,8 @@ fn draw_rain_column(rc RainColumn, app App) {
 			}
 			if i < rc.drops.len {
 				app.ctx.draw_text(x, y, rc.drops[i].ascii_str(), cfg)
+				app.ctx.draw_text(x, y, rc.drops[(i + 10) % rc.drops.len].ascii_str(),
+					cfg)
 			} else {
 				vprintln('BAD i: ${i} | rc.drops.len: ${rc.drops.len}')
 			}
