@@ -13,21 +13,26 @@ import v.util.version
 
 struct Repl {
 mut:
-	readline    readline.Readline
-	indent      int    // indentation level
-	in_func     bool   // inside a new custom user function
-	in_struct   bool   // inside a new custom user struct
-	line        string // the current line entered by the user
-	is_pin      bool   // does the repl 'pin' entered source code
-	folder      string // the folder in which the repl will write its temporary source files
-	last_output string // the last repl output
+	readline     readline.Readline
+	indent       int    // indentation level
+	in_func      bool   // inside function decl
+	in_struct    bool   // inside struct decl
+	in_enum      bool   // inside enum decl
+	in_interface bool   // inside interface decl
+	line         string // the current line entered by the user
+	is_pin       bool   // does the repl 'pin' entered source code
+	folder       string // the folder in which the repl will write its temporary source files
+	last_output  string // the last repl output
 	//
 	modules         []string // all the import modules
 	alias           map[string]string // all the alias used in the import
 	includes        []string // all the #include statements
 	functions       []string // all the user function declarations
 	functions_name  []string // all the user function names
-	structs         []string // all the structs definitions
+	structs         []string // all the struct definitions
+	enums           []string // all the enum definitions
+	consts          []string // all the const definitions
+	interfaces      []string // all the interface definitions
 	lines           []string // all the other lines/statements
 	temp_lines      []string // all the temporary expressions/printlns
 	vstartup_lines  []string // lines in the `VSTARTUP` file
@@ -132,6 +137,8 @@ fn (mut r Repl) checks() bool {
 			if r.indent == 0 {
 				r.in_func = false
 				r.in_struct = false
+				r.in_enum = false
+				r.in_interface = false
 			}
 		}
 	}
@@ -196,8 +203,11 @@ fn (r &Repl) current_source_code(should_add_temp_lines bool, not_add_print bool)
 		all_lines << lines
 	}
 	all_lines << r.includes
-	all_lines << r.functions
+	all_lines << r.enums
+	all_lines << r.consts
 	all_lines << r.structs
+	all_lines << r.interfaces
+	all_lines << r.functions
 	all_lines << r.lines
 
 	if should_add_temp_lines {
@@ -334,6 +344,14 @@ fn run_repl(workdir string, vrepl_prefix string) int {
 		cleanup_files(temp_file)
 	}
 	mut r := new_repl(workdir)
+	mut pub_fn_or_fn_regex := regex.regex_opt(r'^(pub\s+)?fn\s') or { panic(err) }
+	mut pub_const_or_const_regex := regex.regex_opt(r'^(pub\s+)?const\s') or { panic(err) }
+	mut pub_struct_or_struct_regex := regex.regex_opt(r'^(pub\s+)?struct\s') or { panic(err) }
+	mut pub_enum_or_enum_regex := regex.regex_opt(r'^(pub\s+)?enum\s') or { panic(err) }
+	mut pub_interface_or_interface_regex := regex.regex_opt(r'^(pub\s+)?interface\s') or {
+		panic(err)
+	}
+
 	for {
 		if r.indent == 0 {
 			prompt = '>>> '
@@ -370,25 +388,49 @@ fn run_repl(workdir string, vrepl_prefix string) int {
 			r.in_func = true
 			r.functions_name << r.line.all_before(':= fn(').trim_space()
 		}
-		mut fn_re := regex.regex_opt(r'^(pub\s+)?fn\s') or { panic(err) }
-		start_fn, _ := fn_re.match_string(r.line)
-		if start_fn >= 0 {
+
+		start_fn, _ := pub_fn_or_fn_regex.match_string(r.line)
+		starts_with_fn := start_fn >= 0
+		if starts_with_fn {
 			r.in_func = true
 			r.functions_name << r.line.all_after('fn').all_before('(').trim_space()
 		}
-		mut struct_re := regex.regex_opt(r'^(pub\s+)?struct\s') or { panic(err) }
-		start_struct, _ := struct_re.match_string(r.line)
-		if start_struct >= 0 {
+		was_func := r.in_func
+
+		start_struct, _ := pub_struct_or_struct_regex.match_string(r.line)
+		starts_with_struct := start_struct >= 0
+		if starts_with_struct {
 			r.in_struct = true
 		}
-		was_func := r.in_func
 		was_struct := r.in_struct
+
+		start_enum, _ := pub_enum_or_enum_regex.match_string(r.line)
+		starts_with_enum := start_enum >= 0
+		if starts_with_enum {
+			r.in_enum = true
+		}
+		was_enum := r.in_enum
+
+		start_interface, _ := pub_interface_or_interface_regex.match_string(r.line)
+		starts_with_interface := start_interface >= 0
+		if starts_with_interface {
+			r.in_interface = true
+		}
+		was_interface := r.in_interface
+
+		start_const, _ := pub_const_or_const_regex.match_string(r.line)
+		starts_with_const := start_const >= 0
+
 		if r.checks() {
 			for rline in r.line.split('\n') {
 				if r.in_func || was_func {
 					r.functions << rline
 				} else if r.in_struct || was_struct {
 					r.structs << rline
+				} else if r.in_enum || was_enum {
+					r.enums << rline
+				} else if r.in_interface || was_interface {
+					r.interfaces << rline
 				} else {
 					r.temp_lines << rline
 				}
@@ -501,7 +543,8 @@ fn run_repl(workdir string, vrepl_prefix string) int {
 				}
 			} else if temp_line.starts_with('#include ') {
 				temp_source_code = '${temp_line}\n' + r.current_source_code(false, false)
-			} else if temp_line.starts_with('fn ') {
+			} else if starts_with_fn || starts_with_const || starts_with_enum || starts_with_struct
+				|| starts_with_interface {
 				temp_source_code = r.current_source_code(false, false)
 			} else {
 				temp_source_code = r.current_source_code(true, false) + '\n${temp_line}\n'
@@ -515,8 +558,16 @@ fn run_repl(workdir string, vrepl_prefix string) int {
 					r.parse_import(r.line)
 				} else if r.line.starts_with('#include ') {
 					r.includes << r.line
-				} else if r.line.starts_with('fn ') {
+				} else if starts_with_fn {
 					r.functions << r.line
+				} else if starts_with_const {
+					r.consts << r.line
+				} else if starts_with_enum {
+					r.enums << r.line
+				} else if starts_with_struct {
+					r.structs << r.line
+				} else if starts_with_interface {
+					r.interfaces << r.line
 				} else {
 					r.lines << r.line
 				}
