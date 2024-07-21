@@ -324,6 +324,7 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) (str
 		inner_loop: unsafe { &ast.empty_stmt }
 		field_data_type: ast.Type(table.find_type_idx('FieldData'))
 		enum_data_type: ast.Type(table.find_type_idx('EnumData'))
+		variant_data_type: ast.Type(table.find_type_idx('VariantData'))
 		is_cc_msvc: pref_.ccompiler == 'msvc'
 		use_segfault_handler: !('no_segfault_handler' in pref_.compile_defines
 			|| pref_.os in [.wasm32, .wasm32_emscripten])
@@ -4756,7 +4757,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 		g.write(util.no_dots(node.name[2..]))
 		return
 	}
-	mut name := c_name(node.name)
+	mut name := if node.kind == .function { c_fn_name(node.name) } else { c_name(node.name) }
 	if node.kind == .constant {
 		if g.pref.translated && !g.is_builtin_mod
 			&& !util.module_is_builtin(node.name.all_before_last('.')) {
