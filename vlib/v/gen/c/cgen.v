@@ -561,6 +561,14 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) (str
 	}
 	b.writeln('\n// V includes:')
 	b.write_string(g.includes.str())
+	b.writeln('\n// V global/const #define ... :')
+	for var_name in g.sorted_global_const_names {
+		if var := g.global_const_defs[var_name] {
+			if var.def.starts_with('#define') {
+				b.writeln(var.def)
+			}
+		}
+	}
 	b.writeln('\n// Enum definitions:')
 	b.write_string(g.enum_typedefs.str())
 	b.writeln('\n// Thread definitions:')
@@ -579,10 +587,12 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) (str
 	b.write_string(g.json_forward_decls.str())
 	b.writeln('\n// V definitions:')
 	b.write_string(g.definitions.str())
-	b.writeln('\n// V global/const definitions:')
+	b.writeln('\n// V global/const non-precomputed definitions:')
 	for var_name in g.sorted_global_const_names {
 		if var := g.global_const_defs[var_name] {
-			b.writeln(var.def)
+			if !var.def.starts_with('#define') {
+				b.writeln(var.def)
+			}
 		}
 	}
 	interface_table := g.interface_table()
@@ -1151,7 +1161,7 @@ fn (mut g Gen) option_type_name(t ast.Type) (string, string) {
 	} else {
 		styp = '${c.option_name}_${base}'
 	}
-	if t.is_ptr() {
+	if t.is_ptr() || t.has_flag(.generic) {
 		styp = styp.replace('*', '_ptr')
 	}
 	return styp, base
@@ -1173,7 +1183,7 @@ fn (mut g Gen) result_type_name(t ast.Type) (string, string) {
 	} else {
 		styp = '${c.result_name}_${base}'
 	}
-	if t.is_ptr() {
+	if t.is_ptr() || t.has_flag(.generic) {
 		styp = styp.replace('*', '_ptr')
 	}
 	return styp, base
