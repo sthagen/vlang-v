@@ -333,6 +333,7 @@ pub:
 	comments         []Comment
 	i                int
 	has_default_expr bool
+	has_prev_newline bool
 	attrs            []Attr
 	is_pub           bool
 	default_val      string
@@ -503,7 +504,7 @@ pub enum StructInitKind {
 pub struct Import {
 pub:
 	source_name string // The original name in the source, `import abc.def` -> 'abc.def', *no matter* how the module is resolved
-	//
+
 	mod       string // the module name of the import
 	alias     string // the `x` in `import xxx as x`
 	pos       token.Pos
