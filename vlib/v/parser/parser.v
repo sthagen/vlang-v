@@ -501,6 +501,26 @@ fn (p &Parser) is_fn_type_decl() bool {
 	return true
 }
 
+fn (p &Parser) has_prev_newline() bool {
+	mut tok := p.tok
+	mut prev_tok := p.prev_tok
+	mut idx := -1
+
+	for {
+		if tok.line_nr - prev_tok.line_nr - prev_tok.lit.count('\n') > 1 {
+			return true
+		}
+		if prev_tok.kind == .comment {
+			idx--
+			tok = prev_tok
+			prev_tok = p.peek_token(idx)
+			continue
+		}
+		break
+	}
+	return false
+}
+
 fn (p &Parser) is_array_type() bool {
 	mut i := 1
 	mut tok := p.tok
@@ -884,16 +904,16 @@ pub:
 }
 
 fn (mut p Parser) eat_comments(cfg EatCommentsConfig) []ast.Comment {
-	mut line := p.prev_tok.line_nr
+	mut line := p.prev_tok.line_nr + p.prev_tok.lit.count('\n')
 	mut comments := []ast.Comment{}
 	for {
 		if p.tok.kind != .comment || (cfg.same_line && p.tok.line_nr > line)
-			|| (cfg.follow_up && (p.tok.line_nr > line + 1 || p.tok.lit.contains('\n'))) {
+			|| (cfg.follow_up && p.tok.line_nr > line + 1) {
 			break
 		}
 		comments << p.comment()
 		if cfg.follow_up {
-			line = p.prev_tok.line_nr
+			line = p.prev_tok.line_nr + p.prev_tok.lit.count('\n')
 		}
 	}
 	return comments
@@ -4102,8 +4122,9 @@ fn (mut p Parser) enum_decl() ast.EnumDecl {
 	mut uses_exprs := false
 	mut enum_attrs := map[string][]ast.Attr{}
 	for p.tok.kind != .eof && p.tok.kind != .rcbr {
+		pre_comments := p.eat_comments()
 		pos := p.tok.pos()
-		has_prev_newline := p.tok.line_nr - p.prev_tok.line_nr - p.prev_tok.lit.count('\n') > 1
+		has_prev_newline := p.has_prev_newline()
 		val := p.check_name()
 		vals << val
 		mut expr := ast.empty_expr
@@ -4123,7 +4144,7 @@ fn (mut p Parser) enum_decl() ast.EnumDecl {
 			p.attrs = []
 		}
 		comments := p.eat_comments(same_line: true)
-		next_comments := p.eat_comments()
+		next_comments := p.eat_comments(follow_up: true)
 		fields << ast.EnumField{
 			name:             val
 			source_name:      source_name(val)
@@ -4131,6 +4152,7 @@ fn (mut p Parser) enum_decl() ast.EnumDecl {
 			expr:             expr
 			has_expr:         has_expr
 			has_prev_newline: has_prev_newline
+			pre_comments:     pre_comments
 			comments:         comments
 			next_comments:    next_comments
 			attrs:            attrs
