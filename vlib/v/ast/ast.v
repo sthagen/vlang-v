@@ -1025,6 +1025,7 @@ pub mut:
 	mod            string
 	name           string
 	full_name      string
+	cached_name    string
 	kind           IdentKind
 	info           IdentInfo
 	is_mut         bool // if mut *token* is before name. Use `is_mut()` to lookup mut variable
@@ -1276,6 +1277,7 @@ pub:
 	is_range   bool
 	pos        token.Pos
 	kv_pos     token.Pos
+	vv_pos     token.Pos
 	comments   []Comment
 	val_is_mut bool // `for mut val in vals {` means that modifying `val` will modify the array
 	// and the array cannot be indexed inside the loop
@@ -1874,6 +1876,7 @@ pub mut:
 	func       &AnonFn = unsafe { nil }
 	is_checked bool
 	typ        Type
+	call_ctx   &CallExpr = unsafe { nil }
 }
 
 pub struct Likely {
