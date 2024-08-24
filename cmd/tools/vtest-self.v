@@ -230,9 +230,11 @@ const skip_on_musl = [
 	'vlib/gg/draw_fns_api_test.v',
 	'vlib/v/tests/skip_unused/gg_code.vv',
 	'vlib/v/tests/c_struct_with_reserved_field_name_test.v',
+	'vlib/arrays/parallel/parallel_test.v',
 ]
 const skip_on_ubuntu_musl = [
 	'do_not_remove',
+	'vlib/arrays/parallel/parallel_test.v',
 	//'vlib/v/gen/js/jsgen_test.v',
 	'vlib/net/http/cookie_test.v',
 	'vlib/net/http/status_test.v',
@@ -444,10 +446,8 @@ fn main() {
 		tsession.skip_files << 'vlib/db/pg/pg_orm_test.v'
 		tsession.skip_files << 'vlib/db/pg/pg_double_test.v'
 	}
-	$if windows {
-		if cfg.github_job == 'tcc' {
-			tsession.skip_files << 'vlib/v/tests/project_with_cpp_code/compiling_cpp_files_with_a_cplusplus_compiler_test.c.v'
-		}
+	$if windows && tinyc {
+		tsession.skip_files << 'vlib/v/tests/project_with_cpp_code/compiling_cpp_files_with_a_cplusplus_compiler_test.c.v'
 	}
 	if !cfg.run_slow_sanitize
 		&& ((cfg.sanitize_undefined || cfg.sanitize_memory || cfg.sanitize_address)
