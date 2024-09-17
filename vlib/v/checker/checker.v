@@ -146,9 +146,9 @@ pub fn new_checker(table &ast.Table, pref_ &pref.Preferences) &Checker {
 		timers_should_print = true
 	}
 	mut checker := &Checker{
-		table:  table
-		pref:   pref_
-		timers: util.new_timers(
+		table:                         table
+		pref:                          pref_
+		timers:                        util.new_timers(
 			should_print: timers_should_print
 			label:        'checker'
 		)
@@ -3088,6 +3088,9 @@ pub fn (mut c Checker) expr(mut node ast.Expr) ast.Type {
 				&& c.table.cur_fn.generic_names.len == 0 {
 				c.error('unexpected generic variable in non-generic function `${c.table.cur_fn.name}`',
 					node.pos)
+			} else if node.stmt != ast.empty_stmt && node.typ == ast.void_type {
+				c.stmt(mut node.stmt)
+				node.typ = c.table.find_type_idx((node.stmt as ast.StructDecl).name)
 			}
 			return node.typ
 		}

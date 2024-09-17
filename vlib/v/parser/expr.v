@@ -462,7 +462,7 @@ fn (mut p Parser) check_expr(precedence int) !ast.Expr {
 							kind:  or_kind
 							pos:   or_pos
 						}
-						scope: p.scope
+						scope:    p.scope
 					}
 				}
 				return node
@@ -478,9 +478,19 @@ fn (mut p Parser) check_expr(precedence int) !ast.Expr {
 		}
 		else {
 			if p.tok.kind == .key_struct && p.peek_tok.kind == .lcbr {
-				// Anonymous struct
-				p.next()
-				return p.struct_init('', .anon, false)
+				if p.expecting_type && p.inside_call_args {
+					// Anonymous struct	for json.decode
+					tok_pos := p.tok.pos()
+					return ast.TypeNode{
+						stmt: p.struct_decl(true)
+						pos:  tok_pos
+						typ:  ast.void_type
+					}
+				} else {
+					// Anonymous struct
+					p.next()
+					return p.struct_init('', .anon, false)
+				}
 			}
 			if p.tok.kind != .eof && !(p.tok.kind == .rsbr && p.inside_asm) {
 				// eof should be handled where it happens
