@@ -74,7 +74,7 @@ fn (mut c Checker) match_expr(mut node ast.MatchExpr) ast.Type {
 				}
 				stmt.typ = expr_type
 				if first_iteration {
-					if node.expected_type.has_flag(.option) || node.expected_type.has_flag(.result)
+					if node.expected_type.has_option_or_result()
 						|| c.table.type_kind(node.expected_type) in [.sum_type, .multi_return] {
 						c.check_match_branch_last_stmt(stmt, node.expected_type, expr_type)
 						ret_type = node.expected_type
@@ -100,8 +100,7 @@ fn (mut c Checker) match_expr(mut node ast.MatchExpr) ast.Type {
 					}
 				} else {
 					if ret_type.idx() != expr_type.idx() {
-						if (node.expected_type.has_flag(.option)
-							|| node.expected_type.has_flag(.result))
+						if node.expected_type.has_option_or_result()
 							&& c.table.sym(stmt.typ).kind == .struct_
 							&& c.type_implements(stmt.typ, ast.error_type, node.pos) {
 							stmt.expr = ast.CastExpr{
@@ -275,6 +274,9 @@ fn (mut c Checker) check_match_branch_last_stmt(last_stmt ast.ExprStmt, ret_type
 			}
 			c.error('return type mismatch, it should be `${ret_sym.name}`', last_stmt.pos)
 		}
+	} else if expr_type == ast.void_type && ret_type.idx() == ast.void_type_idx
+		&& ret_type.has_option_or_result() {
+		c.error('`${last_stmt.expr}` used as value', last_stmt.pos)
 	}
 }
 
