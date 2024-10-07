@@ -4067,7 +4067,7 @@ Only one `Option` or `Result` is allowed to be returned from a function. It is
 possible to return multiple values and still signal an error.
 
 ```v
-fn multireturn(v int) !(int, int) {
+fn multi_return(v int) !(int, int) {
 	if v < 0 {
 		return error('must be positive')
 	}
@@ -6707,16 +6707,16 @@ struct Node {
 }
 
 // Reference fields must be initialized unless an initial value is declared.
-// Zero (0) is OK but use with caution, it's a nil pointer.
+// Nil is OK but use with caution, it's a nil pointer.
 foo := Node{
-	a: 0
+	a: unsafe { nil }
 }
 bar := Node{
 	a: &foo
 }
 baz := Node{
-	a: 0
-	b: 0
+	a: unsafe { nil }
+	b: unsafe { nil }
 }
 qux := Node{
 	a: &foo
