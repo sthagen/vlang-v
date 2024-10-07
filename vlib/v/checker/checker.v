@@ -1051,7 +1051,7 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 		}
 		mut inferred_type := interface_type
 		if generic_info.is_generic {
-			inferred_type = c.resolve_generic_interface(typ, generic_type, pos)
+			inferred_type = c.unwrap_generic_interface(typ, generic_type, pos)
 			if inferred_type == 0 {
 				return false
 			}
@@ -2739,18 +2739,18 @@ fn (mut c Checker) unwrap_generic(typ ast.Type) ast.Type {
 	if typ.has_flag(.generic) {
 		if c.inside_generic_struct_init {
 			generic_names := c.cur_struct_generic_types.map(c.table.sym(it).name)
-			if t_typ := c.table.resolve_generic_to_concrete(typ, generic_names, c.cur_struct_concrete_types) {
+			if t_typ := c.table.convert_generic_type(typ, generic_names, c.cur_struct_concrete_types) {
 				return t_typ
 			}
 		}
 		if c.table.cur_fn != unsafe { nil } {
-			if t_typ := c.table.resolve_generic_to_concrete(typ, c.table.cur_fn.generic_names,
+			if t_typ := c.table.convert_generic_type(typ, c.table.cur_fn.generic_names,
 				c.table.cur_concrete_types)
 			{
 				return t_typ
 			}
 			if c.inside_lambda && c.table.cur_lambda.call_ctx != unsafe { nil } {
-				if t_typ := c.table.resolve_generic_to_concrete(typ, c.table.cur_lambda.func.decl.generic_names,
+				if t_typ := c.table.convert_generic_type(typ, c.table.cur_lambda.func.decl.generic_names,
 					c.table.cur_lambda.call_ctx.concrete_types)
 				{
 					return t_typ
@@ -3326,7 +3326,7 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 				c.mark_as_referenced(mut &node.expr, true)
 			}
 			if to_sym.info.is_generic {
-				inferred_type := c.resolve_generic_interface(from_type, to_type, node.pos)
+				inferred_type := c.unwrap_generic_interface(from_type, to_type, node.pos)
 				if inferred_type != 0 {
 					to_type = inferred_type
 					to_sym = c.table.sym(to_type)
@@ -3713,11 +3713,11 @@ struct ACFieldMethod {
 	typ  string
 }
 
-fn (mut c Checker) resolve_var_fn(func ast.Fn, mut node ast.Ident, name string) ast.Type {
+fn (mut c Checker) resolve_var_fn(func &ast.Fn, mut node ast.Ident, name string) ast.Type {
 	mut fn_type := ast.new_type(c.table.find_or_register_fn_type(func, false, true))
 	if func.generic_names.len > 0 {
 		concrete_types := node.concrete_types.map(c.unwrap_generic(it))
-		if typ_ := c.table.resolve_generic_to_concrete(fn_type, func.generic_names, concrete_types) {
+		if typ_ := c.table.convert_generic_type(fn_type, func.generic_names, concrete_types) {
 			fn_type = typ_
 			if concrete_types.all(!it.has_flag(.generic)) {
 				c.table.register_fn_concrete_types(func.fkey(), concrete_types)
@@ -4988,7 +4988,7 @@ fn (mut c Checker) fetch_field_name(field ast.StructField) string {
 	return name
 }
 
-fn (mut c Checker) ensure_generic_type_specify_type_names(typ ast.Type, pos token.Pos) bool {
+fn (mut c Checker) ensure_generic_type_specify_type_names(typ ast.Type, pos token.Pos, is_container bool) bool {
 	if typ == 0 {
 		c.error('unknown type', pos)
 		return false
@@ -5014,39 +5014,47 @@ fn (mut c Checker) ensure_generic_type_specify_type_names(typ ast.Type, pos toke
 	match sym.kind {
 		.function {
 			fn_info := sym.info as ast.FnType
-			if !c.ensure_generic_type_specify_type_names(fn_info.func.return_type, fn_info.func.return_type_pos) {
+			if !c.ensure_generic_type_specify_type_names(fn_info.func.return_type, fn_info.func.return_type_pos,
+				is_container) {
 				return false
 			}
 			for param in fn_info.func.params {
-				if !c.ensure_generic_type_specify_type_names(param.typ, param.type_pos) {
+				if !c.ensure_generic_type_specify_type_names(param.typ, param.type_pos,
+					is_container) {
 					return false
 				}
+			}
+			if fn_info.func.generic_names.len > 0 && !typ.has_flag(.generic) {
+				c.error('`${sym.name}` type is generic fn type, must specify the generic type names, e.g. ${sym.name}[T], ${sym.name}[int]',
+					pos)
+				return false
 			}
 		}
 		.array {
 			if !c.ensure_generic_type_specify_type_names((sym.info as ast.Array).elem_type,
-				pos) {
+				pos, true) {
 				return false
 			}
 		}
 		.array_fixed {
 			if !c.ensure_generic_type_specify_type_names((sym.info as ast.ArrayFixed).elem_type,
-				pos) {
+				pos, true) {
 				return false
 			}
 		}
 		.map {
 			info := sym.info as ast.Map
-			if !c.ensure_generic_type_specify_type_names(info.key_type, pos) {
+			if !c.ensure_generic_type_specify_type_names(info.key_type, pos, true) {
 				return false
 			}
-			if !c.ensure_generic_type_specify_type_names(info.value_type, pos) {
+			if !c.ensure_generic_type_specify_type_names(info.value_type, pos, true) {
 				return false
 			}
 		}
 		.sum_type {
 			info := sym.info as ast.SumType
-			if info.generic_types.len > 0 && !typ.has_flag(.generic) && info.concrete_types.len == 0 {
+			if info.generic_types.len > 0 && (is_container || !typ.has_flag(.generic))
+				&& info.concrete_types.len == 0 {
 				c.error('`${sym.name}` type is generic sumtype, must specify the generic type names, e.g. ${sym.name}[T], ${sym.name}[int]',
 					pos)
 				return false
@@ -5065,6 +5073,12 @@ fn (mut c Checker) ensure_generic_type_specify_type_names(typ ast.Type, pos toke
 			if info.generic_types.len > 0 && !typ.has_flag(.generic) && info.concrete_types.len == 0 {
 				c.error('`${sym.name}` type is generic interface, must specify the generic type names, e.g. ${sym.name}[T], ${sym.name}[int]',
 					pos)
+				return false
+			}
+		}
+		.alias {
+			info := sym.info as ast.Alias
+			if !c.ensure_generic_type_specify_type_names(info.parent_type, pos, is_container) {
 				return false
 			}
 		}

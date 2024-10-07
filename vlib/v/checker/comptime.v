@@ -326,6 +326,11 @@ fn (mut c Checker) comptime_for(mut node ast.ComptimeFor) {
 			c.pop_comptime_info()
 		}
 	} else if node.kind == .params {
+		if !(sym.kind == .function || sym.name == 'FunctionData') {
+			c.error('iterating over `.params` is supported only for functions, and `${sym.name}` is not a function',
+				node.typ_pos)
+			return
+		}
 		c.push_new_comptime_info()
 		c.comptime.inside_comptime_for = true
 		c.comptime.comptime_for_method_param_var = node.val_var
@@ -592,7 +597,7 @@ fn (mut c Checker) eval_comptime_const_expr(expr ast.Expr, nlevel int) ?ast.Comp
 	return none
 }
 
-fn (mut c Checker) verify_vweb_params_for_method(node ast.Fn) (bool, int, int) {
+fn (mut c Checker) verify_vweb_params_for_method(node &ast.Fn) (bool, int, int) {
 	margs := node.params.len - 1 // first arg is the receiver/this
 	// if node.attrs.len == 0 || (node.attrs.len == 1 && node.attrs[0].name == 'post') {
 	if node.attrs.len == 0 {

@@ -928,7 +928,7 @@ fn (g Checker) get_generic_array_fixed_element_type(array ast.ArrayFixed) ast.Ty
 	return typ
 }
 
-fn (mut c Checker) infer_fn_generic_types(func ast.Fn, mut node ast.CallExpr) {
+fn (mut c Checker) infer_fn_generic_types(func &ast.Fn, mut node ast.CallExpr) {
 	mut inferred_types := []ast.Type{}
 	mut arg_inferred := []int{}
 	for gi, gt_name in func.generic_names {
@@ -1092,7 +1092,7 @@ fn (mut c Checker) infer_fn_generic_types(func ast.Fn, mut node ast.CallExpr) {
 							}
 							// resolve lambda with generic return type
 							if arg.expr is ast.LambdaExpr && typ.has_flag(.generic) {
-								typ = c.comptime.resolve_generic_expr(arg.expr.expr, typ)
+								typ = c.comptime.unwrap_generic_expr(arg.expr.expr, typ)
 								if typ.has_flag(.generic) {
 									lambda_ret_gt_name := c.table.type_to_str(typ)
 									idx := func.generic_names.index(lambda_ret_gt_name)
