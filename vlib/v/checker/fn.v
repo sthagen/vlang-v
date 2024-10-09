@@ -13,7 +13,7 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 			eprintln('>>> post processing node.name: ${node.name:-30} | ${node.generic_names} <=> ${c.table.cur_concrete_types}')
 		}
 	}
-	// record the vweb route methods (public non-generic methods):
+	// record the veb route methods (public non-generic methods):
 	if node.generic_names.len > 0 && node.is_pub {
 		typ_vweb_result := c.table.find_type_idx('veb.Result')
 		if node.return_type == typ_vweb_result {
@@ -540,6 +540,23 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 				}
 				break
 			}
+		}
+	}
+	if node.is_expand_simple_interpolation {
+		match true {
+			!node.is_method {
+				c.error('@[expand_simple_interpolation] is supported only on methods',
+					node.pos)
+			}
+			node.params.len != 2 {
+				c.error('methods tagged with @[expand_simple_interpolation], should have exactly 1 argument',
+					node.pos)
+			}
+			!node.params[1].typ.is_string() {
+				c.error('methods tagged with @[expand_simple_interpolation], should accept a single string',
+					node.pos)
+			}
+			else {}
 		}
 	}
 }
@@ -1194,6 +1211,7 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 	}
 	node.is_file_translated = func.is_file_translated
 	node.is_noreturn = func.is_noreturn
+	node.is_expand_simple_interpolation = func.is_expand_simple_interpolation
 	node.is_ctor_new = func.is_ctor_new
 	if !found_in_args {
 		if node.scope.known_var(fn_name) {
@@ -2325,6 +2343,7 @@ fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 		c.need_recheck_generic_fns = true
 	}
 	node.is_noreturn = method.is_noreturn
+	node.is_expand_simple_interpolation = method.is_expand_simple_interpolation
 	node.is_ctor_new = method.is_ctor_new
 	node.return_type = method.return_type
 	if method.return_type.has_flag(.generic) {
