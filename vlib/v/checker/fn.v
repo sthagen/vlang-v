@@ -15,13 +15,14 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 	}
 	// record the vweb route methods (public non-generic methods):
 	if node.generic_names.len > 0 && node.is_pub {
-		typ_vweb_result := c.table.find_type_idx('vweb.Result')
+		typ_vweb_result := c.table.find_type_idx('veb.Result')
 		if node.return_type == typ_vweb_result {
 			rec_sym := c.table.sym(node.receiver.typ)
 			if rec_sym.kind == .struct_ {
 				if _ := c.table.find_field_with_embeds(rec_sym, 'Context') {
-					// there is no point in the message here, for methods that are not public; since they will not be available as routes anyway
-					c.note('generic method routes of vweb will be skipped', node.pos)
+					// there is no point in the message here, for methods
+					// that are not public; since they will not be available as routes anyway
+					c.note('generic method routes of veb will be skipped', node.pos)
 				}
 			}
 		}
@@ -133,6 +134,15 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 				if gs.info.is_generic && !node.return_type.has_flag(.generic) {
 					c.error('return generic struct `${gs.name}` in fn declaration must specify the generic type names, e.g. ${gs.name}[T]',
 						node.return_type_pos)
+				}
+			}
+			if gs.kind == .struct_ && c.needs_unwrap_generic_type(node.return_type) {
+				// resolve generic Array[T], Map[T] generics, avoid recursive generic resolving type
+				if c.ensure_generic_type_specify_type_names(node.return_type, node.return_type_pos,
+					false, false)
+				{
+					c.table.unwrap_generic_type_ex(node.return_type, c.table.cur_fn.generic_names,
+						c.table.cur_concrete_types, true)
 				}
 			}
 		}

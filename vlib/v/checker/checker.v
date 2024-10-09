@@ -22,7 +22,7 @@ const type_level_cutoff_limit = 40 // it is very rarely deeper than 4
 const iface_level_cutoff_limit = 100
 const generic_fn_cutoff_limit_per_fn = 10_000 // how many times post_process_generic_fns, can visit the same function before bailing out
 
-const generic_fn_postprocess_iterations_cutoff_limit = 1000_000
+const generic_fn_postprocess_iterations_cutoff_limit = 1_000_000
 
 // array_builtin_methods contains a list of all methods on array, that return other typed arrays,
 // i.e. that act as *pseudogeneric* methods, that need compiler support, so that the types of the results
@@ -4707,12 +4707,12 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 		&& typ_sym.kind == .map && node.or_expr.stmts.len == 0 {
 		elem_type := c.table.value_type(typ)
 		if elem_type.is_any_kind_of_pointer() {
-			c.note('accessing a pointer map value requires an `or {}` block outside `unsafe`',
+			c.warn('accessing a pointer map value requires an `or {}` block outside `unsafe`',
 				node.pos)
 		}
 		mut checked_types := []ast.Type{}
 		if c.is_contains_any_kind_of_pointer(elem_type, mut checked_types) {
-			c.note('accessing map value that contain pointers requires an `or {}` block outside `unsafe`',
+			c.warn('accessing map value that contain pointers requires an `or {}` block outside `unsafe`',
 				node.pos)
 		}
 	}
@@ -4738,7 +4738,7 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 		} else if is_mut_struct {
 			c.error('type `mut ${typ_sym.name}` does not support slicing', node.pos)
 		} else if !c.inside_unsafe && !is_ok && !c.pref.translated && !c.file.is_translated {
-			c.warn('pointer indexing is only allowed in `unsafe` blocks', node.pos)
+			c.error('pointer indexing is only allowed in `unsafe` blocks', node.pos)
 		}
 	}
 	if mut node.index is ast.RangeExpr { // [1..2]
@@ -4988,7 +4988,7 @@ fn (mut c Checker) fetch_field_name(field ast.StructField) string {
 	return name
 }
 
-fn (mut c Checker) ensure_generic_type_specify_type_names(typ ast.Type, pos token.Pos, is_container bool) bool {
+fn (mut c Checker) ensure_generic_type_specify_type_names(typ ast.Type, pos token.Pos, is_container_typ bool, is_generic_container bool) bool {
 	if typ == 0 {
 		c.error('unknown type', pos)
 		return false
@@ -5015,12 +5015,12 @@ fn (mut c Checker) ensure_generic_type_specify_type_names(typ ast.Type, pos toke
 		.function {
 			fn_info := sym.info as ast.FnType
 			if !c.ensure_generic_type_specify_type_names(fn_info.func.return_type, fn_info.func.return_type_pos,
-				is_container) {
+				is_container_typ, is_generic_container) {
 				return false
 			}
 			for param in fn_info.func.params {
 				if !c.ensure_generic_type_specify_type_names(param.typ, param.type_pos,
-					is_container) {
+					is_container_typ, is_generic_container) {
 					return false
 				}
 			}
@@ -5032,29 +5032,29 @@ fn (mut c Checker) ensure_generic_type_specify_type_names(typ ast.Type, pos toke
 		}
 		.array {
 			if !c.ensure_generic_type_specify_type_names((sym.info as ast.Array).elem_type,
-				pos, true) {
+				pos, true, typ.has_flag(.generic)) {
 				return false
 			}
 		}
 		.array_fixed {
 			if !c.ensure_generic_type_specify_type_names((sym.info as ast.ArrayFixed).elem_type,
-				pos, true) {
+				pos, true, typ.has_flag(.generic)) {
 				return false
 			}
 		}
 		.map {
 			info := sym.info as ast.Map
-			if !c.ensure_generic_type_specify_type_names(info.key_type, pos, true) {
+			if !c.ensure_generic_type_specify_type_names(info.key_type, pos, true, typ.has_flag(.generic)) {
 				return false
 			}
-			if !c.ensure_generic_type_specify_type_names(info.value_type, pos, true) {
+			if !c.ensure_generic_type_specify_type_names(info.value_type, pos, true, typ.has_flag(.generic)) {
 				return false
 			}
 		}
 		.sum_type {
 			info := sym.info as ast.SumType
-			if info.generic_types.len > 0 && (is_container || !typ.has_flag(.generic))
-				&& info.concrete_types.len == 0 {
+			if info.generic_types.len > 0 && ((is_container_typ && !is_generic_container)
+				|| !typ.has_flag(.generic)) && info.concrete_types.len == 0 {
 				c.error('`${sym.name}` type is generic sumtype, must specify the generic type names, e.g. ${sym.name}[T], ${sym.name}[int]',
 					pos)
 				return false
@@ -5078,7 +5078,8 @@ fn (mut c Checker) ensure_generic_type_specify_type_names(typ ast.Type, pos toke
 		}
 		.alias {
 			info := sym.info as ast.Alias
-			if !c.ensure_generic_type_specify_type_names(info.parent_type, pos, is_container) {
+			if !c.ensure_generic_type_specify_type_names(info.parent_type, pos, is_container_typ,
+				is_generic_container) {
 				return false
 			}
 		}
