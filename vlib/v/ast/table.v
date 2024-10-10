@@ -1108,7 +1108,7 @@ pub fn (mut t Table) find_or_register_promise(return_type Type) int {
 
 	promise_type := TypeSymbol{
 		parent_idx: t.type_idxs['Promise']
-		kind:       .struct_
+		kind:       .struct
 		name:       name
 		cname:      cname
 		info:       Struct{
@@ -1386,13 +1386,13 @@ pub fn (t &Table) is_sumtype_or_in_variant(parent Type, typ Type) bool {
 
 @[inline]
 pub fn (t &Table) is_interface_var(var ScopeObject) bool {
-	return var is Var && var.orig_type != 0 && t.sym(var.orig_type).kind == .interface_
-		&& t.sym(var.smartcasts.last()).kind != .interface_
+	return var is Var && var.orig_type != 0 && t.sym(var.orig_type).kind == .interface
+		&& t.sym(var.smartcasts.last()).kind != .interface
 }
 
 @[inline]
 pub fn (t &Table) is_interface_smartcast(var ScopeObject) bool {
-	return var is Var && var.orig_type != 0 && t.sym(var.orig_type).kind == .interface_
+	return var is Var && var.orig_type != 0 && t.sym(var.orig_type).kind == .interface
 		&& var.smartcasts.len > 0
 }
 
@@ -1433,7 +1433,7 @@ pub fn (mut t Table) complete_interface_check() {
 		util.timing_measure(@METHOD)
 	}
 	for tk, mut tsym in t.type_symbols {
-		if tsym.kind != .struct_ {
+		if tsym.kind != .struct {
 			continue
 		}
 		for _, mut idecl in t.interfaces {
@@ -1510,7 +1510,7 @@ pub fn (t Table) does_type_implement_interface(typ Type, inter_typ Type) bool {
 		}
 	}
 	mut inter_sym := t.sym(inter_typ)
-	if sym.kind == .interface_ && inter_sym.kind == .interface_ {
+	if sym.kind == .interface && inter_sym.kind == .interface {
 		return false
 	}
 	if mut inter_sym.info is Interface {
@@ -1954,7 +1954,7 @@ pub fn (mut t Table) unwrap_generic_type_ex(typ Type, generic_names []string, co
 					if fields[i].typ.has_flag(.generic) {
 						orig_type := fields[i].typ
 						sym := t.sym(fields[i].typ)
-						if sym.kind == .struct_ && fields[i].typ.idx() != typ.idx() {
+						if sym.kind == .struct && fields[i].typ.idx() != typ.idx() {
 							fields[i].typ = t.unwrap_generic_type(fields[i].typ, t_generic_names,
 								t_concrete_types)
 						} else {
@@ -2026,7 +2026,7 @@ pub fn (mut t Table) unwrap_generic_type_ex(typ Type, generic_names []string, co
 			info.parent_type = typ.set_flag(.generic)
 			info.fields = fields
 			new_idx := t.register_sym(
-				kind:   .struct_
+				kind:   .struct
 				name:   nrt
 				cname:  util.no_dots(c_nrt)
 				mod:    ts.mod
@@ -2043,7 +2043,7 @@ pub fn (mut t Table) unwrap_generic_type_ex(typ Type, generic_names []string, co
 			for i in 0 .. variants.len {
 				if variants[i].has_flag(.generic) {
 					sym := t.sym(variants[i])
-					if sym.kind in [.struct_, .sum_type, .interface_] {
+					if sym.kind in [.struct, .sum_type, .interface] {
 						variants[i] = t.unwrap_generic_type(variants[i], generic_names,
 							concrete_types)
 					} else {
@@ -2106,7 +2106,7 @@ pub fn (mut t Table) unwrap_generic_type_ex(typ Type, generic_names []string, co
 			info.fields = fields
 			info.methods = imethods
 			new_idx := t.register_sym(
-				kind:   .interface_
+				kind:   .interface
 				name:   nrt
 				cname:  util.no_dots(c_nrt)
 				mod:    ts.mod
@@ -2266,7 +2266,7 @@ pub fn (mut t Table) generic_insts_to_concrete() {
 						for i in 0 .. variants.len {
 							if variants[i].has_flag(.generic) {
 								t_sym := t.sym(variants[i])
-								if t_sym.kind == .struct_ && variants[i].idx() != info.parent_idx {
+								if t_sym.kind == .struct && variants[i].idx() != info.parent_idx {
 									variants[i] = t.unwrap_generic_type(variants[i], generic_names,
 										info.concrete_types)
 								} else {

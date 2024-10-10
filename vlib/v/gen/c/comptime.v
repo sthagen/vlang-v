@@ -10,7 +10,7 @@ import v.pref
 import v.comptime
 
 fn (mut g Gen) comptime_selector(node ast.ComptimeSelector) {
-	is_interface_field := g.table.sym(node.left_type).kind == .interface_
+	is_interface_field := g.table.sym(node.left_type).kind == .interface
 	if is_interface_field {
 		g.write('*(')
 	}
@@ -553,7 +553,7 @@ fn (mut g Gen) comptime_if_cond(cond ast.Expr, pkg_exist bool) (bool, bool) {
 							got_type := g.unwrap_generic((cond.right as ast.TypeNode).typ)
 							got_sym := g.table.sym(got_type)
 
-							if got_sym.kind == .interface_ && got_sym.info is ast.Interface {
+							if got_sym.kind == .interface && got_sym.info is ast.Interface {
 								is_true := exp_type.has_flag(.option) == got_type.has_flag(.option)
 									&& g.table.does_type_implement_interface(exp_type, got_type)
 								if cond.op == .key_is {
@@ -820,7 +820,7 @@ fn (mut g Gen) comptime_for(node ast.ComptimeFor) {
 			// filter vweb route methods (non-generic method)
 			if method.receiver_type != 0 && method.return_type == typ_vweb_result {
 				rec_sym := g.table.sym(method.receiver_type)
-				if rec_sym.kind == .struct_ {
+				if rec_sym.kind == .struct {
 					if _ := g.table.find_field_with_embeds(rec_sym, 'Context') {
 						if method.generic_names.len > 0
 							|| (method.params.len > 1 && method.attrs.len == 0) {
@@ -889,7 +889,7 @@ fn (mut g Gen) comptime_for(node ast.ComptimeFor) {
 			g.pop_comptime_info()
 		}
 	} else if node.kind == .fields {
-		if sym.kind in [.struct_, .interface_] {
+		if sym.kind in [.struct, .interface] {
 			fields := match sym.info {
 				ast.Struct {
 					sym.info.fields
@@ -938,9 +938,9 @@ fn (mut g Gen) comptime_for(node ast.ComptimeFor) {
 				g.writeln('\t${node.val_var}.is_array = ${field_sym.kind in [.array, .array_fixed]};')
 				g.writeln('\t${node.val_var}.is_map = ${field_sym.kind == .map};')
 				g.writeln('\t${node.val_var}.is_chan = ${field_sym.kind == .chan};')
-				g.writeln('\t${node.val_var}.is_struct = ${field_sym.kind == .struct_};')
+				g.writeln('\t${node.val_var}.is_struct = ${field_sym.kind == .struct};')
 				g.writeln('\t${node.val_var}.is_alias = ${field_sym.kind == .alias};')
-				g.writeln('\t${node.val_var}.is_enum = ${field_sym.kind == .enum_};')
+				g.writeln('\t${node.val_var}.is_enum = ${field_sym.kind == .enum};')
 
 				g.writeln('\t${node.val_var}.indirections = ${field.typ.nr_muls()};')
 
@@ -953,7 +953,7 @@ fn (mut g Gen) comptime_for(node ast.ComptimeFor) {
 			g.pop_comptime_info()
 		}
 	} else if node.kind == .values {
-		if sym.kind == .enum_ {
+		if sym.kind == .enum {
 			if sym.info is ast.Enum {
 				if sym.info.vals.len > 0 {
 					g.writeln('\tEnumData ${node.val_var} = {0};')

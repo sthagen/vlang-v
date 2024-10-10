@@ -195,9 +195,9 @@ pub fn (mut ct ComptimeInfo) get_comptime_selector_bool_field(field_name string)
 		'is_array' { return field_sym.kind in [.array, .array_fixed] }
 		'is_map' { return field_sym.kind == .map }
 		'is_chan' { return field_sym.kind == .chan }
-		'is_struct' { return field_sym.kind == .struct_ }
+		'is_struct' { return field_sym.kind == .struct }
 		'is_alias' { return field_sym.kind == .alias }
-		'is_enum' { return field_sym.kind == .enum_ }
+		'is_enum' { return field_sym.kind == .enum }
 		else { return false }
 	}
 }
@@ -208,7 +208,7 @@ pub fn (mut ct ComptimeInfo) is_comptime_type(x ast.Type, y ast.ComptimeType) bo
 		.unknown {
 			return false
 		}
-		.map_ {
+		.map {
 			return x_kind == .map
 		}
 		.string {
@@ -221,11 +221,11 @@ pub fn (mut ct ComptimeInfo) is_comptime_type(x ast.Type, y ast.ComptimeType) bo
 		.float {
 			return x_kind in [.f32, .f64, .float_literal]
 		}
-		.struct_ {
-			return x_kind == .struct_
+		.struct {
+			return x_kind == .struct
 		}
 		.iface {
-			return x_kind == .interface_
+			return x_kind == .interface
 		}
 		.array {
 			return x_kind in [.array, .array_fixed]
@@ -239,8 +239,8 @@ pub fn (mut ct ComptimeInfo) is_comptime_type(x ast.Type, y ast.ComptimeType) bo
 		.sum_type {
 			return x_kind == .sum_type
 		}
-		.enum_ {
-			return x_kind == .enum_
+		.enum {
+			return x_kind == .enum
 		}
 		.alias {
 			return x_kind == .alias

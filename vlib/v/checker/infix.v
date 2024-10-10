@@ -104,7 +104,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	left_pos := node.left.pos()
 	right_pos := node.right.pos()
 	left_right_pos := left_pos.extend(right_pos)
-	if left_sym.kind == .none_ && right_sym.kind == .none_ {
+	if left_sym.kind == .none && right_sym.kind == .none {
 		c.invalid_operator_error(node.op, left_type, right_type, left_right_pos)
 	}
 	if left_sym.kind == .multi_return && right_sym.kind == .multi_return {
@@ -232,7 +232,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		.key_in, .not_in {
 			match right_final_sym.kind {
 				.array {
-					if left_sym.kind !in [.sum_type, .interface_] {
+					if left_sym.kind !in [.sum_type, .interface] {
 						elem_type := right_final_sym.array_info().elem_type
 						if node.left.is_auto_deref_var() {
 							left_type = left_type.deref()
@@ -270,7 +270,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					node.left_type = map_info.key_type
 				}
 				.array_fixed {
-					if left_sym.kind !in [.sum_type, .interface_] {
+					if left_sym.kind !in [.sum_type, .interface] {
 						elem_type := right_final_sym.array_fixed_info().elem_type
 						c.check_expected(left_type, elem_type) or {
 							c.error('left operand to `${node.op}` does not match the fixed array element type: ${err.msg()}',
@@ -307,13 +307,13 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			if mut right_sym.info is ast.Alias && (right_sym.info.language != .c
 				&& c.mod == c.table.type_to_str(unwrapped_right_type).split('.')[0]
 				&& (c.table.sym(right_sym.info.parent_type).is_primitive()
-				|| c.table.sym(right_sym.info.parent_type).kind == .enum_)) {
+				|| c.table.sym(right_sym.info.parent_type).kind == .enum)) {
 				right_sym = c.table.sym(right_sym.info.parent_type)
 			}
 			if mut left_sym.info is ast.Alias && (left_sym.info.language != .c
 				&& c.mod == c.table.type_to_str(unwrapped_left_type).split('.')[0]
 				&& (c.table.sym(left_sym.info.parent_type).is_primitive()
-				|| c.table.sym(left_sym.info.parent_type).kind == .enum_)) {
+				|| c.table.sym(left_sym.info.parent_type).kind == .enum)) {
 				left_sym = c.table.sym(left_sym.info.parent_type)
 			}
 
@@ -379,7 +379,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				c.error('infix `${node.op}` is not defined for pointer values', left_right_pos)
 			}
 
-			if !c.pref.translated && left_sym.kind in [.array, .array_fixed, .map, .struct_] {
+			if !c.pref.translated && left_sym.kind in [.array, .array_fixed, .map, .struct] {
 				if left_sym.has_method_with_generic_parent(node.op.str()) {
 					if method := left_sym.find_method_with_generic_parent(node.op.str()) {
 						return_type = method.return_type
@@ -397,7 +397,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 							left_right_pos)
 					}
 				}
-			} else if !c.pref.translated && right_sym.kind in [.array, .array_fixed, .map, .struct_] {
+			} else if !c.pref.translated && right_sym.kind in [.array, .array_fixed, .map, .struct] {
 				if right_sym.has_method_with_generic_parent(node.op.str()) {
 					if method := right_sym.find_method_with_generic_parent(node.op.str()) {
 						return_type = method.return_type
@@ -505,12 +505,11 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			right_sym = c.table.sym(unwrapped_right_type)
 			if left_sym.kind in [.array, .array_fixed] && right_sym.kind in [.array, .array_fixed] {
 				c.error('only `==` and `!=` are defined on arrays', node.pos)
-			} else if left_sym.kind == .struct_
+			} else if left_sym.kind == .struct
 				&& (left_sym.info as ast.Struct).generic_types.len > 0 {
 				node.promoted_type = ast.bool_type
 				return ast.bool_type
-			} else if left_sym.kind == .struct_ && right_sym.kind == .struct_
-				&& node.op in [.eq, .lt] {
+			} else if left_sym.kind == .struct && right_sym.kind == .struct && node.op in [.eq, .lt] {
 				if !(left_sym.has_method(node.op.str()) && right_sym.has_method(node.op.str())) {
 					left_name := c.table.type_to_str(unwrapped_left_type)
 					right_name := c.table.type_to_str(unwrapped_right_type)
@@ -527,7 +526,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					}
 				}
 			}
-			if left_sym.kind == .struct_ && right_sym.kind == .struct_ {
+			if left_sym.kind == .struct && right_sym.kind == .struct {
 				if !left_sym.has_method('<') && node.op in [.ge, .le] {
 					c.error('cannot use `${node.op}` as `<` operator method is not defined',
 						left_right_pos)
@@ -539,7 +538,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				// the below check works as expected
 				left_gen_type := c.unwrap_generic(left_type)
 				gen_sym := c.table.sym(left_gen_type)
-				need_overload := gen_sym.kind in [.struct_, .interface_]
+				need_overload := gen_sym.kind in [.struct, .interface]
 				if need_overload && !gen_sym.has_method_with_generic_parent('<')
 					&& node.op in [.ge, .le] {
 					c.error('cannot use `${node.op}` as `<` operator method is not defined',
@@ -610,12 +609,12 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					c.error('unwrapped Option cannot be used in an infix expression',
 						node.pos)
 				}
-				if left_value_sym.kind == .interface_ {
+				if left_value_sym.kind == .interface {
 					if right_final_sym.kind != .array {
 						// []Animal << Cat
 						if c.type_implements(right_type, left_value_type, right_pos) {
 							if !right_type.is_any_kind_of_pointer() && !c.inside_unsafe
-								&& right_sym.kind != .interface_ {
+								&& right_sym.kind != .interface {
 								c.mark_as_referenced(mut &node.right, true)
 							}
 						}
@@ -756,7 +755,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					if typ != ast.none_type_idx {
 						c.error('`${op}` can only be used to test for none in sql', node.pos)
 					}
-				} else if left_sym.kind !in [.interface_, .sum_type]
+				} else if left_sym.kind !in [.interface, .sum_type]
 					&& !c.comptime.is_comptime_var(node.left) {
 					c.error('`${op}` can only be used with interfaces and sum types',
 						node.pos) // can be used in sql too, but keep err simple
@@ -766,7 +765,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 							right_pos)
 					}
 				} else if left_sym.info is ast.Interface {
-					if typ_sym.kind != .interface_ && !c.type_implements(typ, left_type, right_pos) {
+					if typ_sym.kind != .interface && !c.type_implements(typ, left_type, right_pos) {
 						c.error("`${typ_sym.name}` doesn't implement interface `${left_sym.name}`",
 							right_pos)
 					}
@@ -842,7 +841,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		// TODO: broken !in
 		c.error('string types only have the following operators defined: `==`, `!=`, `<`, `>`, `<=`, `>=`, and `+`',
 			node.pos)
-	} else if left_sym.kind == .enum_ && right_sym.kind == .enum_ && !eq_ne {
+	} else if left_sym.kind == .enum && right_sym.kind == .enum && !eq_ne {
 		left_enum := left_sym.info as ast.Enum
 		right_enum := right_sym.info as ast.Enum
 		if left_enum.is_flag && right_enum.is_flag {
@@ -871,7 +870,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	if left_is_option || right_is_option {
 		opt_infix_pos := if left_is_option { left_pos } else { right_pos }
 		if (node.left !in [ast.Ident, ast.SelectorExpr, ast.ComptimeSelector]
-			|| node.op in [.eq, .ne, .lt, .gt, .le, .ge]) && right_sym.kind != .none_
+			|| node.op in [.eq, .ne, .lt, .gt, .le, .ge]) && right_sym.kind != .none
 			&& !c.inside_sql {
 			c.error('unwrapped Option cannot be used in an infix expression', opt_infix_pos)
 		}

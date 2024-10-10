@@ -41,7 +41,7 @@ fn (mut g JsGen) to_js_typ_val(t ast.Type) string {
 		.array {
 			styp = 'empty_array()'
 		}
-		.struct_ {
+		.struct {
 			styp = 'new ${g.js_name(sym.name)}(${g.to_js_typ_def_val(sym.name)})'
 		}
 		.voidptr {
@@ -168,7 +168,7 @@ pub fn (mut g JsGen) doc_typ(t ast.Type) string {
 		.bool {
 			styp = '${g.sym_to_js_typ(sym)}'
 		}
-		.none_ {
+		.none {
 			styp = 'undefined'
 		}
 		.string, .char {
@@ -197,7 +197,7 @@ pub fn (mut g JsGen) doc_typ(t ast.Type) string {
 			styp = 'any'
 		}
 		// ns.Foo => alias["Foo"]["prototype"]
-		.struct_ {
+		.struct {
 			styp = g.struct_typ(sym.name)
 		}
 		.generic_inst {}
@@ -217,7 +217,7 @@ pub fn (mut g JsGen) doc_typ(t ast.Type) string {
 			name := g.js_name(fsym.name)
 			styp += '${name}'
 		}
-		.enum_ {
+		.enum {
 			// Note: We could declare them as TypeScript enums but TS doesn't like
 			// our namespacing so these break if declared in a different module.
 			// Until this is fixed, We need to use the type of an enum's members
@@ -229,7 +229,7 @@ pub fn (mut g JsGen) doc_typ(t ast.Type) string {
 			info := sym.info as ast.FnType
 			styp = g.fn_typ(info.func.params, info.func.return_type)
 		}
-		.interface_ {
+		.interface {
 			styp = g.js_name(sym.name)
 		}
 		.rune {

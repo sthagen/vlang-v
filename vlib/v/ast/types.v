@@ -158,7 +158,9 @@ pub mut:
 @[minify]
 pub struct Struct {
 pub:
-	attrs []Attr
+	attrs    []Attr
+	scope    &Scope = unsafe { nil }
+	is_local bool
 pub mut:
 	embeds         []Type
 	fields         []StructField
@@ -761,7 +763,7 @@ pub fn (t &Table) type_kind(typ Type) Kind {
 }
 
 pub fn (t &Table) type_is_for_pointer_arithmetic(typ Type) bool {
-	if t.sym(typ).kind == .struct_ {
+	if t.sym(typ).kind == .struct {
 		return false
 	} else {
 		return typ.is_any_kind_of_pointer() || typ.is_int_valptr()
@@ -790,21 +792,21 @@ pub enum Kind {
 	char
 	rune
 	bool
-	none_
+	none
 	string
 	array
 	array_fixed
 	map
 	chan
 	any
-	struct_
+	struct
 	generic_inst
 	multi_return
 	sum_type
 	alias
-	enum_
+	enum
 	function
-	interface_
+	interface
 	float_literal
 	int_literal
 	aggregate
@@ -1032,7 +1034,7 @@ pub fn (mut t Table) register_builtin_type_symbols() {
 	t.register_sym(kind: .f64, name: 'f64', cname: 'f64', mod: 'builtin') // 17
 	t.register_sym(kind: .char, name: 'char', cname: 'char', mod: 'builtin') // 18
 	t.register_sym(kind: .bool, name: 'bool', cname: 'bool', mod: 'builtin') // 19
-	t.register_sym(kind: .none_, name: 'none', cname: 'none', mod: 'builtin') // 20
+	t.register_sym(kind: .none, name: 'none', cname: 'none', mod: 'builtin') // 20
 	t.register_sym(kind: .string, name: 'string', cname: 'string', mod: 'builtin') // 21
 	t.register_sym(kind: .rune, name: 'rune', cname: 'rune', mod: 'builtin') // 22
 	t.register_sym(kind: .array, name: 'array', cname: 'array', mod: 'builtin') // 23
@@ -1060,7 +1062,7 @@ pub fn (mut t Table) register_builtin_type_symbols() {
 			return_type: void_type
 		}
 	) // 29
-	t.register_sym(kind: .interface_, name: 'IError', cname: 'IError', mod: 'builtin') // 30
+	t.register_sym(kind: .interface, name: 'IError', cname: 'IError', mod: 'builtin') // 30
 	t.register_sym(kind: .voidptr, name: 'nil', cname: 'voidptr', mod: 'builtin') // 31
 }
 
@@ -1124,7 +1126,7 @@ pub fn (t &Table) type_size(typ Type) (int, int) {
 	mut size := 0
 	mut align := 0
 	match sym.kind {
-		.placeholder, .void, .none_, .generic_inst {}
+		.placeholder, .void, .none, .generic_inst {}
 		.voidptr, .byteptr, .charptr, .function, .usize, .isize, .any, .thread, .chan {
 			size = t.pointer_size
 			align = t.pointer_size
@@ -1137,7 +1139,7 @@ pub fn (t &Table) type_size(typ Type) (int, int) {
 			size = 2
 			align = 2
 		}
-		.i32, .u32, .rune, .f32, .enum_ {
+		.i32, .u32, .rune, .f32, .enum {
 			size = 4
 			align = 4
 		}
@@ -1162,7 +1164,7 @@ pub fn (t &Table) type_size(typ Type) (int, int) {
 		.alias {
 			size, align = t.type_size((sym.info as Alias).parent_type)
 		}
-		.struct_, .string, .multi_return {
+		.struct, .string, .multi_return {
 			mut max_alignment := 0
 			mut total_size := 0
 			types := if mut sym.info is Struct {
@@ -1180,7 +1182,7 @@ pub fn (t &Table) type_size(typ Type) (int, int) {
 			size = round_up(total_size, max_alignment)
 			align = max_alignment
 		}
-		.sum_type, .interface_, .aggregate {
+		.sum_type, .interface, .aggregate {
 			match mut sym.info {
 				SumType, Aggregate {
 					size = (sym.info.fields.len + 2) * t.pointer_size
@@ -1235,7 +1237,7 @@ pub fn (k Kind) str() string {
 		.voidptr { 'voidptr' }
 		.charptr { 'charptr' }
 		.byteptr { 'byteptr' }
-		.struct_ { 'struct' }
+		.struct { 'struct' }
 		.int { 'int' }
 		.i8 { 'i8' }
 		.i16 { 'i16' }
@@ -1254,7 +1256,7 @@ pub fn (k Kind) str() string {
 		.string { 'string' }
 		.char { 'char' }
 		.bool { 'bool' }
-		.none_ { 'none' }
+		.none { 'none' }
 		.array { 'array' }
 		.array_fixed { 'array_fixed' }
 		.map { 'map' }
@@ -1262,10 +1264,10 @@ pub fn (k Kind) str() string {
 		.multi_return { 'multi_return' }
 		.sum_type { 'sum_type' }
 		.alias { 'alias' }
-		.enum_ { 'enum' }
+		.enum { 'enum' }
 		.any { 'any' }
 		.function { 'function' }
-		.interface_ { 'interface' }
+		.interface { 'interface' }
 		.generic_inst { 'generic_inst' }
 		.rune { 'rune' }
 		.aggregate { 'aggregate' }
@@ -1363,7 +1365,7 @@ pub fn (t &Table) type_to_str_using_aliases(typ Type, import_aliases map[string]
 	match sym.kind {
 		.int_literal, .float_literal {}
 		.i8, .i16, .i32, .int, .i64, .isize, .u8, .u16, .u32, .u64, .usize, .f32, .f64, .char,
-		.rune, .string, .bool, .none_, .voidptr, .byteptr, .charptr {
+		.rune, .string, .bool, .none, .voidptr, .byteptr, .charptr {
 			// primitive types
 			res = sym.kind.str()
 		}
@@ -1444,7 +1446,7 @@ pub fn (t &Table) type_to_str_using_aliases(typ Type, import_aliases map[string]
 			}
 			res += ')'
 		}
-		.struct_, .interface_, .sum_type {
+		.struct, .interface, .sum_type {
 			if typ.has_flag(.generic) {
 				match sym.info {
 					Struct, Interface, SumType {
@@ -1498,7 +1500,7 @@ pub fn (t &Table) type_to_str_using_aliases(typ Type, import_aliases map[string]
 				res = 'thread ' + t.type_to_str_using_aliases(rtype, import_aliases)
 			}
 		}
-		.alias, .any, .placeholder, .enum_ {
+		.alias, .any, .placeholder, .enum {
 			res = t.shorten_user_defined_typenames(res, import_aliases)
 			/*
 			if res.ends_with('.byte') {
@@ -1704,7 +1706,7 @@ pub fn (t &TypeSymbol) find_method_with_generic_parent(name string) ?Fn {
 							mut method := x
 							generic_names := parent_sym.info.generic_types.map(table.sym(it).name)
 							return_sym := table.sym(method.return_type)
-							if return_sym.kind in [.struct_, .interface_, .sum_type] {
+							if return_sym.kind in [.struct, .interface, .sum_type] {
 								method.return_type = table.unwrap_generic_type(method.return_type,
 									generic_names, t.info.concrete_types)
 							} else {
@@ -1862,7 +1864,7 @@ pub fn (t &Table) find_missing_variants(s &SumType, field_name string) string {
 	mut res := []string{cap: 5}
 	for variant in s.variants {
 		ts := t.sym(variant)
-		if ts.kind != .struct_ {
+		if ts.kind != .struct {
 			continue
 		}
 		mut found := false

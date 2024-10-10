@@ -354,7 +354,7 @@ fn (mut p Parser) struct_decl(is_anon bool) ast.StructDecl {
 	}
 	is_minify := attrs.contains('minify')
 	mut sym := ast.TypeSymbol{
-		kind:     .struct_
+		kind:     .struct
 		language: language
 		name:     name
 		cname:    util.no_dots(name)
@@ -370,6 +370,8 @@ fn (mut p Parser) struct_decl(is_anon bool) ast.StructDecl {
 			generic_types: generic_types
 			attrs:         attrs
 			is_anon:       is_anon
+			is_local:      p.inside_fn
+			scope:         p.scope
 		}
 		is_pub:   is_pub
 	}
@@ -569,7 +571,7 @@ fn (mut p Parser) interface_decl() ast.InterfaceDecl {
 	// Declare the type
 	reg_idx := p.table.register_sym(
 		is_pub:   is_pub
-		kind:     .interface_
+		kind:     .interface
 		name:     interface_name
 		cname:    util.no_dots(interface_name)
 		mod:      p.mod

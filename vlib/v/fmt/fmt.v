@@ -789,13 +789,13 @@ pub fn (mut f Fmt) expr(node_ ast.Expr) {
 				.array { f.write('\$array') }
 				.array_dynamic { f.write('\$array_dynamic') }
 				.array_fixed { f.write('\$array_fixed') }
-				.struct_ { f.write('\$struct') }
+				.struct { f.write('\$struct') }
 				.iface { f.write('\$interface') }
-				.map_ { f.write('\$map') }
+				.map { f.write('\$map') }
 				.int { f.write('\$int') }
 				.float { f.write('\$float') }
 				.sum_type { f.write('\$sumtype') }
-				.enum_ { f.write('\$enum') }
+				.enum { f.write('\$enum') }
 				.alias { f.write('\$alias') }
 				.function { f.write('\$function') }
 				.option { f.write('\$option') }

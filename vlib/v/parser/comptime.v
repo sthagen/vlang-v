@@ -22,10 +22,10 @@ fn (mut p Parser) parse_comptime_type() ast.ComptimeType {
 	mut kind := ast.ComptimeTypeKind.unknown
 	kind = match name {
 		'map' {
-			.map_
+			.map
 		}
 		'struct' {
-			.struct_
+			.struct
 		}
 		'interface' {
 			.iface
@@ -52,7 +52,7 @@ fn (mut p Parser) parse_comptime_type() ast.ComptimeType {
 			.array_dynamic
 		}
 		'enum' {
-			.enum_
+			.enum
 		}
 		'sumtype' {
 			.sum_type

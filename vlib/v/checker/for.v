@@ -114,7 +114,7 @@ fn (mut c Checker) for_in_stmt(mut node ast.ForInStmt) {
 			c.error('string type is immutable, it cannot be changed', node.pos)
 			return
 		}
-		if sym.kind == .struct_ {
+		if sym.kind == .struct {
 			// iterators
 			next_fn := sym.find_method_with_generic_parent('next') or {
 				c.error('a struct must have a `next()` method to be an iterator', node.cond.pos())
@@ -287,7 +287,7 @@ fn (mut c Checker) for_stmt(mut node ast.ForStmt) {
 	if mut node.cond is ast.InfixExpr {
 		if node.cond.op == .key_is {
 			if node.cond.right is ast.TypeNode && node.cond.left in [ast.Ident, ast.SelectorExpr] {
-				if c.table.type_kind(node.cond.left_type) in [.sum_type, .interface_] {
+				if c.table.type_kind(node.cond.left_type) in [.sum_type, .interface] {
 					c.smartcast(mut node.cond.left, node.cond.left_type, node.cond.right_type, mut
 						node.scope, false)
 				}
