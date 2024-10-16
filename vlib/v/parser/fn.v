@@ -32,7 +32,7 @@ fn (mut p Parser) call_expr(language ast.Language, mod string) ast.CallExpr {
 		p.check_for_impure_v(language, first_pos)
 	}
 	mut or_kind := ast.OrKind.absent
-	if fn_name == 'json.decode' {
+	if fn_name == 'json.decode' || fn_name == 'C.va_arg' {
 		p.expecting_type = true // Makes name_expr() parse the type `User` in `json.decode(User, txt)`
 	}
 
@@ -635,9 +635,12 @@ run them via `v file.v` instead',
 		if language != .v && !(language == .js && type_sym.info is ast.Interface) {
 			p.error_with_pos('interop functions cannot have a body', body_start_pos)
 		}
+		last_fn_scope := p.scope
 		p.inside_fn = true
 		p.inside_unsafe_fn = is_unsafe
+		p.cur_fn_scope = p.scope
 		stmts = p.parse_block_no_scope(true)
+		p.cur_fn_scope = last_fn_scope
 		p.inside_unsafe_fn = false
 		p.inside_fn = false
 	}
