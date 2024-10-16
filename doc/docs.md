@@ -221,6 +221,7 @@ by using any of the following commands in a terminal:
 * [Appendices](#appendices)
     * [Keywords](#appendix-i-keywords)
     * [Operators](#appendix-ii-operators)
+    * [Other online resources](#other-online-resources)
 
 </td></tr>
 </table>
@@ -5379,10 +5380,11 @@ V has good support for profiling your programs: `v -profile profile.txt run file
 That will produce a profile.txt file, which you can then analyze.
 
 The generated profile.txt file will have lines with 4 columns:
-a) how many times a function was called
-b) how much time in total a function took (in ms)
-c) how much time on average, a call to a function took (in ns)
-d) the name of the v function
+
+1. How many times a function was called.
+2. How much time in total a function took (in ms).
+3. How much time on average, a call to a function took (in ns).
+4. The name of the v function.
 
 You can sort on column 3 (average time per function) using:
 `sort -n -k3 profile.txt|tail`
@@ -8068,3 +8070,39 @@ Assignment Operators
 >>=  <<=  >>>=
 &&= ||=
 ```
+
+## Other online resources
+
+### [V contributing guide](https://github.com/vlang/v/blob/master/CONTRIBUTING.md)
+
+V would be much less, than what it is today, without the help of all
+its contributors. If you like and want to help the V project succeed,
+please read that document, choose a task, and dive in!
+
+### [V language documentation](https://docs.vlang.io/introduction.html)
+The site has the same information as this document, but split to pages,
+for easier reading on mobile devices. Updated automatically on each
+commit to the main repository.
+
+### [V standard module documentation](https://modules.vlang.io/)
+The site has the documentation of all the modules in V's standard
+library (vlib). Updated automatically on each commit to the main
+repository.
+
+### [V online playground](https://play.vlang.io/)
+The site allows you to enter and edit small V programs, then compile
+and run them. Updated automatically on each commit to the main
+repository. Use it, to test your ideas, when you do not have access
+to a computer or an Android phone, where V has been already installed.
+
+### [Awesome V](https://github.com/vlang/awesome-v)
+When you make a cool new project or a library, you can submit it to that
+list too. You can also use the list, for ideas about new projects to do
+with V.
+
+### [The V language Discord](https://discord.gg/vlang)
+This is the place to be, to discuss the V language, learn about latest
+developments, quickly get help with issues, witness/participate in
+~~epic flame wars~~ constructive criticism exchanges and design decisions.
+Join it, and learn more about languages, games, editors, people, Klingons,
+Conway's law and the universe.
