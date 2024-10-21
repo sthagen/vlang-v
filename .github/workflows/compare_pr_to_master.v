@@ -12,7 +12,11 @@ fn gcommit() string {
 }
 
 fn r(cmd string) {
-	os.system(cmd)
+	res := os.system(cmd)
+	if res != 0 {
+		eprintln('> failed running: `${cmd}`')
+		exit(1)
+	}
 }
 
 fn xtime(cmd string) {
@@ -72,5 +76,6 @@ fn main() {
 	} else {
 		vcompare('./vold', './vnew')
 	}
+	r('rm -rf hw nv ov hw.exe nv.exe ov.exe hw.c nv.c ov.c')
 	println('Done.')
 }
