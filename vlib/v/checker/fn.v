@@ -3498,6 +3498,104 @@ fn (mut c Checker) fixed_array_builtin_method_call(mut node ast.CallExpr, left_t
 			c.error('`${left_sym.name}` has no method `wait()` (only thread handles and arrays of them have)',
 				node.left.pos())
 		}
+	} else if method_name == 'map' {
+		if node.args.len != 1 {
+			c.error('`.${method_name}` expected 1 argument, but got ${node.args.len}',
+				node.pos)
+			return ast.void_type
+		}
+		if mut node.args[0].expr is ast.LambdaExpr {
+			if node.args[0].expr.params.len != 1 {
+				c.error('lambda expressions used in the builtin array methods require exactly 1 parameter',
+					node.args[0].expr.pos)
+				return ast.void_type
+			}
+			c.lambda_expr_fix_type_of_param(mut node.args[0].expr, mut node.args[0].expr.params[0],
+				elem_typ)
+			le_type := c.expr(mut node.args[0].expr.expr)
+			c.support_lambda_expr_one_param(elem_typ, le_type, mut node.args[0].expr)
+		} else {
+			// position of `it` doesn't matter
+			scope_register_it(mut node.scope, node.pos, elem_typ)
+		}
+
+		c.check_map_and_filter(true, elem_typ, node)
+		arg_type := c.check_expr_option_or_result_call(node.args[0].expr, c.expr(mut node.args[0].expr))
+		arg_sym := c.table.sym(arg_type)
+		ret_type := match arg_sym.info {
+			ast.FnType {
+				if node.args[0].expr is ast.SelectorExpr {
+					arg_type
+				} else {
+					arg_sym.info.func.return_type
+				}
+			}
+			else {
+				arg_type
+			}
+		}
+		node.return_type = c.table.find_or_register_array_fixed(c.unwrap_generic(ret_type),
+			array_info.size, array_info.size_expr, false)
+		if node.return_type.has_flag(.shared_f) {
+			node.return_type = node.return_type.clear_flag(.shared_f).deref()
+		}
+		ret_sym := c.table.sym(ret_type)
+		if ret_sym.kind == .multi_return {
+			c.error('returning multiple values is not supported in .map() calls', node.pos)
+		}
+	} else if method_name in ['sort', 'sorted'] {
+		if method_name == 'sort' {
+			if node.left is ast.CallExpr {
+				c.error('the `sort()` method can be called only on mutable receivers, but `${node.left}` is a call expression',
+					node.pos)
+			}
+			c.check_for_mut_receiver(mut node.left)
+		}
+		// position of `a` and `b` doesn't matter, they're the same
+		scope_register_a_b(mut node.scope, node.pos, elem_typ)
+
+		if node.args.len > 1 {
+			c.error('expected 0 or 1 argument, but got ${node.args.len}', node.pos)
+		} else if node.args.len == 1 {
+			if mut node.args[0].expr is ast.LambdaExpr {
+				c.support_lambda_expr_in_sort(elem_typ.ref(), ast.bool_type, mut node.args[0].expr)
+			} else if node.args[0].expr is ast.InfixExpr {
+				c.check_sort_external_variable_access(node.args[0].expr)
+				if node.args[0].expr.op !in [.gt, .lt] {
+					c.error('`.${method_name}()` can only use `<` or `>` comparison',
+						node.pos)
+				}
+				left_name := '${node.args[0].expr.left}'[0]
+				right_name := '${node.args[0].expr.right}'[0]
+				if left_name !in [`a`, `b`] || right_name !in [`a`, `b`] {
+					c.error('`.${method_name}()` can only use `a` or `b` as argument, e.g. `arr.${method_name}(a < b)`',
+						node.pos)
+				} else if left_name == right_name {
+					c.error('`.${method_name}()` cannot use same argument', node.pos)
+				}
+				if node.args[0].expr.left !in [ast.Ident, ast.SelectorExpr, ast.IndexExpr]
+					|| node.args[0].expr.right !in [ast.Ident, ast.SelectorExpr, ast.IndexExpr] {
+					c.error('`.${method_name}()` can only use ident, index or selector as argument, \ne.g. `arr.${method_name}(a < b)`, `arr.${method_name}(a.id < b.id)`, `arr.${method_name}(a[0] < b[0])`',
+						node.pos)
+				}
+			} else {
+				c.error(
+					'`.${method_name}()` requires a `<` or `>` comparison as the first and only argument' +
+					'\ne.g. `users.${method_name}(a.id < b.id)`', node.pos)
+			}
+		} else if !(c.table.sym(elem_typ).has_method('<')
+			|| c.table.unalias_num_type(elem_typ) in [ast.int_type, ast.int_type.ref(), ast.string_type, ast.string_type.ref(), ast.i8_type, ast.i16_type, ast.i64_type, ast.u8_type, ast.rune_type, ast.u16_type, ast.u32_type, ast.u64_type, ast.f32_type, ast.f64_type, ast.char_type, ast.bool_type, ast.float_literal_type, ast.int_literal_type]) {
+			c.error('custom sorting condition must be supplied for type `${c.table.type_to_str(elem_typ)}`',
+				node.pos)
+		}
+		for mut arg in node.args {
+			c.check_expr_option_or_result_call(arg.expr, c.expr(mut arg.expr))
+		}
+		if method_name == 'sort' {
+			node.return_type = ast.void_type
+		} else {
+			node.return_type = node.left_type
+		}
 	}
 	return node.return_type
 }
