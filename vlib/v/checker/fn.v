@@ -600,6 +600,7 @@ fn (mut c Checker) anon_fn(mut node ast.AnonFn) ast.Type {
 	keep_fn := c.table.cur_fn
 	keep_inside_anon := c.inside_anon_fn
 	keep_anon_fn := c.cur_anon_fn
+	c.table.used_features.anon_fn = true
 	defer {
 		c.table.cur_fn = keep_fn
 		c.inside_anon_fn = keep_inside_anon
@@ -847,8 +848,8 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 	if node.is_static_method {
 		// resolve static call T.name()
 		if c.table.cur_fn != unsafe { nil } {
-			fn_name = c.table.convert_generic_static_type_name(fn_name, c.table.cur_fn.generic_names,
-				c.table.cur_concrete_types)
+			node.left_type, fn_name = c.table.convert_generic_static_type_name(fn_name,
+				c.table.cur_fn.generic_names, c.table.cur_concrete_types)
 		}
 	}
 	if fn_name == 'main' {
@@ -1095,6 +1096,7 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 						func = f
 						unsafe { c.table.fns[orig_name].usages++ }
 						node.name = orig_name
+						node.left_type = typ
 					}
 				}
 			}
@@ -1390,6 +1392,16 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 	// println / eprintln / panic can print anything
 	if node.args.len > 0 && fn_name in print_everything_fns {
 		c.builtin_args(mut node, fn_name, func)
+		if c.pref.skip_unused && !c.is_builtin_mod && node.args[0].expr !is ast.StringLiteral {
+			if !c.table.sym(c.unwrap_generic(node.args[0].typ)).has_method('str') {
+				c.table.used_features.auto_str = true
+				if node.args[0].typ.is_ptr() {
+					c.table.used_features.auto_str_ptr = true
+				}
+			} else {
+				c.table.used_features.print_types[node.args[0].typ.idx()] = true
+			}
+		}
 		return func.return_type
 	}
 	// `return error(err)` -> `return err`
@@ -1864,6 +1876,9 @@ fn (mut c Checker) is_generic_expr(node ast.Expr) bool {
 			if node.args.any(c.comptime.is_generic_param_var(it.expr)) {
 				return true
 			}
+			if node.is_static_method && node.left_type.has_flag(.generic) {
+				return true
+			}
 			// fn[T]() or generic_var.fn[T]()
 			node.concrete_types.any(it.has_flag(.generic))
 		}
@@ -2136,6 +2151,9 @@ fn (mut c Checker) method_call(mut node ast.CallExpr) ast.Type {
 	if left_type == ast.void_type {
 		// c.error('cannot call a method using an invalid expression', node.pos)
 		return ast.void_type
+	}
+	if c.pref.skip_unused && !c.is_builtin_mod && c.mod != 'strings' {
+		c.table.used_features.builtin_types = true
 	}
 	c.expected_type = left_type
 	mut is_generic := left_type.has_flag(.generic)
@@ -3295,6 +3313,7 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 				}
 			}
 		} else {
+			c.table.used_features.arr_prepend = true
 			if node.args.len != 1 {
 				c.error('`array.prepend()` should have 1 argument, e.g. `prepend(val)`',
 					node.pos)
@@ -3529,6 +3548,17 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 		}
 		node.return_type = ast.int_type
 	} else if method_name in ['first', 'last', 'pop'] {
+		if c.pref.skip_unused {
+			if method_name == 'first' {
+				c.table.used_features.arr_first = true
+			}
+			if method_name == 'last' {
+				c.table.used_features.arr_last = true
+			}
+			if method_name == 'pop' {
+				c.table.used_features.arr_pop = true
+			}
+		}
 		if node.args.len != 0 {
 			c.error('`.${method_name}()` does not have any arguments', node.args[0].pos)
 		}
@@ -3900,6 +3930,14 @@ fn (mut c Checker) resolve_return_type(node ast.CallExpr) ast.Type {
 		left_sym := c.table.sym(c.unwrap_generic(node.left_type))
 		if method := c.table.find_method(left_sym, node.name) {
 			return c.resolve_fn_return_type(method, node)
+		}
+	} else if node.is_static_method {
+		if c.table.cur_fn != unsafe { nil } {
+			_, name := c.table.convert_generic_static_type_name(node.name, c.table.cur_fn.generic_names,
+				c.table.cur_concrete_types)
+			if func := c.table.find_fn(name) {
+				return c.resolve_fn_return_type(func, node)
+			}
 		}
 	} else {
 		if func := c.table.find_fn(node.name) {

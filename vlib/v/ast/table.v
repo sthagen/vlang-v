@@ -8,6 +8,27 @@ import v.cflag
 import v.util
 
 @[heap; minify]
+pub struct UsedFeatures {
+pub mut:
+	interfaces       bool         // interface
+	dump             bool         // dump()
+	builtin_types    bool         // uses any builtin type
+	index            bool         // string[0]
+	range_index      bool         // string[0..1]
+	cast_ptr         bool         // &u8(...)
+	as_cast          bool         // expr as Type
+	anon_fn          bool         // fn () { }
+	auto_str         bool         // auto str fns
+	auto_str_ptr     bool         // auto str fns for ptr type
+	arr_prepend      bool         // arr.prepend()
+	arr_first        bool         // arr.first()
+	arr_last         bool         // arr.last()
+	arr_pop          bool         // arr.pop()
+	option_or_result bool         // has panic call
+	print_types      map[int]bool // print() idx types
+}
+
+@[heap; minify]
 pub struct Table {
 mut:
 	parsing_type string // name of the type to enable recursive type parsing
@@ -30,6 +51,7 @@ pub mut:
 	used_fns           map[string]bool // filled in by the checker, when pref.skip_unused = true;
 	used_consts        map[string]bool // filled in by the checker, when pref.skip_unused = true;
 	used_globals       map[string]bool // filled in by the checker, when pref.skip_unused = true;
+	used_features      UsedFeatures    // filled in by the checker, when pref.skip_unused = true;
 	used_veb_types     []Type          // veb context types, filled in by checker, when pref.skip_unused = true;
 	veb_res_idx_cache  int             // Cache of `veb.Result` type
 	veb_ctx_idx_cache  int             // Cache of `veb.Context` type
@@ -1611,7 +1633,7 @@ pub fn (t &Table) does_type_implement_interface(typ Type, inter_typ Type) bool {
 	return false
 }
 
-pub fn (mut t Table) convert_generic_static_type_name(fn_name string, generic_names []string, concrete_types []Type) string {
+pub fn (mut t Table) convert_generic_static_type_name(fn_name string, generic_names []string, concrete_types []Type) (Type, string) {
 	if index := fn_name.index('__static__') {
 		if index > 0 {
 			generic_name := fn_name[0..index]
@@ -1620,12 +1642,12 @@ pub fn (mut t Table) convert_generic_static_type_name(fn_name string, generic_na
 			if valid_generic {
 				name_type := t.find_type(generic_name).set_flag(.generic)
 				if typ := t.convert_generic_type(name_type, generic_names, concrete_types) {
-					return '${t.type_to_str(typ)}${fn_name[index..]}'
+					return name_type, '${t.type_to_str(typ)}${fn_name[index..]}'
 				}
 			}
 		}
 	}
-	return fn_name
+	return void_type, fn_name
 }
 
 // convert_generic_type convert generics to real types (T => int) or other generics type.

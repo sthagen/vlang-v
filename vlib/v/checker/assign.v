@@ -307,6 +307,7 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 		for left is ast.ParExpr {
 			left = (left as ast.ParExpr).expr
 		}
+		is_assign := node.op in [.assign, .decl_assign]
 		match mut left {
 			ast.Ident {
 				if (is_decl || left.kind == .blank_ident) && left_type.is_ptr()
@@ -326,7 +327,7 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 					}
 					left_type = right_type
 					node.left_types[i] = right_type
-					if node.op !in [.assign, .decl_assign] {
+					if !is_assign {
 						c.error('cannot modify blank `_` identifier', left.pos)
 					}
 				} else if left.info !is ast.IdentVar {
@@ -413,14 +414,23 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 									if left.obj.ct_type_var in [.generic_var, .no_comptime]
 										&& c.table.cur_fn != unsafe { nil }
 										&& c.table.cur_fn.generic_names.len != 0
-										&& !right.comptime_ret_val
-										&& right.return_type_generic.has_flag(.generic)
-										&& c.is_generic_expr(right) {
+										&& !right.comptime_ret_val && c.is_generic_expr(right) {
 										// mark variable as generic var because its type changes according to fn return generic resolution type
 										left.obj.ct_type_var = .generic_var
-										fn_ret_type := c.resolve_return_type(right)
-										if fn_ret_type != ast.void_type
-											&& c.table.final_sym(fn_ret_type).kind != .multi_return {
+										if right.return_type_generic.has_flag(.generic) {
+											fn_ret_type := c.resolve_return_type(right)
+											if fn_ret_type != ast.void_type
+												&& c.table.final_sym(fn_ret_type).kind != .multi_return {
+												var_type := if right.or_block.kind == .absent {
+													fn_ret_type
+												} else {
+													fn_ret_type.clear_option_and_result()
+												}
+												c.comptime.type_map['g.${left.name}.${left.obj.pos.pos}'] = var_type
+											}
+										} else if right.is_static_method
+											&& right.left_type.has_flag(.generic) {
+											fn_ret_type := c.unwrap_generic(c.resolve_return_type(right))
 											var_type := if right.or_block.kind == .absent {
 												fn_ret_type
 											} else {
@@ -601,18 +611,8 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 				}
 			}
 		}
-		if left_sym.kind == .array_fixed && !c.inside_unsafe && node.op in [.assign, .decl_assign]
-			&& right_sym.kind == .array_fixed && left is ast.Ident && !left.is_blank_ident()
-			&& right is ast.Ident {
-			if right_sym.info is ast.ArrayFixed {
-				if right_sym.info.elem_type.is_ptr() {
-					c.error('assignment from one fixed array to another with a pointer element type is prohibited outside of `unsafe`',
-						node.pos)
-				}
-			}
-		}
-		if left_sym.kind == .map && node.op in [.assign, .decl_assign] && right_sym.kind == .map
-			&& !left.is_blank_ident() && right.is_lvalue() && right !is ast.ComptimeSelector
+		if left_sym.kind == .map && is_assign && right_sym.kind == .map && !left.is_blank_ident()
+			&& right.is_lvalue() && right !is ast.ComptimeSelector
 			&& (!right_type.is_ptr() || (right is ast.Ident && right.is_auto_deref_var())) {
 			// Do not allow `a = b`
 			c.error('cannot copy map: call `move` or `clone` method (or use a reference)',
@@ -626,6 +626,16 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 			} else if (!right_sym.info.is_anon && return_sym.kind == .any)
 				|| (return_sym.info is ast.Struct && return_sym.info.is_generic) {
 				c.error('cannot assign `${right}` as a generic function variable', right.pos())
+			}
+		}
+		if left_sym.kind == .array_fixed && !c.inside_unsafe && is_assign
+			&& right_sym.kind == .array_fixed && left is ast.Ident && !left.is_blank_ident()
+			&& right is ast.Ident {
+			if right_sym.info is ast.ArrayFixed {
+				if right_sym.info.elem_type.is_ptr() {
+					c.error('assignment from one fixed array to another with a pointer element type is prohibited outside of `unsafe`',
+						node.pos)
+				}
 			}
 		}
 		if left_type.is_any_kind_of_pointer() && !left.is_auto_deref_var() {
