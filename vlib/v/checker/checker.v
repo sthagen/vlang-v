@@ -289,7 +289,13 @@ pub fn (mut c Checker) check_scope_vars(sc &ast.Scope) {
 				ast.Var {
 					if !obj.is_used && obj.name[0] != `_` {
 						if !c.pref.translated && !c.file.is_translated {
-							c.warn('unused variable: `${obj.name}`', obj.pos)
+							if obj.is_arg {
+								if c.pref.show_unused_params {
+									c.note('unused parameter: `${obj.name}`', obj.pos)
+								}
+							} else {
+								c.warn('unused variable: `${obj.name}`', obj.pos)
+							}
 						}
 					}
 					if obj.is_mut && !obj.is_changed && !c.is_builtin_mod && obj.name != 'it' {
@@ -485,6 +491,7 @@ fn (mut c Checker) file_has_main_fn(file &ast.File) bool {
 	return has_main_fn
 }
 
+@[direct_array_access]
 fn (mut c Checker) check_valid_snake_case(name string, identifier string, pos token.Pos) {
 	if c.pref.translated || c.file.is_translated {
 		return
@@ -1512,10 +1519,8 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 
 	using_new_err_struct_save := c.using_new_err_struct
 	// TODO: remove; this avoids a breaking change in syntax
-	if node.expr is ast.Ident {
-		if node.expr.str() == 'err' {
-			c.using_new_err_struct = true
-		}
+	if node.expr is ast.Ident && node.expr.name == 'err' {
+		c.using_new_err_struct = true
 	}
 
 	// T.name, typeof(expr).name
