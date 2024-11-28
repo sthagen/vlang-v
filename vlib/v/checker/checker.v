@@ -2177,6 +2177,7 @@ fn (mut c Checker) stmt(mut node ast.Stmt) {
 			c.inside_const = false
 		}
 		ast.DeferStmt {
+			c.inside_defer = true
 			if node.idx_in_fn < 0 && c.table.cur_fn != unsafe { nil } {
 				node.idx_in_fn = c.table.cur_fn.defer_stmts.len
 				c.table.cur_fn.defer_stmts << unsafe { &node }
@@ -2203,7 +2204,6 @@ fn (mut c Checker) stmt(mut node ast.Stmt) {
 					node.defer_vars[i] = id
 				}
 			}
-			c.inside_defer = true
 			c.stmts(mut node.stmts)
 			c.inside_defer = false
 		}
@@ -3278,9 +3278,15 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 		to_type
 	}
 	final_to_is_ptr := to_type.is_ptr() || final_to_type.is_ptr()
-	if c.pref.skip_unused && !c.is_builtin_mod && c.mod !in ['strings', 'math.bits']
-		&& to_type.is_ptr() {
-		c.table.used_features.cast_ptr = true
+	if c.pref.skip_unused && !c.is_builtin_mod {
+		if c.table.used_features.used_maps == 0 && mut final_to_sym.info is ast.SumType {
+			if final_to_sym.info.variants.any(c.table.final_sym(it).kind == .map) {
+				c.table.used_features.used_maps++
+			}
+		}
+		if c.mod !in ['strings', 'math.bits'] && to_type.is_ptr() {
+			c.table.used_features.cast_ptr = true
+		}
 	}
 	if to_type.has_flag(.result) {
 		c.error('casting to Result type is forbidden', node.pos)
