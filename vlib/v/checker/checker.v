@@ -30,10 +30,10 @@ const generic_fn_postprocess_iterations_cutoff_limit = 1_000_000
 // Note that methods that do not return anything, or that return known types, are not listed here, since they are just ordinary non generic methods.
 pub const array_builtin_methods = ['filter', 'clone', 'repeat', 'reverse', 'map', 'slice', 'sort',
 	'sort_with_compare', 'sorted', 'sorted_with_compare', 'contains', 'index', 'wait', 'any', 'all',
-	'first', 'last', 'pop', 'delete', 'insert', 'prepend']
+	'first', 'last', 'pop', 'delete', 'insert', 'prepend', 'count']
 pub const array_builtin_methods_chk = token.new_keywords_matcher_from_array_trie(array_builtin_methods)
 pub const fixed_array_builtin_methods = ['contains', 'index', 'any', 'all', 'wait', 'map', 'sort',
-	'sorted', 'sort_with_compare', 'sorted_with_compare', 'reverse', 'reverse_in_place']
+	'sorted', 'sort_with_compare', 'sorted_with_compare', 'reverse', 'reverse_in_place', 'count']
 pub const fixed_array_builtin_methods_chk = token.new_keywords_matcher_from_array_trie(fixed_array_builtin_methods)
 // TODO: remove `byte` from this list when it is no longer supported
 pub const reserved_type_names = ['byte', 'bool', 'char', 'i8', 'i16', 'int', 'i64', 'u8', 'u16',
@@ -3613,6 +3613,16 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 		kind_name := if from_sym.kind == .sum_type { 'sum type' } else { 'interface' }
 		c.error('cannot cast `${ft}` ${kind_name} value to `${tt}`, use `${node.expr} as ${tt}` instead',
 			node.pos)
+	}
+	if from_sym.language == .v && from_type.is_ptr() && !to_type.is_ptr() && !final_to_type.is_ptr()
+		&& !node.expr.is_auto_deref_var() && final_to_sym.kind == .struct
+		&& final_from_sym.kind == .struct {
+		if c.check_struct_signature(final_from_sym.info as ast.Struct, final_to_sym.info as ast.Struct) {
+			ft := c.table.type_to_str(from_type)
+			tt := c.table.type_to_str(to_type)
+			c.error('cannot cast `${ft}` to `${tt}`, you must dereference it first (e.g. ${tt}(*var))',
+				node.pos)
+		}
 	}
 
 	if node.has_arg {
