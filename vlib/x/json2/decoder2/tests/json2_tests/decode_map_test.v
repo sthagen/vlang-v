@@ -1,4 +1,4 @@
-import x.json2
+import x.json2.decoder2 as json2
 
 const data = '
 {
