@@ -59,6 +59,7 @@ mut:
 	enum_typedefs             strings.Builder // enum types
 	definitions               strings.Builder // typedefs, defines etc (everything that goes to the top of the file)
 	type_definitions          strings.Builder // typedefs, defines etc (everything that goes to the top of the file)
+	sort_fn_definitions       strings.Builder // sort fns
 	alias_definitions         strings.Builder // alias fixed array of non-builtin
 	hotcode_definitions       strings.Builder // -live declarations & functions
 	channel_definitions       strings.Builder // channel related code
@@ -304,6 +305,7 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) (str
 		typedefs:             strings.new_builder(100)
 		enum_typedefs:        strings.new_builder(100)
 		type_definitions:     strings.new_builder(100)
+		sort_fn_definitions:  strings.new_builder(100)
 		alias_definitions:    strings.new_builder(100)
 		hotcode_definitions:  strings.new_builder(100)
 		channel_definitions:  strings.new_builder(100)
@@ -342,7 +344,7 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) (str
 		is_cc_msvc:           pref_.ccompiler == 'msvc'
 		use_segfault_handler: !('no_segfault_handler' in pref_.compile_defines
 			|| pref_.os in [.wasm32, .wasm32_emscripten])
-		static_modifier:      if pref_.parallel_cc { 'static' } else { '' }
+		static_modifier:      if pref_.parallel_cc { 'static ' } else { '' }
 		has_reflection:       'v.reflection' in table.modules
 		has_debugger:         'v.debug' in table.modules
 		reflection_strings:   &reflection_strings
@@ -392,6 +394,7 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) (str
 			global_g.includes.write(g.includes) or { panic(err) }
 			global_g.typedefs.write(g.typedefs) or { panic(err) }
 			global_g.type_definitions.write(g.type_definitions) or { panic(err) }
+			global_g.sort_fn_definitions.write(g.sort_fn_definitions) or { panic(err) }
 			global_g.alias_definitions.write(g.alias_definitions) or { panic(err) }
 			global_g.definitions.write(g.definitions) or { panic(err) }
 			global_g.gowrappers.write(g.gowrappers) or { panic(err) }
@@ -581,15 +584,34 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) (str
 			}
 		}
 	}
-	b.write_string2('\n// Enum definitions:\n', g.enum_typedefs.str())
-	b.write_string2('\n// Thread definitions:\n', g.thread_definitions.str())
-	b.write_string2('\n// V type definitions:\n', g.type_definitions.str())
-	b.write_string2('\n// V alias definitions:\n', g.alias_definitions.str())
-	b.write_string2('\n// V shared types:\n', g.shared_types.str())
-	b.write_string2('\n// V Option_xxx definitions:\n', g.out_options.str())
-	b.write_string2('\n// V result_xxx definitions:\n', g.out_results.str())
-	b.write_string2('\n// V json forward decls:\n', g.json_forward_decls.str())
+	if g.enum_typedefs.len > 0 {
+		b.write_string2('\n// Enum definitions:\n', g.enum_typedefs.str())
+	}
+	if g.thread_definitions.len > 0 {
+		b.write_string2('\n// Thread definitions:\n', g.thread_definitions.str())
+	}
+	if g.type_definitions.len > 0 {
+		b.write_string2('\n// V type definitions:\n', g.type_definitions.str())
+	}
+	if g.alias_definitions.len > 0 {
+		b.write_string2('\n// V alias definitions:\n', g.alias_definitions.str())
+	}
+	if g.shared_types.len > 0 {
+		b.write_string2('\n// V shared types:\n', g.shared_types.str())
+	}
+	if g.out_options.len > 0 {
+		b.write_string2('\n// V Option_xxx definitions:\n', g.out_options.str())
+	}
+	if g.out_results.len > 0 {
+		b.write_string2('\n// V result_xxx definitions:\n', g.out_results.str())
+	}
+	if g.json_forward_decls.len > 0 {
+		b.write_string2('\n// V json forward decls:\n', g.json_forward_decls.str())
+	}
 	b.write_string2('\n// V definitions:\n', g.definitions.str())
+	if g.sort_fn_definitions.len > 0 {
+		b.write_string2('\n// V sort fn definitions:\n', g.sort_fn_definitions.str())
+	}
 	b.writeln('\n// V global/const non-precomputed definitions:')
 	for var_name in g.sorted_global_const_names {
 		if var := g.global_const_defs[var_name] {
@@ -682,6 +704,7 @@ fn cgen_process_one_file_cb(mut p pool.PoolProcessor, idx int, wid int) &Gen {
 		includes:              strings.new_builder(100)
 		typedefs:              strings.new_builder(100)
 		type_definitions:      strings.new_builder(100)
+		sort_fn_definitions:   strings.new_builder(100)
 		alias_definitions:     strings.new_builder(100)
 		definitions:           strings.new_builder(100)
 		gowrappers:            strings.new_builder(100)
@@ -754,6 +777,7 @@ pub fn (mut g Gen) free_builders() {
 		g.includes.free()
 		g.typedefs.free()
 		g.type_definitions.free()
+		g.sort_fn_definitions.free()
 		g.alias_definitions.free()
 		g.definitions.free()
 		g.cleanup.free()
@@ -1771,14 +1795,16 @@ pub fn (mut g Gen) write_fn_typesymbol_declaration(sym ast.TypeSymbol) {
 }
 
 pub fn (mut g Gen) write_array_fixed_return_types() {
+	fixed_arr_rets := g.table.type_symbols.filter(it.info is ast.ArrayFixed && it.info.is_fn_ret
+		&& !it.info.elem_type.has_flag(.generic))
+	if fixed_arr_rets.len == 0 {
+		return
+	}
+
 	g.typedefs.writeln('\n// BEGIN_array_fixed_return_typedefs')
 	g.type_definitions.writeln('\n// BEGIN_array_fixed_return_structs')
 
-	for sym in g.table.type_symbols {
-		if sym.kind != .array_fixed || (sym.info as ast.ArrayFixed).elem_type.has_flag(.generic)
-			|| !(sym.info as ast.ArrayFixed).is_fn_ret {
-			continue
-		}
+	for sym in fixed_arr_rets {
 		info := sym.info as ast.ArrayFixed
 		mut fixed_elem_name := g.styp(info.elem_type.set_nr_muls(0))
 		if info.elem_type.is_ptr() {
@@ -6336,7 +6362,7 @@ fn (mut g Gen) const_decl_write_precomputed(mod string, styp string, cname strin
 	}
 	g.global_const_defs[util.no_dots(field_name)] = GlobalConstDef{
 		mod: mod
-		def: '${g.static_modifier} const ${styp} ${cname} = ${ct_value}; // precomputed2'
+		def: '${g.static_modifier}const ${styp} ${cname} = ${ct_value}; // precomputed2'
 		// is_precomputed: true
 	}
 }
@@ -6467,7 +6493,7 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 		&& !util.should_bundle_module(node.mod) {
 		'extern '
 	} else {
-		'${g.static_modifier} ' // TODO: used to be '' before parallel_cc, may cause issues
+		g.static_modifier // TODO: used to be '' before parallel_cc, may cause issues
 	}
 	// should the global be initialized now, not later in `vinit()`
 	cinit := node.attrs.contains('cinit')
@@ -6518,7 +6544,7 @@ fn (mut g Gen) global_decl(node ast.GlobalDecl) {
 		mut init := ''
 		extern := if cextern { 'extern ' } else { '' }
 		modifier := if field.is_volatile { ' volatile ' } else { '' }
-		def_builder.write_string('${extern}${visibility_kw}${modifier}${styp} ${attributes} ${field.name}')
+		def_builder.write_string('${extern}${visibility_kw}${modifier}${styp} ${attributes}${field.name}')
 		if cextern {
 			def_builder.writeln('; // global5')
 			g.global_const_defs[util.no_dots(field.name)] = GlobalConstDef{
@@ -7945,12 +7971,12 @@ fn (mut g Gen) interface_table() string {
 		iname_table_length := inter_info.types.len
 		if iname_table_length == 0 {
 			// msvc can not process `static struct x[0] = {};`
-			methods_struct.writeln('${g.static_modifier} ${methods_struct_name} ${interface_name}_name_table[1];')
+			methods_struct.writeln('${g.static_modifier}${methods_struct_name} ${interface_name}_name_table[1];')
 		} else {
 			if g.pref.build_mode != .build_module {
-				methods_struct.writeln('${g.static_modifier} ${methods_struct_name} ${interface_name}_name_table[${iname_table_length}] = {')
+				methods_struct.writeln('${g.static_modifier}${methods_struct_name} ${interface_name}_name_table[${iname_table_length}] = {')
 			} else {
-				methods_struct.writeln('${g.static_modifier} ${methods_struct_name} ${interface_name}_name_table[${iname_table_length}];')
+				methods_struct.writeln('${g.static_modifier}${methods_struct_name} ${interface_name}_name_table[${iname_table_length}];')
 			}
 		}
 		mut cast_functions := strings.new_builder(100)
@@ -8205,7 +8231,7 @@ static inline __shared__${interface_name} ${shared_fn_name}(__shared__${cctype}*
 			}
 			iin_idx := already_generated_mwrappers[interface_index_name] - iinidx_minimum_base
 			if g.pref.build_mode != .build_module {
-				sb.writeln('${g.static_modifier} const int ${interface_index_name} = ${iin_idx};')
+				sb.writeln('${g.static_modifier}const int ${interface_index_name} = ${iin_idx};')
 			} else {
 				sb.writeln('extern const int ${interface_index_name};')
 			}
@@ -8256,9 +8282,13 @@ static inline __shared__${interface_name} ${shared_fn_name}(__shared__${cctype}*
 			sb.writeln2(methods_wrapper.str(), methods_struct_def.str())
 			sb.writeln(methods_struct.str())
 		}
-		sb.writeln(cast_functions.str())
+		if cast_functions.len > 0 {
+			sb.writeln(cast_functions.str())
+		}
 	}
-	sb.writeln(conversion_functions.str())
+	if conversion_functions.len > 0 {
+		sb.writeln(conversion_functions.str())
+	}
 	return sb.str()
 }
 
