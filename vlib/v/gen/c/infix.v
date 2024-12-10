@@ -112,7 +112,9 @@ fn (mut g Gen) infix_expr_eq_op(node ast.InfixExpr) {
 		g.gen_plain_infix_expr(node)
 		return
 	}
-	is_none_check := left_type.has_flag(.option) && node.right is ast.None
+	left_is_option := left_type.has_flag(.option)
+	right_is_option := right_type.has_flag(.option)
+	is_none_check := left_is_option && node.right is ast.None
 	if is_none_check {
 		g.gen_is_none_check(node)
 	} else if (left.typ.is_ptr() && right.typ.is_int())
@@ -367,6 +369,18 @@ fn (mut g Gen) infix_expr_eq_op(node ast.InfixExpr) {
 			signed_type:   left.unaliased
 			signed_expr:   node.left
 		)
+	} else if left_is_option && right_is_option {
+		old_inside_opt_or_res := g.inside_opt_or_res
+		g.inside_opt_or_res = true
+		if node.op == .eq {
+			g.write('!')
+		}
+		g.write('memcmp(')
+		g.expr(node.left)
+		g.write('.data, ')
+		g.expr(node.right)
+		g.write('.data, sizeof(${g.base_type(left_type)}))')
+		g.inside_opt_or_res = old_inside_opt_or_res
 	} else {
 		g.gen_plain_infix_expr(node)
 	}
@@ -1170,13 +1184,32 @@ fn (mut g Gen) gen_plain_infix_expr(node ast.InfixExpr) {
 			g.inside_interface_deref = inside_interface_deref_old
 		}
 	}
+	is_ctemp_fixed_ret := node.op in [.eq, .ne] && node.left is ast.CTempVar
+		&& node.left.is_fixed_ret
+	if is_ctemp_fixed_ret {
+		if node.op == .eq {
+			g.write('!')
+		}
+		g.write('memcmp(')
+	}
 	g.expr(node.left)
-	g.write(' ${node.op.str()} ')
+	if !is_ctemp_fixed_ret {
+		g.write(' ${node.op.str()} ')
+	} else {
+		g.write(', ')
+	}
+
+	if is_ctemp_fixed_ret {
+		g.write('(${g.styp(node.right_type)})')
+	}
 	if node.right_type.is_ptr() && node.right.is_auto_deref_var() && !node.left_type.is_pointer() {
 		g.write('*')
 		g.expr(node.right)
 	} else {
 		g.expr_with_cast(node.right, node.right_type, node.left_type)
+	}
+	if is_ctemp_fixed_ret {
+		g.write(', sizeof(${g.styp(node.right_type)}))')
 	}
 	if needs_cast {
 		g.write(')')
