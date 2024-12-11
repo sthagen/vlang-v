@@ -68,7 +68,19 @@ fn (mut c Checker) for_in_stmt(mut node ast.ForInStmt) {
 		} else if high_type.has_option_or_result() {
 			c.error('the `high` value in a `for x in low..high {` loop, cannot be Result or Option',
 				node.high.pos())
+		} else if node.cond is ast.Ident && node.val_var == node.cond.name {
+			if node.is_range {
+				c.error('in a `for x in <range>` loop, the key or value iteration variable `${node.val_var}` can not be the same as the low variable',
+					node.cond.pos())
+			} else {
+				c.error('in a `for x in array` loop, the key or value iteration variable `${node.val_var}` can not be the same as the low variable',
+					node.cond.pos())
+			}
+		} else if node.high is ast.Ident && node.val_var == node.high.name {
+			c.error('in a `for x in <range>` loop, the key or value iteration variable `${node.val_var}` can not be the same as the high variable',
+				node.high.pos())
 		}
+
 		if high_type in [ast.int_type, ast.int_literal_type] {
 			node.val_type = typ
 		} else {
@@ -77,6 +89,10 @@ fn (mut c Checker) for_in_stmt(mut node ast.ForInStmt) {
 		node.high_type = high_type
 		node.scope.update_var_type(node.val_var, node.val_type)
 	} else {
+		if node.cond is ast.Ident && node.cond.name in [node.key_var, node.val_var] {
+			c.error('in a `for x in array` loop, the key or value iteration variable `${node.val_var}` can not be the same as the low variable',
+				node.cond.pos())
+		}
 		mut is_comptime := false
 		if (node.cond is ast.Ident && c.comptime.is_comptime_var(node.cond))
 			|| node.cond is ast.ComptimeSelector {
@@ -114,10 +130,12 @@ fn (mut c Checker) for_in_stmt(mut node ast.ForInStmt) {
 			c.error('string type is immutable, it cannot be changed', node.pos)
 			return
 		}
-		if sym.kind == .struct {
+		if sym.kind in [.struct, .interface] {
 			// iterators
 			next_fn := sym.find_method_with_generic_parent('next') or {
-				c.error('a struct must have a `next()` method to be an iterator', node.cond.pos())
+				kind_str := if sym.kind == .struct { 'struct' } else { 'interface' }
+				c.error('a ${kind_str} must have a `next()` method to be an iterator',
+					node.cond.pos())
 				return
 			}
 			if !next_fn.return_type.has_flag(.option) {
