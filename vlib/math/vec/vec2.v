@@ -316,9 +316,9 @@ pub fn (v Vec2[T]) manhattan_distance(u Vec2[T]) T {
 // angle_between returns the angle in radians to the vector `u`.
 pub fn (v Vec2[T]) angle_between(u Vec2[T]) T {
 	$if T is f64 {
-		return math.atan2((v.y - u.y), (v.x - u.x))
+		return math.atan2(v.cross(u), v.dot(u))
 	} $else {
-		return T(math.atan2(f64(v.y - u.y), f64(v.x - u.x)))
+		return T(math.atan2(f64(v.cross(u)), f64(v.dot(u))))
 	}
 }
 
