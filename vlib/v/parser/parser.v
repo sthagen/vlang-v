@@ -2060,6 +2060,9 @@ fn (mut p Parser) parse_attr(is_at bool) ast.Attr {
 				kind = .bool
 				arg = p.tok.kind.str()
 				p.next()
+			} else if token.is_key(p.tok.lit) { // // `name: keyword`
+				kind = .plain
+				arg = p.check_name()
 			} else {
 				p.unexpected(additional_msg: 'an argument is expected after `:`')
 			}
