@@ -8,12 +8,12 @@ import sync.pool
 import v.gen.c
 
 const cc_compiler = os.getenv_opt('CC') or { 'cc' }
-const cc = os.quoted_path(cc_compiler)
 const cc_ldflags = os.getenv_opt('LDFLAGS') or { '' }
 const cc_cflags = os.getenv_opt('CFLAGS') or { '' }
 const cc_cflags_opt = os.getenv_opt('CFLAGS_OPT') or { '' } // '-O3' }
 
 fn parallel_cc(mut b builder.Builder, result c.GenOutput) {
+	tmp_dir := os.vtmp_dir()
 	sw_total := time.new_stopwatch()
 	defer {
 		eprint_time(sw_total, @METHOD)
@@ -25,16 +25,16 @@ fn parallel_cc(mut b builder.Builder, result c.GenOutput) {
 	// like the `int main()` to "out_0.c" and "out_x.c"
 
 	// out.h
-	os.write_file('out.h', result.header) or { panic(err) }
+	os.write_file('${tmp_dir}/out.h', result.header) or { panic(err) }
 
 	// out_0.c
 	out0 := '//out0\n' + result.out_str[..result.out_fn_start_pos[0]]
-	os.write_file('out_0.c', '#include "out.h"\n' + out0 + '\n//X:\n' + result.out0_str) or {
+	os.write_file('${tmp_dir}/out_0.c', '#include "out.h"\n' + out0 + '\n//X:\n' + result.out0_str) or {
 		panic(err)
 	}
 
 	// out_x.c
-	os.write_file('out_x.c', '#include "out.h"\n\n' + result.extern_str + '\n' +
+	os.write_file('${tmp_dir}/out_x.c', '#include "out.h"\n\n' + result.extern_str + '\n' +
 		result.out_str[result.out_fn_start_pos.last()..]) or { panic(err) }
 
 	mut prev_fn_pos := 0
@@ -42,7 +42,7 @@ fn parallel_cc(mut b builder.Builder, result c.GenOutput) {
 	mut fnames := []string{}
 
 	for i in 0 .. c_files {
-		fname := 'out_${i + 1}.c'
+		fname := '${tmp_dir}/out_${i + 1}.c'
 		fnames << fname
 		out_files[i] = os.create(fname) or { panic(err) }
 
@@ -69,24 +69,38 @@ fn parallel_cc(mut b builder.Builder, result c.GenOutput) {
 		out_files[i].close()
 	}
 
-	// cc := os.quoted_path(cc_compiler)
+	mut cc_path := cc_compiler
+	explicit_cc_flag_passed := b.pref.build_options.any(it.starts_with('-cc '))
+	if explicit_cc_flag_passed {
+		// do not guess, just use the user's preference
+		cc_path = b.pref.ccompiler
+	}
+	cc := os.quoted_path(cc_path)
+	mut compile_args := b.get_compile_args()
+	mut linker_args := b.get_linker_args()
+	if !explicit_cc_flag_passed {
+		compile_args = compile_args.filter(it != '-bt25')
+		linker_args = linker_args.filter(it != '-bt25')
+	}
+	scompile_args := compile_args.join(' ')
+	slinker_args := linker_args.join(' ')
+
 	mut o_postfixes := ['0', 'x']
 	mut cmds := []string{}
 	for i in 0 .. c_files {
 		o_postfixes << (i + 1).str()
 	}
 	for postfix in o_postfixes {
-		cmds << '${cc} ${cc_cflags} ${cc_cflags_opt} ${b.str_args} -c -w -o out_${postfix}.o out_${postfix}.c'
+		cmds << '${cc} ${cc_cflags} ${cc_cflags_opt} ${scompile_args} -w -o ${tmp_dir}/out_${postfix}.o -c ${tmp_dir}/out_${postfix}.c'
 	}
 	sw := time.new_stopwatch()
 	mut pp := pool.new_pool_processor(callback: build_parallel_o_cb)
 	pp.set_max_jobs(util.nr_jobs)
 	pp.work_on_items(cmds)
-	eprintln('> ${sw.elapsed().milliseconds():5} ms, C compilation on ${util.nr_jobs} thread(s), processing ${cmds.len} commands')
-	gc_flag := if b.pref.gc_mode != .no_gc { '-lgc ' } else { '' }
+	eprint_time(sw, 'C compilation on ${util.nr_jobs} thread(s), processing ${cmds.len} commands')
+
 	obj_files := fnames.map(it.replace('.c', '.o')).join(' ')
-	ld_flags := '${gc_flag}${cc_ldflags}'
-	link_cmd := '${cc} -o ${os.quoted_path(b.pref.out_name)} out_0.o ${obj_files} out_x.o -lpthread ${ld_flags}'
+	link_cmd := '${cc} ${scompile_args} -o ${os.quoted_path(b.pref.out_name)} ${tmp_dir}/out_0.o ${obj_files} ${tmp_dir}/out_x.o ${slinker_args} ${cc_ldflags}'
 	sw_link := time.new_stopwatch()
 	link_res := os.execute(link_cmd)
 	eprint_result_time(sw_link, 'link_cmd', link_cmd, link_res)
