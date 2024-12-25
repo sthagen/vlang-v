@@ -2695,8 +2695,10 @@ fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp_is_ptr
 	}
 	g.write('${fname}(')
 	if !got_is_ptr && !got_is_fn {
-		if is_comptime_variant || !expr.is_lvalue()
-			|| (expr is ast.Ident && expr.obj.is_simple_define_const()) {
+		is_cast_fixed_array_init := expr is ast.CastExpr
+			&& (expr.expr is ast.ArrayInit && expr.expr.is_fixed)
+		if !is_cast_fixed_array_init && (is_comptime_variant || !expr.is_lvalue()
+			|| (expr is ast.Ident && expr.obj.is_simple_define_const())) {
 			// Note: the `_to_sumtype_` family of functions do call memdup internally, making
 			// another duplicate with the HEAP macro is redundant, so use ADDR instead:
 			if expr.is_as_cast() {
@@ -4208,6 +4210,9 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 	mut sum_type_dot := '.'
 	mut field_typ := ast.void_type
 	mut is_option_unwrap := false
+	mut is_dereferenced := node.expr is ast.SelectorExpr && node.expr.expr_type.is_ptr()
+		&& !node.expr.typ.is_ptr()
+		&& g.table.final_sym(node.expr.expr_type).kind in [.interface, .sum_type]
 	if f := g.table.find_field_with_embeds(sym, node.field_name) {
 		field_sym := g.table.sym(f.typ)
 		field_typ = f.typ
@@ -4374,8 +4379,8 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 	}
 	alias_to_ptr := sym.info is ast.Alias && sym.info.parent_type.is_ptr()
 	if field_is_opt
-		|| ((g.unwrap_generic(node.expr_type).is_ptr() || sym.kind == .chan || alias_to_ptr)
-		&& node.from_embed_types.len == 0)
+		|| (((!is_dereferenced && g.unwrap_generic(node.expr_type).is_ptr())
+		|| sym.kind == .chan || alias_to_ptr) && node.from_embed_types.len == 0)
 		|| (node.expr.is_as_cast() && g.inside_smartcast) {
 		g.write('->')
 	} else {
@@ -4389,7 +4394,12 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 	}
 	g.write(field_name)
 	if is_option_unwrap {
-		g.write('.data))')
+		if field_typ.is_ptr() && g.table.final_sym(node.expr_type).kind in [.sum_type, .interface] {
+			g.write('->')
+		} else {
+			g.write('.')
+		}
+		g.write('data))')
 	}
 	if sum_type_deref_field != '' {
 		g.write('${sum_type_dot}${sum_type_deref_field})')
