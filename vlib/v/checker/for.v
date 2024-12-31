@@ -159,7 +159,7 @@ fn (mut c Checker) for_in_stmt(mut node ast.ForInStmt) {
 			node.scope.update_var_type(node.val_var, val_type)
 
 			if is_comptime {
-				c.type_resolver.type_map[node.val_var] = val_type
+				c.type_resolver.update_ct_type(node.val_var, val_type)
 				node.scope.update_ct_var_kind(node.val_var, .value_var)
 
 				defer {
@@ -173,6 +173,8 @@ fn (mut c Checker) for_in_stmt(mut node ast.ForInStmt) {
 			unwrapped_typ := c.unwrap_generic(typ)
 			unwrapped_sym := c.table.sym(unwrapped_typ)
 
+			c.table.used_features.comptime_calls['${int(unwrapped_typ)}.next'] = true
+
 			if node.key_var.len > 0 {
 				key_type := match unwrapped_sym.kind {
 					.map { unwrapped_sym.map_info().key_type }
@@ -182,7 +184,7 @@ fn (mut c Checker) for_in_stmt(mut node ast.ForInStmt) {
 				node.scope.update_var_type(node.key_var, key_type)
 
 				if is_comptime {
-					c.type_resolver.type_map[node.key_var] = key_type
+					c.type_resolver.update_ct_type(node.key_var, key_type)
 					node.scope.update_ct_var_kind(node.key_var, .key_var)
 
 					defer {
@@ -195,7 +197,7 @@ fn (mut c Checker) for_in_stmt(mut node ast.ForInStmt) {
 			node.scope.update_var_type(node.val_var, value_type)
 
 			if is_comptime {
-				c.type_resolver.type_map[node.val_var] = value_type
+				c.type_resolver.update_ct_type(node.val_var, value_type)
 				node.scope.update_ct_var_kind(node.val_var, .value_var)
 
 				defer {
@@ -220,7 +222,7 @@ fn (mut c Checker) for_in_stmt(mut node ast.ForInStmt) {
 				node.scope.update_var_type(node.key_var, key_type)
 
 				if is_comptime {
-					c.type_resolver.type_map[node.key_var] = key_type
+					c.type_resolver.update_ct_type(node.key_var, key_type)
 					node.scope.update_ct_var_kind(node.key_var, .key_var)
 
 					defer {
@@ -279,7 +281,7 @@ fn (mut c Checker) for_in_stmt(mut node ast.ForInStmt) {
 			node.val_type = value_type
 			node.scope.update_var_type(node.val_var, value_type)
 			if is_comptime {
-				c.type_resolver.type_map[node.val_var] = value_type
+				c.type_resolver.update_ct_type(node.val_var, value_type)
 				node.scope.update_ct_var_kind(node.val_var, .value_var)
 
 				defer {

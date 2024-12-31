@@ -13,16 +13,6 @@ pub fn (mut t TypeResolver) get_comptime_selector_var_type(node ast.ComptimeSele
 	return field, field_name
 }
 
-@[inline]
-pub fn (t &ResolverInfo) get_comptime_selector_key_type(val ast.ComptimeSelector) string {
-	if val.field_expr is ast.SelectorExpr {
-		if val.field_expr.expr is ast.Ident {
-			return '${val.field_expr.expr.name}.typ'
-		}
-	}
-	return ''
-}
-
 // is_comptime_expr checks if the node is related to a comptime expr
 @[inline]
 pub fn (t &ResolverInfo) is_comptime_expr(node ast.Expr) bool {
@@ -111,16 +101,18 @@ pub fn (mut t TypeResolver) get_expr_type_or_default(node ast.Expr, default_typ 
 // get_type_from_comptime_var retrives the comptime type related to $for variable
 @[inline]
 pub fn (t &TypeResolver) get_type_from_comptime_var(var ast.Ident) ast.Type {
-	return match var.name {
+	match var.name {
 		t.info.comptime_for_variant_var {
-			t.type_map['${t.info.comptime_for_variant_var}.typ']
+			return t.get_ct_type_or_default('${t.info.comptime_for_variant_var}.typ',
+				ast.void_type)
 		}
 		t.info.comptime_for_method_param_var {
-			t.type_map['${t.info.comptime_for_method_param_var}.typ']
+			return t.get_ct_type_or_default('${t.info.comptime_for_method_param_var}.typ',
+				ast.void_type)
 		}
 		else {
 			// field_var.typ from $for field
-			t.info.comptime_for_field_type
+			return t.info.comptime_for_field_type
 		}
 	}
 }
@@ -128,9 +120,8 @@ pub fn (t &TypeResolver) get_type_from_comptime_var(var ast.Ident) ast.Type {
 // get_comptime_selector_type retrieves the var.$(field.name) type when field_name is 'name' otherwise default_type is returned
 @[inline]
 pub fn (mut t TypeResolver) get_comptime_selector_type(node ast.ComptimeSelector, default_type ast.Type) ast.Type {
-	if node.field_expr is ast.SelectorExpr
-		&& t.info.check_comptime_is_field_selector(node.field_expr)
-		&& node.field_expr.field_name == 'name' {
+	if node.is_name && node.field_expr is ast.SelectorExpr
+		&& t.info.check_comptime_is_field_selector(node.field_expr) {
 		return t.resolver.unwrap_generic(t.info.comptime_for_field_type)
 	}
 	return default_type

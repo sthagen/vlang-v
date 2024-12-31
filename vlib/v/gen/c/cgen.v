@@ -1236,6 +1236,14 @@ fn (mut g Gen) expr_string(expr ast.Expr) string {
 	return g.out.cut_to(pos).trim_space()
 }
 
+fn (mut g Gen) expr_string_opt(typ ast.Type, expr ast.Expr) string {
+	expr_str := g.expr_string(expr)
+	if expr is ast.None {
+		return '(${g.styp(typ)}){.state=2, .err=${expr_str}, .data={EMPTY_STRUCT_INITIALIZATION}}'
+	}
+	return expr_str
+}
+
 fn (mut g Gen) expr_string_with_cast(expr ast.Expr, typ ast.Type, exp ast.Type) string {
 	pos := g.out.len
 	// pos2 := 	g.out_parallel[g.out_idx].len
@@ -2718,7 +2726,9 @@ fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp_is_ptr
 	if got_styp == 'none' && !g.cur_fn.return_type.has_flag(.option) {
 		g.write('(none){EMPTY_STRUCT_INITIALIZATION}')
 	} else if is_comptime_variant {
-		g.write(g.type_default(g.type_resolver.type_map['${g.comptime.comptime_for_variant_var}.typ']))
+		ctyp := g.type_resolver.get_ct_type_or_default('${g.comptime.comptime_for_variant_var}.typ',
+			ast.void_type)
+		g.write(g.type_default(ctyp))
 	} else {
 		g.expr(expr)
 	}
@@ -3893,7 +3903,8 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 		g.checker_bug('unexpected SelectorExpr.expr_type = 0', node.pos)
 	}
 
-	sym := g.table.sym(g.unwrap_generic(node.expr_type))
+	unwrapped_expr_type := g.unwrap_generic(node.expr_type)
+	sym := g.table.sym(unwrapped_expr_type)
 	field_name := if sym.language == .v { c_name(node.field_name) } else { node.field_name }
 	is_as_cast := node.expr is ast.AsCast
 	if is_as_cast {
@@ -3948,7 +3959,7 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 		opt_base_typ := g.base_type(node.expr_type)
 		g.write('(*(${opt_base_typ}*)')
 	}
-	final_sym := g.table.final_sym(g.unwrap_generic(node.expr_type))
+	final_sym := g.table.final_sym(unwrapped_expr_type)
 	if final_sym.kind == .array_fixed {
 		if node.field_name != 'len' {
 			g.error('field_name should be `len`', node.pos)
@@ -3970,9 +3981,6 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 	mut sum_type_dot := '.'
 	mut field_typ := ast.void_type
 	mut is_option_unwrap := false
-	mut is_dereferenced := node.expr is ast.SelectorExpr && node.expr.expr_type.is_ptr()
-		&& !node.expr.typ.is_ptr()
-		&& g.table.final_sym(node.expr.expr_type).kind in [.interface, .sum_type]
 	if f := g.table.find_field_with_embeds(sym, node.field_name) {
 		field_sym := g.table.sym(f.typ)
 		field_typ = f.typ
@@ -4138,8 +4146,9 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 		}
 	}
 	alias_to_ptr := sym.info is ast.Alias && sym.info.parent_type.is_ptr()
-	if field_is_opt
-		|| (((!is_dereferenced && g.unwrap_generic(node.expr_type).is_ptr())
+	is_dereferenced := node.expr is ast.SelectorExpr && node.expr.expr_type.is_ptr()
+		&& !node.expr.typ.is_ptr() && final_sym.kind in [.interface, .sum_type]
+	if field_is_opt || (((!is_dereferenced && unwrapped_expr_type.is_ptr())
 		|| sym.kind == .chan || alias_to_ptr) && node.from_embed_types.len == 0)
 		|| (node.expr.is_as_cast() && g.inside_smartcast) {
 		g.write('->')
@@ -4162,7 +4171,8 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 		g.write('data))')
 	}
 	if sum_type_deref_field != '' {
-		g.write('${sum_type_dot}${sum_type_deref_field})')
+		g.write2(sum_type_dot, sum_type_deref_field)
+		g.write(')')
 	}
 	if sym.kind in [.interface, .sum_type] {
 		g.write('))')
@@ -4337,7 +4347,8 @@ fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 
 					dot := if obj.orig_type.is_ptr() || obj.is_auto_heap { '->' } else { '.' }
 					if obj.ct_type_var == .smartcast {
-						cur_variant_sym := g.table.sym(g.unwrap_generic(g.type_resolver.type_map['${g.comptime.comptime_for_variant_var}.typ']))
+						cur_variant_sym := g.table.sym(g.unwrap_generic(g.type_resolver.get_ct_type_or_default('${g.comptime.comptime_for_variant_var}.typ',
+							ast.void_type)))
 						param_var.write_string('${obj.name}${dot}_${cur_variant_sym.cname}')
 					} else if cast_sym.info is ast.Aggregate {
 						sym := g.table.sym(cast_sym.info.types[g.aggregate_type_idx])
@@ -5141,8 +5152,8 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 		if node_typ_is_option && node.expr is ast.None {
 			g.gen_option_error(node.typ, node.expr)
 		} else if node.expr is ast.Ident && g.comptime.is_comptime_variant_var(node.expr) {
-			g.expr_with_cast(node.expr, g.type_resolver.type_map['${g.comptime.comptime_for_variant_var}.typ'],
-				node_typ)
+			g.expr_with_cast(node.expr, g.type_resolver.get_ct_type_or_default('${g.comptime.comptime_for_variant_var}.typ',
+				ast.void_type), node_typ)
 		} else if node_typ_is_option {
 			g.expr_with_opt(node.expr, expr_type, node.typ)
 		} else {
@@ -7031,7 +7042,7 @@ fn (mut g Gen) type_default_impl(typ_ ast.Type, decode_sumtype bool) string {
 									}
 								}
 							} else {
-								default_str := g.expr_string(field.default_expr)
+								default_str := g.expr_string_opt(field.typ, field.default_expr)
 								if default_str.count('\n') > 1 {
 									g.type_default_vars.writeln(default_str.all_before_last('\n'))
 									expr_str = default_str.all_after_last('\n')

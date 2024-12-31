@@ -217,6 +217,10 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 		} else if right is ast.ComptimeSelector {
 			right_type = c.comptime.comptime_for_field_type
 		}
+		if is_decl && left is ast.Ident && left.info is ast.IdentVar
+			&& (left.info as ast.IdentVar).share == .shared_t && c.table.sym(right_type).kind !in [.array, .map, .struct] {
+			c.fatal('shared variables must be structs, arrays or maps', right.pos())
+		}
 		if is_decl || is_shared_re_assign {
 			// check generic struct init and return unwrap generic struct type
 			if mut right is ast.StructInit {
@@ -404,34 +408,19 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 									left.obj.ct_type_var = .field_var
 									left.obj.typ = c.comptime.comptime_for_field_type
 								} else if mut right is ast.CallExpr {
-									if left.obj.ct_type_var in [.generic_var, .no_comptime]
+									if right.left_type != 0
+										&& c.table.type_kind(right.left_type) == .array
+										&& right.name == 'map' && right.args.len > 0
+										&& right.args[0].expr is ast.AsCast
+										&& right.args[0].expr.typ.has_flag(.generic) {
+										left.obj.ct_type_var = .generic_var
+									} else if left.obj.ct_type_var in [.generic_var, .no_comptime]
 										&& c.table.cur_fn != unsafe { nil }
 										&& c.table.cur_fn.generic_names.len != 0
 										&& !right.comptime_ret_val
 										&& c.type_resolver.is_generic_expr(right) {
 										// mark variable as generic var because its type changes according to fn return generic resolution type
 										left.obj.ct_type_var = .generic_var
-										if right.return_type_generic.has_flag(.generic) {
-											fn_ret_type := c.resolve_return_type(right)
-											if fn_ret_type != ast.void_type
-												&& c.table.final_sym(fn_ret_type).kind != .multi_return {
-												var_type := if right.or_block.kind == .absent {
-													fn_ret_type
-												} else {
-													fn_ret_type.clear_option_and_result()
-												}
-												c.type_resolver.type_map['g.${left.name}.${left.obj.pos.pos}'] = var_type
-											}
-										} else if right.is_static_method
-											&& right.left_type.has_flag(.generic) {
-											fn_ret_type := c.unwrap_generic(c.resolve_return_type(right))
-											var_type := if right.or_block.kind == .absent {
-												fn_ret_type
-											} else {
-												fn_ret_type.clear_option_and_result()
-											}
-											c.type_resolver.type_map['g.${left.name}.${left.obj.pos.pos}'] = var_type
-										}
 									}
 								}
 							}
@@ -885,7 +874,7 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 			c.error('cannot assign anonymous `struct` to a typed `struct`', right.pos())
 		}
 		if right_sym.kind == .alias && right_sym.name == 'byte' {
-			c.warn('byte is deprecated, use u8 instead', right.pos())
+			c.error('byte is deprecated, use u8 instead', right.pos())
 		}
 	}
 	// this needs to run after the assign stmt left exprs have been run through checker

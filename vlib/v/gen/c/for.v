@@ -158,7 +158,7 @@ fn (mut g Gen) for_in_stmt(node_ ast.ForInStmt) {
 		node.kind = unwrapped_sym.kind
 
 		if is_comptime {
-			g.type_resolver.type_map[node.val_var] = node.val_type
+			g.type_resolver.update_ct_type(node.val_var, node.val_type)
 			node.scope.update_ct_var_kind(node.val_var, .value_var)
 
 			defer {
@@ -175,7 +175,7 @@ fn (mut g Gen) for_in_stmt(node_ ast.ForInStmt) {
 			node.scope.update_var_type(node.key_var, key_type)
 
 			if is_comptime {
-				g.type_resolver.type_map[node.key_var] = node.key_type
+				g.type_resolver.update_ct_type(node.key_var, node.key_type)
 				node.scope.update_ct_var_kind(node.key_var, .key_var)
 
 				defer {
@@ -221,18 +221,6 @@ fn (mut g Gen) for_in_stmt(node_ ast.ForInStmt) {
 		mut val_sym := g.table.sym(node.val_type)
 		op_field := g.dot_or_ptr(node.cond_type)
 
-		if is_comptime && g.comptime.is_comptime(node.cond) {
-			mut unwrapped_typ := g.unwrap_generic(node.cond_type)
-			ctyp := g.unwrap_generic(g.type_resolver.get_type(node.cond))
-			if ctyp != ast.void_type {
-				unwrapped_typ = ctyp
-			}
-			val_sym = g.table.sym(unwrapped_typ)
-			node.val_type = g.table.value_type(unwrapped_typ)
-			styp = g.styp(node.val_type)
-			node.scope.update_var_type(node.val_var, node.val_type)
-			node.cond_type = node.val_type
-		}
 		mut cond_var := ''
 		cond_is_option := node.cond_type.has_flag(.option)
 		if (node.cond is ast.Ident && !cond_is_option)

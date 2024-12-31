@@ -262,7 +262,7 @@ As in many other languages (such as C, Go, and Rust), `main` is the entry point 
 [`println`](#println) is one of the few [built-in functions](#builtin-functions).
 It prints the value passed to it to standard output.
 
-`fn main()` declaration can be skipped in one file programs.
+`fn main()` declaration can be skipped in single file programs.
 This is useful when writing small programs, "scripts", or just learning the language.
 For brevity, `fn main()` will be skipped in this tutorial.
 
@@ -4686,7 +4686,9 @@ struct User {
 	// and decoding will not fail.
 	name string @[required]
 	age  int
-	// Use the `skip` attribute to skip certain fields
+	// Use the `@[skip]` attribute to skip certain fields.
+	// You can also use `@[json: '-']`, and `@[sql: '-']`, which will cause only
+	// the `json` module to skip the field, or only the SQL orm to skip it.
 	foo Foo @[skip]
 	// If the field name is different in JSON, it can be specified
 	last_name string @[json: lastName]

@@ -763,7 +763,8 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				}
 				ast.Ident {
 					if right_expr.name == c.comptime.comptime_for_variant_var {
-						c.type_resolver.type_map['${c.comptime.comptime_for_variant_var}.typ']
+						c.type_resolver.get_ct_type_or_default('${c.comptime.comptime_for_variant_var}.typ',
+							ast.void_type)
 					} else {
 						c.error('invalid type `${right_expr}`', right_expr.pos)
 						ast.no_type
@@ -793,7 +794,8 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					c.error('`${op}` can only be used with interfaces and sum types',
 						node.pos) // can be used in sql too, but keep err simple
 				} else if mut left_sym.info is ast.SumType {
-					if typ !in left_sym.info.variants {
+					if typ !in left_sym.info.variants
+						&& c.unwrap_generic(typ) !in left_sym.info.variants {
 						c.error('`${left_sym.name}` has no variant `${right_sym.name}`',
 							right_pos)
 					}

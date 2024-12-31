@@ -167,7 +167,7 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 					parent_sym.info.size_expr, true)
 			}
 			if return_sym.name == 'byte' {
-				c.warn('byte is deprecated, use u8 instead', node.return_type_pos)
+				c.error('byte is deprecated, use u8 instead', node.return_type_pos)
 			}
 		}
 		if return_sym.info is ast.ArrayFixed && c.array_fixed_has_unresolved_size(return_sym.info) {
@@ -337,7 +337,7 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 				c.error('duplicate of an import symbol `${param.name}`', param.pos)
 			}
 			if arg_typ_sym.kind == .alias && arg_typ_sym.name == 'byte' {
-				c.warn('byte is deprecated, use u8 instead', param.type_pos)
+				c.error('byte is deprecated, use u8 instead', param.type_pos)
 			}
 		}
 		if !node.is_method {
@@ -3568,8 +3568,9 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 		if node.args.len != 1 {
 			c.error('`.contains()` expected 1 argument, but got ${node.args.len}', node.pos)
 		} else if !left_sym.has_method('contains') {
-			arg_typ := c.expr(mut node.args[0].expr)
-			c.check_expected_call_arg(arg_typ, elem_typ, node.language, node.args[0]) or {
+			arg_typ := c.unwrap_generic(c.expr(mut node.args[0].expr))
+			c.check_expected_call_arg(arg_typ, c.unwrap_generic(elem_typ), node.language,
+				node.args[0]) or {
 				c.error('${err.msg()} in argument 1 to `.contains()`', node.args[0].pos)
 			}
 		}
@@ -3581,8 +3582,9 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 		if node.args.len != 1 {
 			c.error('`.index()` expected 1 argument, but got ${node.args.len}', node.pos)
 		} else if !left_sym.has_method('index') {
-			arg_typ := c.expr(mut node.args[0].expr)
-			c.check_expected_call_arg(arg_typ, elem_typ, node.language, node.args[0]) or {
+			arg_typ := c.unwrap_generic(c.expr(mut node.args[0].expr))
+			c.check_expected_call_arg(arg_typ, c.unwrap_generic(elem_typ), node.language,
+				node.args[0]) or {
 				c.error('${err.msg()} in argument 1 to `.index()`', node.args[0].pos)
 			}
 		}
@@ -3624,7 +3626,7 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 		if node.args.len != 1 {
 			c.error('`.delete()` expected 1 argument, but got ${node.args.len}', node.pos)
 		} else {
-			arg_typ := c.expr(mut node.args[0].expr)
+			arg_typ := c.unwrap_generic(c.expr(mut node.args[0].expr))
 			c.check_expected_call_arg(arg_typ, ast.int_type, node.language, node.args[0]) or {
 				c.error('${err.msg()} in argument 1 to `.delete()`', node.args[0].pos)
 			}
@@ -4003,29 +4005,6 @@ fn (mut c Checker) resolve_fn_return_type(func &ast.Fn, node ast.CallExpr) ast.T
 		}
 	}
 	return ret_type
-}
-
-// resolve_return_type resolves the generic return type of CallExpr
-fn (mut c Checker) resolve_return_type(node ast.CallExpr) ast.Type {
-	if node.is_method {
-		left_sym := c.table.sym(c.unwrap_generic(node.left_type))
-		if method := c.table.find_method(left_sym, node.name) {
-			return c.resolve_fn_return_type(method, node)
-		}
-	} else if node.is_static_method {
-		if c.table.cur_fn != unsafe { nil } {
-			_, name := c.table.convert_generic_static_type_name(node.name, c.table.cur_fn.generic_names,
-				c.table.cur_concrete_types)
-			if func := c.table.find_fn(name) {
-				return c.resolve_fn_return_type(func, node)
-			}
-		}
-	} else {
-		if func := c.table.find_fn(node.name) {
-			return c.resolve_fn_return_type(func, node)
-		}
-	}
-	return node.return_type
 }
 
 fn (mut c Checker) check_must_use_call_result(node &ast.CallExpr, f &ast.Fn, label string) {

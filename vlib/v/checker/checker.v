@@ -36,8 +36,8 @@ pub const fixed_array_builtin_methods = ['contains', 'index', 'any', 'all', 'wai
 	'sorted', 'sort_with_compare', 'sorted_with_compare', 'reverse', 'reverse_in_place', 'count']
 pub const fixed_array_builtin_methods_chk = token.new_keywords_matcher_from_array_trie(fixed_array_builtin_methods)
 // TODO: remove `byte` from this list when it is no longer supported
-pub const reserved_type_names = ['byte', 'bool', 'char', 'i8', 'i16', 'int', 'i64', 'u8', 'u16',
-	'u32', 'u64', 'f32', 'f64', 'map', 'string', 'rune', 'usize', 'isize', 'voidptr', 'thread']
+pub const reserved_type_names = ['bool', 'char', 'i8', 'i16', 'int', 'i64', 'u8', 'u16', 'u32',
+	'u64', 'f32', 'f64', 'map', 'string', 'rune', 'usize', 'isize', 'voidptr', 'thread']
 pub const reserved_type_names_chk = token.new_keywords_matcher_from_array_trie(reserved_type_names)
 pub const vroot_is_deprecated_message = '@VROOT is deprecated, use @VMODROOT or @VEXEROOT instead'
 
@@ -1672,7 +1672,8 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 	} else if c.comptime.inside_comptime_for && typ == c.enum_data_type
 		&& node.field_name == 'value' {
 		// for comp-time enum.values
-		node.expr_type = c.type_resolver.type_map['${c.comptime.comptime_for_enum_var}.typ']
+		node.expr_type = c.type_resolver.get_ct_type_or_default('${c.comptime.comptime_for_enum_var}.typ',
+			node.expr_type)
 		node.typ = typ
 		return node.expr_type
 	}
@@ -1705,8 +1706,8 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 	mut unknown_field_msg := ''
 	mut has_field := false
 	mut field := ast.StructField{}
-	if field_name.len > 0 && field_name[0].is_capital() && sym.info is ast.Struct
-		&& sym.language == .v {
+	if field_name.len > 0 && sym.info is ast.Struct && sym.language == .v
+		&& field_name[0].is_capital() {
 		// x.Foo.y => access the embedded struct
 		for embed in sym.info.embeds {
 			embed_sym := c.table.sym(embed)
@@ -3056,7 +3057,8 @@ pub fn (mut c Checker) expr(mut node ast.Expr) ast.Type {
 				if node.expr.ct_expr {
 					node.expr_type = c.type_resolver.get_type(node.expr as ast.Ident)
 				} else if (node.expr as ast.Ident).name in c.type_resolver.type_map {
-					node.expr_type = c.type_resolver.type_map[(node.expr as ast.Ident).name]
+					node.expr_type = c.type_resolver.get_ct_type_or_default((node.expr as ast.Ident).name,
+						node.expr_type)
 				}
 			}
 			c.check_expr_option_or_result_call(node.expr, node.expr_type)
@@ -3348,7 +3350,8 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 	if mut node.expr is ast.ComptimeSelector {
 		node.expr_type = c.type_resolver.get_comptime_selector_type(node.expr, node.expr_type)
 	} else if node.expr is ast.Ident && c.comptime.is_comptime_variant_var(node.expr) {
-		node.expr_type = c.type_resolver.type_map['${c.comptime.comptime_for_variant_var}.typ']
+		node.expr_type = c.type_resolver.get_ct_type_or_default('${c.comptime.comptime_for_variant_var}.typ',
+			ast.void_type)
 	}
 	mut from_type := c.unwrap_generic(node.expr_type)
 	from_sym := c.table.sym(from_type)
