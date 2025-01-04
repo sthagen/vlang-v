@@ -1134,8 +1134,10 @@ pub mut:
 
 	ct_left_value_evaled  bool
 	ct_left_value         ComptTimeConstValue = empty_comptime_const_value
+	left_ct_expr          bool // true when left is comptime/generic expr
 	ct_right_value_evaled bool
 	ct_right_value        ComptTimeConstValue = empty_comptime_const_value
+	right_ct_expr         bool // true when right is comptime/generic expr
 
 	before_op_comments []Comment
 	after_op_comments  []Comment
@@ -1452,13 +1454,14 @@ pub:
 
 pub struct AliasTypeDecl {
 pub:
-	name        string
-	is_pub      bool
-	typ         Type
+	name     string
+	is_pub   bool
+	typ      Type
+	pos      token.Pos
+	type_pos token.Pos
+	comments []Comment
+pub mut:
 	parent_type Type
-	pos         token.Pos
-	type_pos    token.Pos
-	comments    []Comment
 }
 
 // SumTypeDecl is the ast node for `type MySumType = string | int`
