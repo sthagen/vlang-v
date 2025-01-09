@@ -313,15 +313,6 @@ pub fn (mut c Checker) check_scope_vars(sc &ast.Scope) {
 	}
 }
 
-// not used right now
-pub fn (mut c Checker) check2(mut ast_file ast.File) []errors.Error {
-	c.change_current_file(ast_file)
-	for mut stmt in ast_file.stmts {
-		c.stmt(mut stmt)
-	}
-	return c.errors
-}
-
 pub fn (mut c Checker) change_current_file(file &ast.File) {
 	c.file = unsafe { file }
 	c.vmod_file_content = ''
@@ -4687,6 +4678,12 @@ fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) ast.Type {
 		if mut node.right is ast.PrefixExpr {
 			if node.right.op == .amp {
 				c.error('unexpected `&`, expecting expression', node.right.pos)
+			}
+		} else if mut node.right is ast.ParExpr {
+			if mut node.right.expr is ast.PrefixExpr {
+				if node.right.expr.op == .amp {
+					c.error('cannot take the address of this expression', node.right.pos)
+				}
 			}
 		} else if mut node.right is ast.SelectorExpr {
 			if node.right.expr.is_literal() {
