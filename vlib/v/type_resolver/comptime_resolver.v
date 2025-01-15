@@ -55,6 +55,9 @@ pub fn (t &ResolverInfo) is_comptime(node ast.Expr) bool {
 		ast.ParExpr {
 			return t.is_comptime(node.expr)
 		}
+		ast.ComptimeSelector {
+			return true
+		}
 		else {
 			false
 		}
@@ -79,6 +82,8 @@ pub fn (t &ResolverInfo) get_ct_type_var(node ast.Expr) ast.ComptimeVarKind {
 	} else if node is ast.InfixExpr {
 		return t.get_ct_type_var(node.left)
 	} else if node is ast.ParExpr {
+		return t.get_ct_type_var(node.expr)
+	} else if node is ast.SelectorExpr {
 		return t.get_ct_type_var(node.expr)
 	}
 	return .no_comptime
