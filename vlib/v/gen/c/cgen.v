@@ -3656,20 +3656,26 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 			} else if node.op == .question {
 				cur_line := g.go_before_last_stmt().trim_space()
 				mut expr_str := ''
+				mut is_unwrapped := true
 				if mut node.expr is ast.ComptimeSelector && node.expr.left is ast.Ident {
 					// val.$(field.name)?
 					expr_str = '${node.expr.left.str()}.${g.comptime.comptime_for_field_value.name}'
 				} else if mut node.expr is ast.Ident && node.expr.ct_expr {
 					// val?
 					expr_str = node.expr.name
+					is_unwrapped = !g.inside_assign
 				}
 				g.writeln('if (${expr_str}.state != 0) {')
 				g.writeln2('\tpanic_option_not_set(_SLIT("none"));', '}')
 				g.write(cur_line)
-				typ := g.resolve_comptime_type(node.expr, node.typ)
-				g.write('*(${g.base_type(typ)}*)&')
-				g.expr(node.expr)
-				g.write('.data')
+				if is_unwrapped {
+					typ := g.resolve_comptime_type(node.expr, node.typ)
+					g.write('*(${g.base_type(typ)}*)&')
+					g.expr(node.expr)
+					g.write('.data')
+				} else {
+					g.expr(node.expr)
+				}
 			} else {
 				g.expr(node.expr)
 			}
@@ -4370,17 +4376,20 @@ fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 				cast_sym := g.table.sym(var_typ)
 
 				mut param_var := strings.new_builder(50)
-				is_option := obj.typ.has_flag(.option)
+				is_option := obj.orig_type.has_flag(.option)
 				var_typ_is_option := var_typ.has_flag(.option)
 				if obj.smartcasts.len > 0 {
-					is_option_unwrap := is_option && var_typ == obj.typ.clear_flag(.option)
+					is_option_unwrap := is_option && !obj.typ.has_flag(.option)
+						&& obj.orig_type.has_flag(.option)
 					mut opt_cast := false
 					mut func := if cast_sym.info is ast.Aggregate {
 						''
 					} else {
 						g.get_str_fn(var_typ)
 					}
-
+					if obj.smartcasts.len > 1 && obj_sym.kind == .sum_type {
+						param_var.write_string('*(')
+					}
 					param_var.write_string('(')
 					if obj_sym.kind == .sum_type && !obj.is_auto_heap {
 						if is_option {
@@ -6067,14 +6076,17 @@ fn (mut g Gen) check_expr_is_const(expr ast.Expr) bool {
 		ast.InfixExpr {
 			return g.check_expr_is_const(expr.left) && g.check_expr_is_const(expr.right)
 		}
-		ast.Ident, ast.StructInit, ast.EnumVal {
+		ast.Ident {
+			return expr.kind == .function || g.table.final_sym(expr.obj.typ).kind != .array_fixed
+		}
+		ast.StructInit, ast.EnumVal {
 			return true
 		}
 		ast.CastExpr {
 			return g.check_expr_is_const(expr.expr)
 		}
 		ast.PrefixExpr {
-			return g.check_expr_is_const(expr.right)
+			return expr.right is ast.Ident || g.check_expr_is_const(expr.right)
 		}
 		else {
 			return false
