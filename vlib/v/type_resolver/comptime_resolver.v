@@ -13,15 +13,6 @@ pub fn (mut t TypeResolver) get_comptime_selector_var_type(node ast.ComptimeSele
 	return field, field_name
 }
 
-// is_comptime_expr checks if the node is related to a comptime expr
-@[inline]
-pub fn (t &ResolverInfo) is_comptime_expr(node ast.Expr) bool {
-	return (node is ast.Ident && node.ct_expr)
-		|| (node is ast.IndexExpr && t.is_comptime_expr(node.left))
-		|| node is ast.ComptimeSelector
-		|| (node is ast.PostfixExpr && t.is_comptime_expr(node.expr))
-}
-
 // has_comptime_expr checks if the expr contains some comptime expr
 @[inline]
 pub fn (t &ResolverInfo) has_comptime_expr(node ast.Expr) bool {
@@ -75,6 +66,22 @@ pub fn (t &ResolverInfo) is_comptime_variant_var(node ast.Ident) bool {
 	return node.name == t.comptime_for_variant_var
 }
 
+// typeof_type resolves type for typeof() expr where field.typ is resolved to real type instead of int type to make type(field.typ).name working
+pub fn (mut t TypeResolver) typeof_type(node ast.Expr, default_type ast.Type) ast.Type {
+	if t.info.is_comptime(node) {
+		return t.get_type(node)
+	} else if node is ast.SelectorExpr && node.expr_type != 0 {
+		if node.expr is ast.Ident && node.is_field_typ {
+			return t.get_type_from_comptime_var(node.expr)
+		}
+		sym := t.table.sym(t.resolver.unwrap_generic(node.expr_type))
+		if f := t.table.find_field_with_embeds(sym, node.field_name) {
+			return f.typ
+		}
+	}
+	return default_type
+}
+
 // get_ct_type_var gets the comptime type of the variable (.generic_param, .key_var, etc)
 @[inline]
 pub fn (t &ResolverInfo) get_ct_type_var(node ast.Expr) ast.ComptimeVarKind {
@@ -92,24 +99,6 @@ pub fn (t &ResolverInfo) get_ct_type_var(node ast.Expr) ast.ComptimeVarKind {
 		return t.get_ct_type_var(node.expr)
 	}
 	return .no_comptime
-}
-
-// get_expr_type_or_default computes the ast node type regarding its or_expr if its comptime var otherwise default_typ is returned
-pub fn (mut t TypeResolver) get_expr_type_or_default(node ast.Expr, default_typ ast.Type) ast.Type {
-	if !t.info.is_comptime_expr(node) {
-		return default_typ
-	}
-	ctyp := t.get_type(node)
-	match node {
-		ast.Ident {
-			// returns the unwrapped type of the var
-			if ctyp.has_flag(.option) && node.or_expr.kind != .absent {
-				return ctyp.clear_flag(.option)
-			}
-		}
-		else {}
-	}
-	return if ctyp != ast.void_type { ctyp } else { default_typ }
 }
 
 // get_type_from_comptime_var retrives the comptime type related to $for variable
