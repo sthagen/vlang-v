@@ -48,6 +48,7 @@ mut:
 	// line_nr                   int
 	cheaders                  strings.Builder
 	preincludes               strings.Builder // allows includes to go before `definitions`
+	postincludes              strings.Builder // allows includes to go after all the rest of the code generation
 	includes                  strings.Builder // all C #includes required by V modules
 	typedefs                  strings.Builder
 	enum_typedefs             strings.Builder // enum types
@@ -263,7 +264,8 @@ mut:
 	has_debugger         bool   // $dbg has been used in the code
 	reflection_strings   &map[string]int
 	defer_return_tmp_var string
-	vweb_filter_fn_name  string // vweb__filter or x__vweb__filter, used by $vweb.html() for escaping strings in the templates, depending on which `vweb` import is used
+	vweb_filter_fn_name  string   // vweb__filter or x__vweb__filter, used by $vweb.html() for escaping strings in the templates, depending on which `vweb` import is used
+	export_funcs         []string // for .dll export function names
 }
 
 @[heap]
@@ -299,6 +301,7 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) GenO
 		cheaders:             strings.new_builder(15000)
 		includes:             strings.new_builder(100)
 		preincludes:          strings.new_builder(100)
+		postincludes:         strings.new_builder(100)
 		typedefs:             strings.new_builder(100)
 		enum_typedefs:        strings.new_builder(100)
 		type_definitions:     strings.new_builder(100)
@@ -386,6 +389,7 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) GenO
 			global_g.out.write(g.out) or { panic(err) }
 			global_g.cheaders.write(g.cheaders) or { panic(err) }
 			global_g.preincludes.write(g.preincludes) or { panic(err) }
+			global_g.postincludes.write(g.postincludes) or { panic(err) }
 			global_g.includes.write(g.includes) or { panic(err) }
 			global_g.typedefs.write(g.typedefs) or { panic(err) }
 			global_g.type_definitions.write(g.type_definitions) or { panic(err) }
@@ -403,6 +407,7 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) GenO
 			global_g.embedded_data.write(g.embedded_data) or { panic(err) }
 			global_g.shared_types.write(g.shared_types) or { panic(err) }
 			global_g.shared_functions.write(g.channel_definitions) or { panic(err) }
+			global_g.export_funcs << g.export_funcs
 
 			global_g.force_main_console = global_g.force_main_console || g.force_main_console
 
@@ -717,6 +722,15 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) GenO
 			helpers.writeln(fn_def)
 		}
 	}
+
+	if g.pref.is_shared && g.pref.os == .windows && g.export_funcs.len > 0 {
+		// generate a .def for export function names, avoid function name mangle
+		def_name := g.pref.out_name[0..g.pref.out_name.len - 4]
+		dll_name := g.pref.out_name.all_after_last('\\')
+		file_content := 'LIBRARY ${dll_name}.dll\n\nEXPORTS\n' + g.export_funcs.join('\n')
+		os.write_file('${def_name}.def', file_content) or { panic(err) }
+	}
+
 	// End of out_0.c
 
 	shelpers := helpers.str()
@@ -730,6 +744,12 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) GenO
 	extern_out_str := g.extern_out.str()
 	b.write_string(out_str)
 	b.writeln('// THE END.')
+
+	postincludes_str := g.postincludes.str()
+	if postincludes_str != '' {
+		b.write_string2('\n // V postincludes:\n', postincludes_str)
+	}
+
 	util.timing_measure('cgen common')
 	$if trace_all_generic_fn_keys ? {
 		gkeys := g.table.fn_generic_types.keys()
@@ -2114,6 +2134,9 @@ fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) bool {
 					g.stmt(stmt)
 				}
 			} else {
+				mut is_array_fixed_init := false
+				mut ret_type := ast.void_type
+
 				g.set_current_pos_as_last_stmt_pos()
 				g.skip_stmt_pos = true
 				mut is_noreturn := false
@@ -2121,11 +2144,23 @@ fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) bool {
 					is_noreturn = true
 				} else if stmt is ast.ExprStmt {
 					is_noreturn = is_noreturn_callexpr(stmt.expr)
+					if stmt.expr is ast.ArrayInit && stmt.expr.is_fixed {
+						is_array_fixed_init = true
+						ret_type = stmt.expr.typ
+					}
 				}
 				if !is_noreturn {
-					g.write('${tmp_var} = ')
+					if is_array_fixed_init {
+						g.write('memcpy(${tmp_var}, (${g.styp(ret_type)})')
+					} else {
+						g.write('${tmp_var} = ')
+					}
 				}
 				g.stmt(stmt)
+				if is_array_fixed_init {
+					lines := g.go_before_last_stmt().trim_right('; \n')
+					g.writeln('${lines}, sizeof(${tmp_var}));')
+				}
 				if !g.out.last_n(2).contains(';') {
 					g.writeln(';')
 				}
@@ -5410,6 +5445,21 @@ fn (mut g Gen) gen_option_error(target_type ast.Type, expr ast.Expr) {
 	g.write(', .data={EMPTY_STRUCT_INITIALIZATION} }')
 }
 
+fn (mut g Gen) hash_stmt_guarded_include(node ast.HashStmt) string {
+	mut missing_message := 'Header file ${node.main}, needed for module `${node.mod}` was not found.'
+	if node.msg != '' {
+		missing_message += ' ${node.msg}.'
+	} else {
+		missing_message += ' Please install the corresponding development headers.'
+	}
+	mut guarded_include := get_guarded_include_text(node.main, missing_message)
+	if node.main == '<errno.h>' {
+		// fails with musl-gcc and msvc; but an unguarded include works:
+		guarded_include = '#include ${node.main}'
+	}
+	return guarded_include
+}
+
 fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 	line_nr := node.pos.line_nr + 1
 	mut ct_condition := ''
@@ -5425,17 +5475,7 @@ fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 	}
 	// #include etc
 	if node.kind == 'include' {
-		mut missing_message := 'Header file ${node.main}, needed for module `${node.mod}` was not found.'
-		if node.msg != '' {
-			missing_message += ' ${node.msg}.'
-		} else {
-			missing_message += ' Please install the corresponding development headers.'
-		}
-		mut guarded_include := get_guarded_include_text(node.main, missing_message)
-		if node.main == '<errno.h>' {
-			// fails with musl-gcc and msvc; but an unguarded include works:
-			guarded_include = '#include ${node.main}'
-		}
+		guarded_include := g.hash_stmt_guarded_include(node)
 		if node.main.contains('.m') {
 			g.definitions.writeln('')
 			if ct_condition != '' {
@@ -5460,17 +5500,7 @@ fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 			}
 		}
 	} else if node.kind == 'preinclude' {
-		mut missing_message := 'Header file ${node.main}, needed for module `${node.mod}` was not found.'
-		if node.msg != '' {
-			missing_message += ' ${node.msg}.'
-		} else {
-			missing_message += ' Please install the corresponding development headers.'
-		}
-		mut guarded_include := get_guarded_include_text(node.main, missing_message)
-		if node.main == '<errno.h>' {
-			// fails with musl-gcc and msvc; but an unguarded include works:
-			guarded_include = '#include ${node.main}'
-		}
+		guarded_include := g.hash_stmt_guarded_include(node)
 		if node.main.contains('.m') {
 			// Might need to support '#preinclude' for .m files as well but for the moment
 			// this does the same as '#include' for them
@@ -5495,6 +5525,17 @@ fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 			if ct_condition != '' {
 				g.preincludes.writeln('#endif // \$if ${ct_condition}')
 			}
+		}
+	} else if node.kind == 'postinclude' {
+		guarded_include := g.hash_stmt_guarded_include(node)
+		g.postincludes.writeln('')
+		if ct_condition != '' {
+			g.postincludes.writeln('#if ${ct_condition}')
+		}
+		g.postincludes.writeln('// added by module `${node.mod}`, file: ${os.file_name(node.source_file)}:${line_nr}:')
+		g.postincludes.writeln(guarded_include)
+		if ct_condition != '' {
+			g.postincludes.writeln('#endif // \$if ${ct_condition}')
 		}
 	} else if node.kind == 'insert' {
 		if ct_condition != '' {
@@ -6351,6 +6392,7 @@ fn (mut g Gen) write_init_function() {
 		if g.pref.os != .windows {
 			g.writeln('__attribute__ ((constructor))')
 		}
+		g.export_funcs << '_vinit_caller'
 		g.writeln('void _vinit_caller() {')
 		g.writeln('\tstatic bool once = false; if (once) {return;} once = true;')
 		if g.nr_closures > 0 {
@@ -6362,6 +6404,7 @@ fn (mut g Gen) write_init_function() {
 		if g.pref.os != .windows {
 			g.writeln('__attribute__ ((destructor))')
 		}
+		g.export_funcs << '_vcleanup_caller'
 		g.writeln('void _vcleanup_caller() {')
 		g.writeln('\tstatic bool once = false; if (once) {return;} once = true;')
 		g.writeln('\t_vcleanup();')
