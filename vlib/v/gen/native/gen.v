@@ -180,8 +180,8 @@ mut:
 }
 
 struct LabelPatch {
-	id  i32
-	pos i32
+	id  i32 // id of the needed label address
+	pos i32 // where (in the generated code) to fix the address (of a jump for example)
 }
 
 struct BranchLabel {
@@ -710,7 +710,8 @@ fn (mut g Gen) get_type_size(raw_type ast.Type) i32 {
 			ast.u8_type_idx { 1 }
 			ast.i16_type_idx { 2 }
 			ast.u16_type_idx { 2 }
-			ast.int_type_idx { 4 }
+			ast.int_type_idx { 4 } // TODO: change when V will have changed
+			ast.i32_type_idx { 4 }
 			ast.u32_type_idx { 4 }
 			ast.i64_type_idx { 8 }
 			ast.u64_type_idx { 8 }
@@ -722,7 +723,7 @@ fn (mut g Gen) get_type_size(raw_type ast.Type) i32 {
 			ast.float_literal_type_idx { 8 }
 			ast.char_type_idx { 1 }
 			ast.rune_type_idx { 4 }
-			else { 8 }
+			else { g.n_error('unknown type size ${typ}') }
 		}
 	}
 	if typ.is_bool() {
@@ -859,7 +860,7 @@ fn (mut g Gen) allocate_string(s string, opsize i32, typ RelocType) i32 {
 // allocates a buffer variable: name, size of stored type (nb of bytes), nb of items
 fn (mut g Gen) allocate_array(name string, size i32, items i32) i32 {
 	g.println('; allocate array `${name}` item-size:${size} items:${items}:')
-	pos := g.code_gen.allocate_var(name, size, items) // store the lenght of the array on the stack
+	pos := g.code_gen.allocate_var(name, 4, items) // store the length of the array on the stack in a 4 byte var
 	g.stack_var_pos += (size * items) // reserve space on the stack for the items
 	return pos
 }
@@ -950,7 +951,8 @@ fn (mut g Gen) gen_to_string(reg Register, typ ast.Type) {
 	g.println('; to_string (reg:${reg}) {')
 	if typ.is_int() {
 		buffer := g.allocate_array('itoa-buffer', 1, 32) // 32 characters should be enough
-		g.code_gen.lea_var_to_reg(g.get_builtin_arg_reg(.int_to_string, 1), buffer)
+		end_of_buffer := buffer + 4 + 32 - 1 // 4 bytes for the size and 32 for the chars, -1 to not go out of array
+		g.code_gen.lea_var_to_reg(g.get_builtin_arg_reg(.int_to_string, 1), end_of_buffer)
 
 		arg0_reg := g.get_builtin_arg_reg(.int_to_string, 0)
 		if arg0_reg != reg {
@@ -958,7 +960,7 @@ fn (mut g Gen) gen_to_string(reg Register, typ ast.Type) {
 		}
 
 		g.call_builtin(.int_to_string)
-		g.code_gen.lea_var_to_reg(g.code_gen.main_reg(), buffer)
+		g.code_gen.lea_var_to_reg(g.code_gen.main_reg(), end_of_buffer) // the (int) string starts at the end of the buffer
 	} else if typ.is_bool() {
 		arg_reg := g.get_builtin_arg_reg(.bool_to_string, 0)
 		if arg_reg != reg {
@@ -983,10 +985,11 @@ fn (mut g Gen) gen_var_to_string(reg Register, expr ast.Expr, var Var, config Va
 		g.code_gen.convert_rune_to_string(reg, buffer, var, config)
 	} else if typ.is_int() {
 		buffer := g.allocate_array('itoa-buffer', 1, 32) // 32 characters should be enough
+		end_of_buffer := buffer + 4 + 32 - 1 // 4 bytes for the size and 32 for the chars, -1 to not go out of array
 		g.code_gen.mov_var_to_reg(g.get_builtin_arg_reg(.int_to_string, 0), var, config)
-		g.code_gen.lea_var_to_reg(g.get_builtin_arg_reg(.int_to_string, 1), buffer)
+		g.code_gen.lea_var_to_reg(g.get_builtin_arg_reg(.int_to_string, 1), end_of_buffer)
 		g.call_builtin(.int_to_string)
-		g.code_gen.lea_var_to_reg(reg, buffer)
+		g.code_gen.lea_var_to_reg(reg, end_of_buffer) // the (int) string starts at the end of the buffer
 	} else if typ.is_bool() {
 		g.code_gen.mov_var_to_reg(g.get_builtin_arg_reg(.bool_to_string, 0), var, config)
 		g.call_builtin(.bool_to_string)

@@ -24,9 +24,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  gcc:
+  gcc-windows:
     runs-on: windows-2019
-    timeout-minutes: 271
+    timeout-minutes: 60
     env:
       VFLAGS: -cc gcc
     steps:
@@ -75,9 +75,9 @@ jobs:
       - name: compile vup.v with -prod
         run: v -showcc -prod cmd/tools/vup.v
 
-  msvc:
+  msvc-windows:
     runs-on: windows-2019
-    timeout-minutes: 271
+    timeout-minutes: 60
     env:
       VFLAGS: -cc msvc
     steps:
@@ -123,9 +123,9 @@ jobs:
       - name: v2 self compilation
         run: v -o v2.exe cmd/v && .\v2.exe -o v3.exe cmd/v
 
-  tcc:
+  tcc-windows:
     runs-on: windows-2019
-    timeout-minutes: 181
+    timeout-minutes: 60
     env:
       VFLAGS: -cc tcc -no-retry-compilation
     steps:
