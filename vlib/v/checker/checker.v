@@ -3568,12 +3568,16 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 		tt := c.table.type_to_str(to_type)
 		c.error('cannot cast incompatible option ${final_to_sym.name} `${ft}` to `${tt}`',
 			node.pos)
-	}
-
-	if to_sym.kind == .rune && from_sym.is_string() {
+	} else if to_sym.kind == .rune && from_sym.is_string() {
 		snexpr := node.expr.str()
 		ft := c.table.type_to_str(from_type)
 		c.error('cannot cast `${ft}` to rune, use `${snexpr}.runes()` instead.', node.pos)
+	} else if !from_type.is_ptr() && from_type != ast.string_type
+		&& final_from_sym.info is ast.Struct && !final_from_sym.info.is_empty_struct()
+		&& (final_to_sym.is_int() || final_to_sym.is_float()) {
+		ft := c.table.type_to_str(from_type)
+		tt := c.table.type_to_str(to_type)
+		c.error('cannot cast type `${ft}` to `${tt}`', node.pos)
 	}
 
 	if to_sym.kind == .enum && !(c.inside_unsafe || c.file.is_translated) && from_sym.is_int() {
@@ -4331,6 +4335,8 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 				is_inherited = expr.obj.is_inherited
 				ct_type_var = if is_comptime {
 					.smartcast
+				} else if c.table.type_kind(to_type_) == .aggregate {
+					.aggregate
 				} else {
 					.no_comptime
 				}
