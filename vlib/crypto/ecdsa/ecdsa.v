@@ -166,21 +166,6 @@ mut:
 // PrivateKey.new creates a new key pair. By default, it would create a prime256v1 based key.
 // Dont forget to call `.free()` after finish with your key.
 pub fn PrivateKey.new(opt CurveOptions) !PrivateKey {
-	// Default to prime256v1 based key
-	mut group_nid := nid_prime256v1
-	match opt.nid {
-		.prime256v1 {}
-		.secp384r1 {
-			group_nid = nid_secp384r1
-		}
-		.secp521r1 {
-			group_nid = nid_secp521r1
-		}
-		.secp256k1 {
-			group_nid = nid_secp256k1
-		}
-	}
-	// New high level keypair generator
 	evpkey := C.EVP_PKEY_new()
 	pctx := C.EVP_PKEY_CTX_new_id(nid_evp_pkey_ec, 0)
 	if pctx == 0 {
@@ -195,7 +180,7 @@ pub fn PrivateKey.new(opt CurveOptions) !PrivateKey {
 		return error('EVP_PKEY_keygen_init failed')
 	}
 	// set the group (curve)
-	cn := C.EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, group_nid)
+	cn := C.EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, int(opt.nid))
 	if cn <= 0 {
 		C.EVP_PKEY_free(evpkey)
 		C.EVP_PKEY_CTX_free(pctx)
@@ -333,12 +318,6 @@ fn calc_digest_with_evpkey(key &C.EVP_PKEY, message []u8, opt SignerOpts) ![]u8 
 	if message.len == 0 {
 		return error('null-length messages')
 	}
-	bits_size := C.EVP_PKEY_get_bits(key)
-	if bits_size <= 0 {
-		return error(' bits_size was invalid')
-	}
-	key_size := (bits_size + 7) / 8
-
 	match opt.hash_config {
 		.with_no_hash, .with_recommended_hash {
 			md := default_digest(key)!
@@ -352,6 +331,7 @@ fn calc_digest_with_evpkey(key &C.EVP_PKEY, message []u8, opt SignerOpts) ![]u8 
 			if cfg.custom_hash == unsafe { nil } {
 				return error('Custom hasher was not defined')
 			}
+			key_size := evp_key_size(key)!
 			if key_size > cfg.custom_hash.size() {
 				if !cfg.allow_smaller_size {
 					return error('Hash into smaller size than current key size was not allowed')
