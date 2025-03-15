@@ -154,6 +154,11 @@ pub fn new_checker(table &ast.Table, pref_ &pref.Preferences) &Checker {
 	$if time_checking ? {
 		timers_should_print = true
 	}
+	v_current_commit_hash := if pref_.building_v {
+		version.githash(pref_.vroot) or { vcurrent_hash() }
+	} else {
+		vcurrent_hash()
+	}
 	mut checker := &Checker{
 		table:                         table
 		pref:                          pref_
@@ -162,8 +167,7 @@ pub fn new_checker(table &ast.Table, pref_ &pref.Preferences) &Checker {
 			label:        'checker'
 		)
 		match_exhaustive_cutoff_limit: pref_.checker_match_exhaustive_cutoff_limit
-		v_current_commit_hash:         if pref_.building_v { version.githash(pref_.vroot) or {
-				@VCURRENTHASH} } else { @VCURRENTHASH }
+		v_current_commit_hash:         v_current_commit_hash
 	}
 	checker.type_resolver = type_resolver.TypeResolver.new(table, checker)
 	checker.comptime = &checker.type_resolver.info
@@ -3583,6 +3587,12 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 		ft := c.table.type_to_str(from_type)
 		tt := c.table.type_to_str(to_type)
 		c.error('cannot cast type `${ft}` to `${tt}`', node.pos)
+	}
+
+	// T(0) where T is array or map
+	if node.typ.has_flag(.generic) && to_sym.kind in [.array, .map, .array_fixed]
+		&& node.expr.is_literal() {
+		c.error('cannot cast literal value to ${to_sym.name} type', node.pos)
 	}
 
 	if to_sym.kind == .enum && !(c.inside_unsafe || c.file.is_translated) && from_sym.is_int() {
