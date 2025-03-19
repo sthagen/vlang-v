@@ -343,8 +343,7 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) GenO
 		enum_data_type:       table.find_type('EnumData')
 		variant_data_type:    table.find_type('VariantData')
 		is_cc_msvc:           pref_.ccompiler == 'msvc'
-		use_segfault_handler: !('no_segfault_handler' in pref_.compile_defines
-			|| pref_.os in [.wasm32, .wasm32_emscripten])
+		use_segfault_handler: pref_.should_use_segfault_handler()
 		static_modifier:      if pref_.parallel_cc { 'static ' } else { '' }
 		static_non_parallel:  if !pref_.parallel_cc { 'static ' } else { '' }
 		has_reflection:       'v.reflection' in table.modules
@@ -2016,11 +2015,6 @@ pub fn (mut g Gen) new_tmp_var() string {
 pub fn (mut g Gen) new_global_tmp_var() string {
 	g.global_tmp_count++
 	return prefix_with_counter('_t', g.global_tmp_count)
-}
-
-pub fn (mut g Gen) new_tmp_declaration_name() string {
-	g.tmp_count_declarations++
-	return prefix_with_counter('_d', g.tmp_count_declarations)
 }
 
 pub fn (mut g Gen) current_tmp_var() string {
@@ -3974,7 +3968,7 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 					g.type_name(name_type)
 					return
 				} else if node.field_name in ['idx', 'unaliased_typ'] {
-					// `typeof(expr).idx`, // `typeof(expr).unalised_typ`
+					// `T.idx`, `T.unaliased_typ`, `typeof(expr).idx`, `typeof(expr).unalised_typ`
 					mut name_type := node.name_type
 					if node.expr is ast.TypeOf {
 						name_type = g.type_resolver.typeof_field_type(g.type_resolver.typeof_type(node.expr.expr,
@@ -3983,6 +3977,13 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 					} else {
 						g.write(int(g.unwrap_generic(name_type)).str())
 					}
+					return
+				} else if node.field_name in ['key_type', 'value_type', 'element_type'] {
+					// `T.<field_name>`, `typeof(expr).<field_name>`
+					mut name_type := node.name_type
+					name_type = g.type_resolver.typeof_field_type(g.type_resolver.typeof_type(node.expr,
+						name_type), node.field_name)
+					g.write(int(name_type).str())
 					return
 				} else if node.field_name == 'indirections' {
 					mut name_type := node.name_type
