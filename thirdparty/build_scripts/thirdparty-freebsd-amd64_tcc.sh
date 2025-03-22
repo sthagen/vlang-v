@@ -3,7 +3,7 @@
 ## and to record it later in the new commit message in thirdpart/tcc.
 
 ## WARNING: THE ORIGINAL OF THIS SCRIPT IS IN:
-## https://github.com/vlang/v/blob/master/thirdparty/build_scripts/thirdparty-linux-amd64_tcc.sh ,
+## https://github.com/vlang/v/blob/master/thirdparty/build_scripts/thirdparty-freebsd-amd64_tcc.sh ,
 ## I.E. IN THE MAIN V REPOSITORY. IF YOU NEED TO MAKE CHANGES, CHANGE THAT.
 ##
 ## THE `build.sh` FILE IN `vlang/tccbin` REPO IS A COPY, RECORDED AT THE TIME
@@ -21,6 +21,7 @@ if ! test -f vlib/v/compiler_errors_test.v; then
   exit 1
 fi
 
+export CFLAGS='-O3'
 export CURRENT_SCRIPT_PATH=$(realpath "$0")
 
 export TCC_COMMIT="${TCC_COMMIT:-mob}"
@@ -47,24 +48,22 @@ cd tinycc
 git checkout $TCC_COMMIT
 export TCC_COMMIT_FULL_HASH=$(git rev-parse HEAD)
 
-## Note: crt1.o is located in:
-## /usr/lib/x86_64-linux-gnu on Debian/Ubuntu
-## /usr/lib64 on Redhat/CentOS
-## /usr/lib on ArchLinux
-
 ./configure \
             --prefix=$TCC_FOLDER \
             --bindir=$TCC_FOLDER \
-            --crtprefix=$TCC_FOLDER/lib:/usr/lib/x86_64-linux-gnu:/usr/lib64:/usr/lib:/lib/x86_64-linux-gnu:/lib \
-            --libpaths=$TCC_FOLDER/lib/tcc:$TCC_FOLDER/lib:/usr/lib/x86_64-linux-gnu:/usr/lib64:/usr/lib:/lib/x86_64-linux-gnu:/lib:/usr/local/lib/x86_64-linux-gnu:/usr/local/lib \
-            --cc=$CC \
-            --extra-cflags=-O3 \
-            --config-bcheck=yes \
-            --config-backtrace=yes \
+            --crtprefix=$TCC_FOLDER/lib:/usr/lib:/usr/lib64 \
+            --sysincludepaths=$TCC_FOLDER/lib/tcc/include:/usr/local/include:/usr/include \
+            --libpaths=$TCC_FOLDER/lib/tcc:$TCC_FOLDER/lib:/usr/lib64:/usr/lib:/lib:/usr/local/lib \
+            --cc="$CC" \
+            --extra-cflags="$CFLAGS" \
+	    --config-backtrace=yes \
+	    --config-bcheck=yes \
             --debug
 
-make
-make install
+##     --extra-ldflags="-L/usr/home/ec2-user/v/tinycc -ltcc" \
+
+gmake
+gmake install
 
 popd
 
@@ -90,5 +89,6 @@ git add .
 git commit -m "build with \`$BUILD_CMD\`"
 popd
 
-echo "tcc commit: $TCC_COMMIT , full hash: $TCC_COMMIT_FULL_HASH . The tcc executable is ready in $TCC_FOLDER/tcc.exe "
+echo "tcc commit: $TCC_COMMIT , full hash: $TCC_COMMIT_FULL_HASH ."
+echo "The tcc executable is ready in $TCC_FOLDER/tcc.exe"
 
