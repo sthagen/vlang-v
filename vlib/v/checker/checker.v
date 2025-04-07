@@ -1794,7 +1794,8 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 		}
 		if field_sym.kind in [.sum_type, .interface] || field.typ.has_flag(.option) {
 			if !prevent_sum_type_unwrapping_once {
-				if scope_field := node.scope.find_struct_field(node.expr.str(), typ, field_name) {
+				scope_field := node.scope.find_struct_field(node.expr.str(), typ, field_name)
+				if scope_field != unsafe { nil } {
 					return scope_field.smartcasts.last()
 				}
 			}
@@ -2228,21 +2229,41 @@ fn (mut c Checker) stmt(mut node ast.Stmt) {
 	}
 	c.expected_type = ast.void_type
 	match mut node {
-		ast.EmptyStmt {
-			if c.pref.is_verbose {
-				eprintln('Checker.stmt() EmptyStmt')
-				print_backtrace()
+		ast.ExprStmt {
+			node.typ = c.expr(mut node.expr)
+			c.expected_type = ast.void_type
+			mut or_typ := ast.void_type
+			match mut node.expr {
+				ast.IndexExpr {
+					if node.expr.or_expr.kind != .absent {
+						node.is_expr = true
+						or_typ = node.typ
+					}
+				}
+				ast.PrefixExpr {
+					if node.expr.or_block.kind != .absent {
+						node.is_expr = true
+						or_typ = node.typ
+					}
+				}
+				else {}
 			}
-		}
-		ast.NodeError {}
-		ast.DebuggerStmt {
-			c.table.used_features.debugger = true
-		}
-		ast.AsmStmt {
-			c.asm_stmt(mut node)
-		}
-		ast.AssertStmt {
-			c.assert_stmt(mut node)
+			if !c.pref.is_repl && (c.stmt_level == 1 || (c.stmt_level > 1 && !c.is_last_stmt)) {
+				if mut node.expr is ast.InfixExpr {
+					if node.expr.op == .left_shift {
+						left_sym := c.table.final_sym(node.expr.left_type)
+						if left_sym.kind != .array
+							&& c.table.final_sym(c.unwrap_generic(node.expr.left_type)).kind != .array {
+							c.error('unused expression', node.pos)
+						}
+					}
+				}
+			}
+			if !c.inside_return {
+				c.check_expr_option_or_result_call(node.expr, or_typ)
+			}
+			// TODO: This should work, even if it's prolly useless .-.
+			// node.typ = c.check_expr_option_or_result_call(node.expr, ast.void_type)
 		}
 		ast.AssignStmt {
 			c.assign_stmt(mut node)
@@ -2295,42 +2316,6 @@ fn (mut c Checker) stmt(mut node ast.Stmt) {
 		ast.EnumDecl {
 			c.enum_decl(mut node)
 		}
-		ast.ExprStmt {
-			node.typ = c.expr(mut node.expr)
-			c.expected_type = ast.void_type
-			mut or_typ := ast.void_type
-			match mut node.expr {
-				ast.IndexExpr {
-					if node.expr.or_expr.kind != .absent {
-						node.is_expr = true
-						or_typ = node.typ
-					}
-				}
-				ast.PrefixExpr {
-					if node.expr.or_block.kind != .absent {
-						node.is_expr = true
-						or_typ = node.typ
-					}
-				}
-				else {}
-			}
-			if !c.pref.is_repl && (c.stmt_level == 1 || (c.stmt_level > 1 && !c.is_last_stmt)) {
-				if mut node.expr is ast.InfixExpr {
-					if node.expr.op == .left_shift {
-						left_sym := c.table.final_sym(node.expr.left_type)
-						if left_sym.kind != .array
-							&& c.table.final_sym(c.unwrap_generic(node.expr.left_type)).kind != .array {
-							c.error('unused expression', node.pos)
-						}
-					}
-				}
-			}
-			if !c.inside_return {
-				c.check_expr_option_or_result_call(node.expr, or_typ)
-			}
-			// TODO: This should work, even if it's prolly useless .-.
-			// node.typ = c.check_expr_option_or_result_call(node.expr, ast.void_type)
-		}
 		ast.FnDecl {
 			c.fn_decl(mut node)
 		}
@@ -2381,6 +2366,22 @@ fn (mut c Checker) stmt(mut node ast.Stmt) {
 		}
 		ast.TypeDecl {
 			c.type_decl(mut node)
+		}
+		ast.EmptyStmt {
+			if c.pref.is_verbose {
+				eprintln('Checker.stmt() EmptyStmt')
+				print_backtrace()
+			}
+		}
+		ast.NodeError {}
+		ast.DebuggerStmt {
+			c.table.used_features.debugger = true
+		}
+		ast.AsmStmt {
+			c.asm_stmt(mut node)
+		}
+		ast.AssertStmt {
+			c.assert_stmt(mut node)
 		}
 	}
 }
@@ -2913,6 +2914,9 @@ pub fn (mut c Checker) expr(mut node ast.Expr) ast.Type {
 		return ast.void_type
 	}
 	match mut node {
+		ast.IfExpr {
+			return c.if_expr(mut node)
+		}
 		ast.ComptimeType {
 			c.error('incorrect use of compile-time type', node.pos)
 		}
@@ -3108,9 +3112,6 @@ pub fn (mut c Checker) expr(mut node ast.Expr) ast.Type {
 		}
 		ast.Ident {
 			return c.ident(mut node)
-		}
-		ast.IfExpr {
-			return c.if_expr(mut node)
 		}
 		ast.IfGuardExpr {
 			old_inside_if_guard := c.inside_if_guard
@@ -4379,7 +4380,8 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 				}
 			}
 			expr_str := expr.expr.str()
-			if mut field := scope.find_struct_field(expr_str, expr.expr_type, expr.field_name) {
+			field := scope.find_struct_field(expr_str, expr.expr_type, expr.field_name)
+			if field != unsafe { nil } {
 				smartcasts << field.smartcasts
 			}
 			// smartcast either if the value is immutable or if the mut argument is explicitly given

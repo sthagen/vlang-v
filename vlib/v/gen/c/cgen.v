@@ -3008,7 +3008,8 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 					}
 				}
 			} else if expr is ast.SelectorExpr {
-				if v := scope.find_struct_field(expr.expr.str(), expr.expr_type, expr.field_name) {
+				v := scope.find_struct_field(expr.expr.str(), expr.expr_type, expr.field_name)
+				if v != unsafe { nil } {
 					if v.smartcasts.len > 0 && unwrapped_expected_type == v.orig_type {
 						is_already_sum_type = true
 					}
@@ -4178,7 +4179,8 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 			if !prevent_sum_type_unwrapping_once {
 				// check first if field is sum type because scope searching is expensive
 				scope := g.file.scope.innermost(node.pos.pos)
-				if field := scope.find_struct_field(node.expr.str(), node.expr_type, node.field_name) {
+				field := scope.find_struct_field(node.expr.str(), node.expr_type, node.field_name)
+				if field != unsafe { nil } {
 					nested_unwrap := is_option && field.smartcasts.len > 1
 					is_option_unwrap = is_option && field.smartcasts.len > 0
 						&& field.typ.clear_flag(.option) == field.smartcasts.last()
@@ -5517,10 +5519,9 @@ fn (mut g Gen) concat_expr(node ast.ConcatExpr) {
 		g.write('(${styp}){')
 		for i, expr in node.vals {
 			g.write('.arg${i}=')
-			if types[i].has_flag(.option) && expr.is_literal() {
-				g.write('{.data=')
-				g.expr(expr)
-				g.write('}')
+			expr_typ := g.get_expr_type(expr)
+			if expr_typ != ast.void_type && types[i].has_flag(.option) {
+				g.expr_with_opt(expr, expr_typ, types[i])
 			} else {
 				old_left_is_opt := g.left_is_opt
 				g.left_is_opt = true
@@ -5942,7 +5943,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 					multi_unpack += g.go_before_last_stmt()
 					g.write(line)
 					expr_styp := g.base_type(call_expr.return_type)
-					tmp = ('(*(${expr_styp}*)${tmp}.data)')
+					tmp = '(*(${expr_styp}*)${tmp}.data)'
 				}
 				expr_types := expr_sym.mr_info().types
 				for j, _ in expr_types {
