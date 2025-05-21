@@ -1783,7 +1783,7 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 			else if param.typ == ast.voidptr_type && func.language == .v
 				&& arg_typ !in [ast.voidptr_type, ast.nil_type] && arg_typ.nr_muls() == 0
 				&& func.name !in ['isnil', 'ptr_str'] && !func.name.starts_with('json.')
-				&& arg_typ_sym.kind !in [.float_literal, .int_literal, .charptr]
+				&& arg_typ_sym.kind !in [.float_literal, .int_literal, .charptr, .function]
 				&& !c.pref.backend.is_js() {
 				c.warn('automatic ${arg_typ_sym.name} referencing/dereferencing into voidptr is deprecated and will be removed soon; use `foo(&x)` instead of `foo(x)`',
 					call_arg.pos)
@@ -2983,8 +2983,8 @@ fn (mut c Checker) check_predicate_param(is_map bool, elem_typ ast.Type, node as
 		// Finish early so that it doesn't fail later
 		return
 	}
-	arg_expr := node.args[0].expr
-	match arg_expr {
+	mut arg_expr := node.args[0].expr
+	match mut arg_expr {
 		ast.AnonFn {
 			if arg_expr.decl.return_type.has_flag(.option) {
 				c.error('option needs to be unwrapped before using it in map/filter',
@@ -3024,7 +3024,7 @@ fn (mut c Checker) check_predicate_param(is_map bool, elem_typ ast.Type, node as
 						arg_expr.pos)
 				}
 			} else if arg_expr.kind == .variable {
-				if arg_expr.obj is ast.Var {
+				if mut arg_expr.obj is ast.Var {
 					expr := arg_expr.obj.expr
 					if expr is ast.AnonFn {
 						// copied from above
@@ -3084,13 +3084,18 @@ fn (mut c Checker) check_predicate_param(is_map bool, elem_typ ast.Type, node as
 			}
 		}
 		ast.LambdaExpr {
-			if arg_expr.expr is ast.CallExpr && is_map
+			if mut arg_expr.expr is ast.CallExpr && is_map
 				&& arg_expr.expr.return_type in [ast.void_type, 0] {
 				c.error('type mismatch, `${arg_expr.expr.name}` does not return anything',
 					arg_expr.expr.pos)
 			}
 		}
-		else {}
+		else {
+			if !is_map && c.expr(mut arg_expr) != ast.bool_type {
+				c.error('invalid expression, expected infix expr, lambda or function',
+					arg_expr.pos())
+			}
+		}
 	}
 }
 
