@@ -911,10 +911,8 @@ fn (mut c Checker) fail_if_immutable(mut expr ast.Expr) (string, token.Pos) {
 		}
 		ast.ComptimeSelector {
 			mut expr_left := expr.left
-			if mut expr.left is ast.Ident {
-				if mut expr.left.obj is ast.Var {
-					c.fail_if_immutable(mut expr_left)
-				}
+			if mut expr.left is ast.Ident && expr.left.obj is ast.Var {
+				c.fail_if_immutable(mut expr_left)
 			}
 			return '', expr.pos
 		}
@@ -1116,6 +1114,9 @@ fn (mut c Checker) fail_if_immutable(mut expr ast.Expr) (string, token.Pos) {
 				c.fail_if_immutable(mut last_expr)
 			}
 			return '', expr.pos
+		}
+		ast.AsCast {
+			to_lock, pos = c.fail_if_immutable(mut expr.expr)
 		}
 		else {
 			if !expr.is_pure_literal() {
@@ -1678,10 +1679,8 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 	c.inside_selector_expr = true
 	mut typ := c.expr(mut node.expr)
 	if node.expr.is_auto_deref_var() {
-		if mut node.expr is ast.Ident {
-			if mut node.expr.obj is ast.Var {
-				typ = node.expr.obj.typ
-			}
+		if mut node.expr is ast.Ident && node.expr.obj is ast.Var {
+			typ = node.expr.obj.typ
 		}
 	}
 	c.inside_selector_expr = old_selector_expr
@@ -2637,6 +2636,13 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 		'include', 'insert', 'preinclude', 'postinclude' {
 			original_flag := node.main
 			mut flag := node.main
+			if flag.contains('@DIR') {
+				vdir := c.dir_path()
+				val := flag.replace('@DIR', vdir)
+				node.val = '${node.kind} ${val}'
+				node.main = val
+				flag = val
+			}
 			if flag.contains('@VROOT') {
 				// c.note(checker.vroot_is_deprecated_message, node.pos)
 				vroot := util.resolve_vmodroot(flag.replace('@VROOT', '@VMODROOT'), c.file.path) or {
@@ -2742,6 +2748,10 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 					c.error(err.msg(), node.pos)
 					return
 				}
+			}
+			if flag.contains('@DIR') {
+				// expand `@DIR` to its absolute path
+				flag = flag.replace('@DIR', c.dir_path())
 			}
 			if flag.contains('@VEXEROOT') {
 				// expand `@VEXEROOT` to its absolute path
@@ -3915,6 +3925,9 @@ fn (mut c Checker) at_expr(mut node ast.AtExpr) ast.Type {
 		.file_path {
 			node.val = os.real_path(c.file.path)
 		}
+		.file_dir {
+			node.val = os.real_path(os.dir(c.file.path))
+		}
 		.line_nr {
 			node.val = (node.pos.line_nr + 1).str()
 		}
@@ -4417,10 +4430,8 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 				}
 			}
 			mut expr_str := expr.expr.str()
-			if mut expr.expr is ast.ParExpr {
-				if mut expr.expr.expr is ast.AsCast {
-					expr_str = expr.expr.expr.expr.str()
-				}
+			if mut expr.expr is ast.ParExpr && expr.expr.expr is ast.AsCast {
+				expr_str = expr.expr.expr.expr.str()
 			}
 			field := scope.find_struct_field(expr_str, expr.expr_type, expr.field_name)
 			if field != unsafe { nil } {
@@ -5058,15 +5069,12 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 		|| typ.is_pointer() {
 		mut is_ok := false
 		mut is_mut_struct := false
-		if mut node.left is ast.Ident {
-			if mut node.left.obj is ast.Var {
-				// `mut param []T` function parameter
-				is_ok = node.left.obj.is_mut && node.left.obj.is_arg && !typ.deref().is_ptr()
-					&& typ_sym.kind != .struct
-				// `mut param Struct`
-				is_mut_struct = node.left.obj.is_mut && node.left.obj.is_arg
-					&& typ_sym.kind == .struct
-			}
+		if mut node.left is ast.Ident && node.left.obj is ast.Var {
+			// `mut param []T` function parameter
+			is_ok = node.left.obj.is_mut && node.left.obj.is_arg && !typ.deref().is_ptr()
+				&& typ_sym.kind != .struct
+			// `mut param Struct`
+			is_mut_struct = node.left.obj.is_mut && node.left.obj.is_arg && typ_sym.kind == .struct
 		}
 		if !is_ok && node.index is ast.RangeExpr {
 			s := c.table.type_to_str(typ)
@@ -5738,4 +5746,8 @@ pub fn (mut c Checker) update_unresolved_fixed_sizes() {
 			}
 		}
 	}
+}
+
+fn (mut c Checker) dir_path() string {
+	return os.real_path(os.dir(c.file.path))
 }
