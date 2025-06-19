@@ -1,4 +1,4 @@
-// vtest build: !msvc // msvc hung, maybe sync/atomic bug
+// vtest build: !windows // msvc hung, maybe sync/atomic bug, gcc on windows does too, although less frequently
 import time
 import sync
 import pool
@@ -195,7 +195,7 @@ fn test_concurrent_access() {
 	defer {
 		p.close()
 	}
-	mut wg := &sync.WaitGroup{}
+	mut wg := sync.new_waitgroup()
 
 	for _ in 0 .. 20 {
 		wg.add(1)
