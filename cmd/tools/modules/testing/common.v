@@ -54,9 +54,6 @@ pub const is_python_present = os.execute('python --version').exit_code == 0
 pub const is_sqlite3_present = os.execute('sqlite3 --version').exit_code == 0
 	&& os.execute('pkg-config sqlite3 --libs').exit_code == 0
 
-pub const is_openssl_present = os.execute('openssl --version').exit_code == 0
-	&& os.execute('pkg-config openssl --libs').exit_code == 0
-
 pub const all_processes = get_all_processes()
 
 pub const header_bytes_to_search_for_module_main = 500
@@ -453,6 +450,11 @@ fn worker_trunner(mut p pool.PoolProcessor, idx int, thread_id int) voidptr {
 	} else {
 		fname_without_extension
 	}
+	mut details := get_test_details(file)
+	if details.vflags != '' && !is_fmt {
+		cmd_options << details.vflags
+	}
+
 	reproduce_options := cmd_options.clone()
 	generated_binary_fpath := os.join_path_single(test_folder_path, generated_binary_fname)
 	if produces_file_output {
@@ -478,7 +480,6 @@ fn worker_trunner(mut p pool.PoolProcessor, idx int, thread_id int) voidptr {
 	} else {
 		os.quoted_path(generated_binary_fpath)
 	}
-	mut details := get_test_details(file)
 	mut should_be_built := true
 	if details.vbuild != '' {
 		should_be_built = ts.build_environment.eval(details.vbuild) or {
@@ -820,10 +821,14 @@ pub mut:
 	hide_retries bool   // when true, all retry tries are silent; used by `vlib/v/tests/retry_test.v`
 	vbuild       string // could be `!(windows && tinyc)`
 	vbuild_line  int    // for more precise error reporting, if the `vbuild` expression is incorrect
+	vflags       string // custom compilation flags for the test (enables for example: `// vtest vflags: -w`, for tests that have known warnings, but should still pass with -W)
 }
 
 pub fn get_test_details(file string) TestDetails {
 	mut res := TestDetails{}
+	if !os.is_file(file) {
+		return res
+	}
 	lines := os.read_lines(file) or { [] }
 	for idx, line in lines {
 		if line.starts_with('// vtest retry:') {
@@ -835,6 +840,9 @@ pub fn get_test_details(file string) TestDetails {
 		if line.starts_with('// vtest build:') {
 			res.vbuild = line.all_after(':').trim_space()
 			res.vbuild_line = idx + 1
+		}
+		if line.starts_with('// vtest vflags:') {
+			res.vflags = line.all_after(':').trim_space()
 		}
 		if line.starts_with('// vtest hide_retries') {
 			res.hide_retries = true
@@ -877,6 +885,18 @@ fn get_max_header_len() int {
 	}
 	return cols
 }
+
+fn check_openssl_present() bool {
+	$if openbsd {
+		return os.execute('eopenssl34 --version').exit_code == 0
+			&& os.execute('pkg-config eopenssl34 --libs').exit_code == 0
+	} $else {
+		return os.execute('openssl --version').exit_code == 0
+			&& os.execute('pkg-config openssl --libs').exit_code == 0
+	}
+}
+
+pub const is_openssl_present = check_openssl_present()
 
 // is_started_mysqld is true, when the test runner determines that there is a running mysql server
 pub const is_started_mysqld = find_started_process('mysqld') or { '' }
