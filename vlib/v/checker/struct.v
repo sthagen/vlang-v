@@ -67,6 +67,10 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 			if node.language != .c && attr.name == 'typedef' {
 				c.error('`typedef` attribute can only be used with C structs', node.pos)
 			}
+			aligned := if attr.arg == '' { 0 } else { attr.arg.int() }
+			if aligned > 1 {
+				c.table.used_features.memory_align = true
+			}
 		}
 
 		// Evaluate the size of the unresolved fixed array
@@ -861,6 +865,8 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 				mut info := first_sym.info as ast.Struct
 				c.check_uninitialized_struct_fields_and_embeds(node, first_sym, mut info, mut
 					inited_fields)
+			} else if first_sym.kind == .array {
+				c.table.used_features.arr_init = true
 			}
 		}
 		.none {
