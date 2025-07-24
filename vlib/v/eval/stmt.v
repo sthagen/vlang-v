@@ -4,10 +4,16 @@ import v.ast
 import v.token
 
 pub fn (mut e Eval) stmts(stmts []ast.Stmt) {
+	if e.executed_return_stmt {
+		return
+	}
 	e.open_scope()
 	for stmt in stmts {
-		e.stmt(stmt)
-		if e.returning {
+		if !e.executed_return_stmt {
+			e.stmt(stmt)
+		}
+		if stmt is ast.Return {
+			e.executed_return_stmt = true
 			break
 		}
 	}
@@ -60,11 +66,13 @@ pub fn (mut e Eval) stmt(stmt ast.Stmt) {
 			}
 		}
 		ast.Return {
+			old_returning := e.returning
 			e.returning = true
 			e.return_values = []
 			for i, expr in stmt.exprs {
 				e.return_values << e.expr(expr, stmt.types[i])
 			}
+			e.returning = old_returning
 		}
 		ast.ForInStmt {
 			if !stmt.is_range {
