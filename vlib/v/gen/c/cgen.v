@@ -79,6 +79,7 @@ mut:
 	json_forward_decls        strings.Builder            // json type forward decls
 	sql_buf                   strings.Builder            // for writing exprs to args via `sqlite3_bind_int()` etc
 	global_const_defs         map[string]GlobalConstDef
+	vsafe_arithmetic_ops      map[string]VSafeArithmeticOp // 'VSAFE_DIV_u8' -> {11, /}, 'VSAFE_MOD_u8' -> {11,%}, 'VSAFE_MOD_i64' -> the same but with 9
 	sorted_global_const_names []string
 	file                      &ast.File  = unsafe { nil }
 	table                     &ast.Table = unsafe { nil }
@@ -408,6 +409,9 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) GenO
 			global_g.force_main_console = global_g.force_main_console || g.force_main_console
 
 			// merge maps
+			for k, v in g.vsafe_arithmetic_ops {
+				global_g.vsafe_arithmetic_ops[k] = v
+			}
 			for k, v in g.global_const_defs {
 				global_g.global_const_defs[k] = v
 			}
@@ -661,16 +665,15 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) GenO
 	if g.channel_definitions.len > 0 {
 		b.write_string2('\n// V channel code:\n', g.channel_definitions.str())
 	}
-	if g.anon_fn_definitions.len > 0 {
-		if g.nr_closures > 0 {
-			b.writeln2('\n// V closure helpers', c_closure_helpers(g.pref))
+	if g.vsafe_arithmetic_ops.len > 0 {
+		for vsafe_fn_name, val in g.vsafe_arithmetic_ops {
+			styp := g.styp(val.typ)
+			if val.op == .div {
+				b.writeln('static inline ${styp} ${vsafe_fn_name}(${styp} x, ${styp} y) { if (_unlikely_(0 == y)) { return 0; } else { return x / y; } }')
+			} else {
+				b.writeln('static inline ${styp} ${vsafe_fn_name}(${styp} x, ${styp} y) { if (_unlikely_(0 == y)) { return x; } else { return x % y; } }')
+			}
 		}
-		/*
-		b.writeln('\n// V anon functions:')
-		for fn_def in g.anon_fn_definitions {
-			b.writeln(fn_def)
-		}
-		*/
 	}
 	if g.pref.is_coverage {
 		b.write_string2('\n// V coverage:\n', g.cov_declarations.str())
@@ -686,21 +689,6 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) GenO
 	// to compile for the C compiler
 	if g.embedded_data.len > 0 {
 		helpers.write_string2('\n// V embedded data:\n', g.embedded_data.str())
-	}
-	if g.anon_fn_definitions.len > 0 {
-		if g.nr_closures > 0 {
-			helpers.writeln2('\n// V closure helpers', c_closure_fn_helpers(g.pref))
-		}
-		/*
-		b.writeln('\n// V anon functions:')
-		for fn_def in g.anon_fn_definitions {
-			b.writeln(fn_def)
-		}
-		*/
-		if g.pref.parallel_cc {
-			g.extern_out.writeln('extern void* __closure_create(void* fn, void* data);')
-			g.extern_out.writeln('extern void __closure_init();')
-		}
 	}
 	if g.pref.parallel_cc {
 		helpers.writeln('\n// V global/const non-precomputed definitions:')
@@ -4367,7 +4355,7 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 					g.gen_closure_fn(expr_styp, m, name)
 				}
 			}
-			g.write('__closure_create(${name}, ')
+			g.write('builtin__closure__closure_create(${name}, ')
 			if !receiver.typ.is_ptr() {
 				g.write('memdup_uncollectable(')
 			}
@@ -4523,7 +4511,7 @@ fn (mut g Gen) gen_closure_fn(expr_styp string, m ast.Fn, name string) {
 		g.extern_out.writeln(';')
 	}
 	sb.writeln(' {')
-	sb.writeln('\t${data_styp}* a0 = __CLOSURE_GET_DATA();')
+	sb.writeln('\t${data_styp}* a0 = g_closure.closure_get_data();')
 	if m.return_type != ast.void_type {
 		sb.write_string('\treturn ')
 	} else {
@@ -6535,10 +6523,6 @@ fn (mut g Gen) write_init_function() {
 		g.writeln('\tbuiltin_init();')
 	}
 
-	if g.nr_closures > 0 {
-		g.writeln('\t_closure_mtx_init();')
-	}
-
 	// reflection bootstrapping
 	if g.has_reflection {
 		if var := g.global_const_defs['g_reflection'] {
@@ -6597,6 +6581,10 @@ fn (mut g Gen) write_init_function() {
 		}
 	}
 
+	if g.nr_closures > 0 {
+		g.writeln('\tbuiltin__closure__closure_init();')
+	}
+
 	g.writeln('}')
 	if g.pref.printfn_list.len > 0 && '_vinit' in g.pref.printfn_list {
 		println(g.out.after(fn_vinit_start_pos))
@@ -6644,7 +6632,7 @@ fn (mut g Gen) write_init_function() {
 		g.writeln('void _vinit_caller() {')
 		g.writeln('\tstatic bool once = false; if (once) {return;} once = true;')
 		if g.nr_closures > 0 {
-			g.writeln('\t__closure_init(); // vinit_caller()')
+			g.writeln('\tbuiltin__closure__closure_init(); // vinit_caller()')
 		}
 		g.writeln('\t_vinit(0,0);')
 		g.writeln('}')
