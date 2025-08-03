@@ -10,13 +10,11 @@ import v.util
 @[heap; minify]
 pub struct UsedFeatures {
 pub mut:
-	dump           bool            // dump()
-	index          bool            // string[0]
-	range_index    bool            // string[0..1]
-	cast_ptr       bool            // &u8(...)
+	dump           bool            // filled in by markused
 	anon_fn        bool            // fn () { }
 	auto_str       bool            // auto str fns
 	auto_str_ptr   bool            // auto str fns for ptr type
+	auto_str_arr   bool            // auto str fns for array
 	arr_prepend    bool            // arr.prepend()
 	arr_insert     bool            // arr.insert()
 	arr_first      bool            // arr.first()
@@ -35,6 +33,7 @@ pub mut:
 	used_veb_types []Type          // veb context types, filled in by checker
 	used_maps      int             // how many times maps were used, filled in by markused
 	used_none      int             // how many times `none` was used, filled in by markused
+	used_closures  int             // number of used closures, either directly with `fn [state] () {}`, or indirectly (though `instance.method` promotions)
 	// json             bool            // json is imported
 	comptime_calls map[string]bool // resolved name to call on comptime
 	comptime_syms  map[Type]bool   // resolved syms (generic)

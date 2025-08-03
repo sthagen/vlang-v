@@ -1,7 +1,6 @@
 module decoder2
 
 import strconv
-import time
 import strings
 
 const null_in_string = 'null'
@@ -149,34 +148,152 @@ pub enum ValueKind {
 	null
 }
 
-// error generates an error message with context from the JSON string.
-fn (mut checker Decoder) error(message string) ! {
-	json := if checker.json.len < checker.checker_idx + 5 {
-		checker.json
-	} else {
-		checker.json[0..checker.checker_idx + 5]
+const max_context_lenght = 50
+const max_extra_charaters = 5
+const tab_width = 8
+
+pub struct JsonDecodeError {
+	Error
+	context string
+pub:
+	message string
+
+	line      int
+	character int
+}
+
+fn (e JsonDecodeError) msg() string {
+	return '\n${e.line}:${e.character}: Invalid json: ${e.message}\n${e.context}'
+}
+
+// checker_error generates a checker error message showing the position in the json string
+fn (mut checker Decoder) checker_error(message string) ! {
+	position := checker.checker_idx
+
+	mut line_number := 0
+	mut character_number := 0
+	mut last_newline := 0
+
+	for i := position - 1; i >= 0; i-- {
+		if last_newline == 0 {
+			if checker.json[i] == `\n` {
+				last_newline = i + 1
+			} else if checker.json[i] == `\t` {
+				character_number += tab_width
+			} else {
+				character_number++
+			}
+		}
+		if checker.json[i] == `\n` {
+			line_number++
+		}
 	}
 
-	mut error_message := '\n'
-	last_new_line := json.last_index_u8(`\n`)
-	if last_new_line != -1 {
-		error_message += json[last_new_line..checker.checker_idx]
-	} else {
-		error_message += json[0..checker.checker_idx]
-	}
-	error_message += [json[checker.checker_idx]].bytestr()
+	cutoff := character_number > max_context_lenght
 
-	error_message += '\n'
+	// either start of string, last newline or a limited amount of characters
+	context_start := if cutoff { position - max_context_lenght } else { last_newline }
 
-	if last_new_line != -1 {
-		error_message += ' '.repeat(checker.checker_idx - last_new_line)
-	} else {
-		error_message += ' '.repeat(checker.checker_idx)
+	// print some extra characters
+	mut context_end := int_min(checker.json.len, position + max_extra_charaters)
+	context_end_newline := checker.json[position..context_end].index_u8(`\n`)
+
+	if context_end_newline != -1 {
+		context_end = position + context_end_newline
 	}
 
-	error_message += '^ ${message}'
+	mut context := ''
 
-	return error(error_message)
+	if cutoff {
+		context += '...'
+	}
+	context += checker.json[context_start..position]
+	context += '\e[31m${checker.json[position].ascii_str()}\e[0m'
+	context += checker.json[position + 1..context_end]
+	context += '\n'
+
+	if cutoff {
+		context += ' '.repeat(max_context_lenght + 3)
+	} else {
+		context += ' '.repeat(character_number)
+	}
+	context += '\e[31m^\e[0m'
+
+	return JsonDecodeError{
+		context:   context
+		message:   'Syntax: ${message}'
+		line:      line_number + 1
+		character: character_number + 1
+	}
+}
+
+// decode_error generates a decoding error from the decoding stage
+fn (mut decoder Decoder) decode_error(message string) ! {
+	mut error_info := ValueInfo{}
+	if decoder.current_node != unsafe { nil } {
+		error_info = decoder.current_node.value
+	} else {
+		error_info = decoder.values_info.tail.value
+	}
+
+	start := error_info.position
+	end := start + int_min(error_info.length, max_context_lenght)
+
+	mut line_number := 0
+	mut character_number := 0
+	mut last_newline := 0
+
+	for i := start - 1; i >= 0; i-- {
+		if last_newline == 0 {
+			if decoder.json[i] == `\n` {
+				last_newline = i + 1
+			} else if decoder.json[i] == `\t` {
+				character_number += tab_width
+			} else {
+				character_number++
+			}
+		}
+		if decoder.json[i] == `\n` {
+			line_number++
+		}
+	}
+
+	cutoff := character_number > max_context_lenght
+
+	// either start of string, last newline or a limited amount of characters
+	context_start := if cutoff { start - max_context_lenght } else { last_newline }
+
+	// print some extra characters
+	mut context_end := int_min(decoder.json.len, end + max_extra_charaters)
+	context_end_newline := decoder.json[end..context_end].index_u8(`\n`)
+
+	if context_end_newline != -1 {
+		context_end = end + context_end_newline
+	}
+
+	mut context := ''
+
+	if cutoff {
+		context += '...'
+	}
+	context += decoder.json[context_start..start]
+	context += '\e[31m${decoder.json[start..end]}\e[0m'
+	context += decoder.json[end..context_end]
+	context += '\n'
+
+	if cutoff {
+		context += ' '.repeat(max_context_lenght + 3)
+	} else {
+		context += ' '.repeat(character_number)
+	}
+	context += '\e[31m${'~'.repeat(error_info.length)}\e[0m'
+
+	return JsonDecodeError{
+		context:   context
+		message:   'Data: ${message}'
+		line:      line_number + 1
+		character: character_number + 1
+	}
 }
 
 // check_json_format checks if the JSON string is valid and updates the decoder state.
@@ -184,12 +301,12 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 	checker_end := checker.json.len
 	// check if the JSON string is empty
 	if val == '' {
-		return checker.error('empty string')
+		return checker.checker_error('empty string')
 	}
 
 	// skip whitespace
 	for val[checker.checker_idx] in whitespace_chars {
-		if checker.checker_idx >= checker_end - 1 {
+		if checker.checker_idx == checker_end {
 			break
 		}
 		checker.checker_idx++
@@ -206,12 +323,12 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 	mut actual_value_info_pointer := checker.values_info.last()
 	match value_kind {
 		.unknown {
-			return checker.error('unknown value kind')
+			return checker.checker_error('unknown value kind')
 		}
 		.null {
 			// check if the JSON string is a null value
 			if checker_end - checker.checker_idx <= 3 {
-				return checker.error('EOF error: expecting `null`')
+				return checker.checker_error('EOF error: expecting `null`')
 			}
 
 			is_not_ok := unsafe {
@@ -219,25 +336,21 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 			}
 
 			if is_not_ok != 0 {
-				return checker.error('invalid null value. Got `${checker.json[checker.checker_idx..
+				return checker.checker_error('invalid null value. Got `${checker.json[checker.checker_idx..
 					checker.checker_idx + 4]}` instead of `null`')
 			}
 			checker.checker_idx += 3
 		}
 		.object {
 			if checker_end - checker.checker_idx < 2 {
-				return checker.error('EOF error: expecting a complete object after `{`')
+				return checker.checker_error('EOF error: expecting a complete object after `{`')
 			}
 			checker.checker_idx++
 			for val[checker.checker_idx] != `}` {
-				// check if the JSON string is an empty object
-				if checker_end - checker.checker_idx <= 2 {
-					continue
-				}
-
 				// skip whitespace
 				for val[checker.checker_idx] in whitespace_chars {
-					if checker.checker_idx >= checker_end - 1 {
+					if checker.checker_idx == checker_end {
+						checker.checker_idx--
 						break
 					}
 					checker.checker_idx++
@@ -248,24 +361,25 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 				}
 
 				if val[checker.checker_idx] != `"` {
-					return checker.error('Expecting object key')
+					return checker.checker_error('Expecting object key')
 				}
 
 				// Object key
 				checker.check_json_format(val)!
 
 				for val[checker.checker_idx] != `:` {
-					if checker.checker_idx >= checker_end - 1 {
-						return checker.error('EOF error: key colon not found')
+					if checker.checker_idx == checker_end {
+						checker.checker_idx--
+						return checker.checker_error('EOF error: key colon not found')
 					}
 					if val[checker.checker_idx] !in whitespace_chars {
-						return checker.error('invalid value after object key')
+						return checker.checker_error('invalid value after object key')
 					}
 					checker.checker_idx++
 				}
 
 				if val[checker.checker_idx] != `:` {
-					return checker.error('Expecting `:` after object key')
+					return checker.checker_error('Expecting `:` after object key')
 				}
 				// skip `:`
 				checker.checker_idx++
@@ -278,6 +392,12 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 				match val[checker.checker_idx] {
 					`"`, `[`, `{`, `0`...`9`, `-`, `n`, `t`, `f` {
 						checker.check_json_format(val)!
+
+						if checker.checker_idx == checker_end {
+							checker.checker_idx--
+							return checker.checker_error('EOF error: braces are not closed')
+						}
+
 						// whitespace
 						for val[checker.checker_idx] in whitespace_chars {
 							checker.checker_idx++
@@ -285,28 +405,36 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 						if val[checker.checker_idx] == `}` {
 							break
 						}
-						if checker.checker_idx >= checker_end - 1 {
-							return checker.error('EOF error: braces are not closed')
+
+						if checker.checker_idx == checker_end {
+							checker.checker_idx--
+							return checker.checker_error('EOF error: braces are not closed')
 						}
 
 						if val[checker.checker_idx] == `,` {
 							checker.checker_idx++
+
+							if checker.checker_idx == checker_end {
+								checker.checker_idx--
+								return checker.checker_error('EOF error: Expecting object key after `,`')
+							}
+
 							for val[checker.checker_idx] in whitespace_chars {
 								checker.checker_idx++
 							}
 							if val[checker.checker_idx] != `"` {
-								return checker.error('Expecting object key after `,`')
+								return checker.checker_error('Expecting object key after `,`')
 							}
 						} else {
 							if val[checker.checker_idx] == `}` {
 								break
 							} else {
-								return checker.error('invalid object value')
+								return checker.checker_error('invalid object value')
 							}
 						}
 					}
 					else {
-						return checker.error('invalid object value')
+						return checker.checker_error('invalid object value')
 					}
 				}
 			}
@@ -316,13 +444,14 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 			if checker_end >= checker.checker_idx + 2 {
 				checker.checker_idx++
 			} else {
-				return checker.error('EOF error: There are not enough length for an array')
+				return checker.checker_error('EOF error: There are not enough length for an array')
 			}
 
 			for val[checker.checker_idx] != `]` {
 				// skip whitespace
 				for val[checker.checker_idx] in whitespace_chars {
-					if checker.checker_idx >= checker_end - 1 {
+					if checker.checker_idx == checker_end {
+						checker.checker_idx--
 						break
 					}
 					checker.checker_idx++
@@ -332,8 +461,9 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 					break
 				}
 
-				if checker.checker_idx >= checker_end - 1 {
-					return checker.error('EOF error: array not closed')
+				if checker.checker_idx == checker_end {
+					checker.checker_idx--
+					return checker.checker_error('EOF error: array not closed')
 				}
 
 				checker.check_json_format(val)!
@@ -345,8 +475,9 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 				if val[checker.checker_idx] == `]` {
 					break
 				}
-				if checker.checker_idx >= checker_end - 1 {
-					return checker.error('EOF error: braces are not closed')
+				if checker.checker_idx == checker_end {
+					checker.checker_idx--
+					return checker.checker_error('EOF error: braces are not closed')
 				}
 
 				if val[checker.checker_idx] == `,` {
@@ -355,14 +486,14 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 						checker.checker_idx++
 					}
 					if val[checker.checker_idx] == `]` {
-						return checker.error('Cannot use `,`, before `]`')
+						return checker.checker_error('Cannot use `,`, before `]`')
 					}
 					continue
 				} else {
 					if val[checker.checker_idx] == `]` {
 						break
 					} else {
-						return checker.error('`]` after value')
+						return checker.checker_error('`]` after value')
 					}
 				}
 			}
@@ -370,8 +501,9 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 		.string_ {
 			// check if the JSON string is a valid string
 
-			if checker.checker_idx >= checker_end - 1 {
-				return checker.error('EOF error: string not closed')
+			if checker.checker_idx == checker_end {
+				checker.checker_idx--
+				return checker.checker_error('EOF error: string not closed')
 			}
 
 			checker.checker_idx++
@@ -380,7 +512,7 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 			for val[checker.checker_idx] != `"` {
 				if val[checker.checker_idx] == `\\` {
 					if checker.checker_idx + 1 >= checker_end - 1 {
-						return checker.error('invalid escape sequence')
+						return checker.checker_error('invalid escape sequence')
 					}
 					escaped_char := val[checker.checker_idx + 1]
 					match escaped_char {
@@ -391,7 +523,7 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 							// check if the JSON string is a valid unicode escape sequence
 							escaped_char_last_index := checker.checker_idx + 5
 
-							if escaped_char_last_index < checker_end - 1 {
+							if escaped_char_last_index < checker_end {
 								// 2 bytes for the unicode escape sequence `\u`
 								checker.checker_idx += 2
 
@@ -401,18 +533,17 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 											checker.checker_idx++
 										}
 										else {
-											return checker.error('invalid unicode escape sequence')
+											return checker.checker_error('invalid unicode escape sequence')
 										}
 									}
 								}
 								continue
 							} else {
-								return checker.error('short unicode escape sequence ${checker.json[checker.checker_idx..
-									escaped_char_last_index + 1]}')
+								return checker.checker_error('short unicode escape sequence ${checker.json[checker.checker_idx..escaped_char_last_index]}')
 							}
 						}
 						else {
-							return checker.error('unknown escape sequence')
+							return checker.checker_error('unknown escape sequence')
 						}
 					}
 				}
@@ -421,50 +552,85 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 		}
 		.number {
 			// check if the JSON string is a valid float or integer
-			mut is_negative := val[0] == `-`
-			mut has_dot := false
-
-			mut digits_count := 1
-
-			if is_negative {
+			if val[checker.checker_idx] == `-` {
 				checker.checker_idx++
 			}
 
-			for checker.checker_idx < checker_end - 1
-				&& val[checker.checker_idx + 1] !in [`,`, `}`, `]`, ` `, `\t`, `\n`]
-				&& checker.checker_idx < checker_end - 1 {
-				if val[checker.checker_idx] == `.` {
-					if has_dot {
-						return checker.error('invalid float. Multiple dots')
-					}
-					has_dot = true
+			if checker.checker_idx == checker_end {
+				checker.checker_idx--
+				return checker.checker_error('expected digit got EOF')
+			}
+
+			// integer part
+			if val[checker.checker_idx] == `0` {
+				checker.checker_idx++
+			} else if val[checker.checker_idx] >= `1` && val[checker.checker_idx] <= `9` {
+				checker.checker_idx++
+
+				for checker.checker_idx < checker_end && val[checker.checker_idx] >= `0`
+					&& val[checker.checker_idx] <= `9` {
 					checker.checker_idx++
-					continue
-				} else if val[checker.checker_idx] == `-` {
-					if is_negative {
-						return checker.error('invalid float. Multiple negative signs')
+				}
+			} else {
+				return checker.checker_error('expected digit got ${val[checker.checker_idx].ascii_str()}')
+			}
+
+			// fraction part
+			if checker.checker_idx != checker_end && val[checker.checker_idx] == `.` {
+				checker.checker_idx++
+
+				if checker.checker_idx == checker_end {
+					checker.checker_idx--
+					return checker.checker_error('expected digit got EOF')
+				}
+
+				if val[checker.checker_idx] >= `0` && val[checker.checker_idx] <= `9` {
+					for checker.checker_idx < checker_end && val[checker.checker_idx] >= `0`
+						&& val[checker.checker_idx] <= `9` {
+						checker.checker_idx++
 					}
-					checker.checker_idx++
-					continue
 				} else {
-					if val[checker.checker_idx] < `0` || val[checker.checker_idx] > `9` {
-						return checker.error('invalid number')
+					return checker.checker_error('expected digit got ${val[checker.checker_idx].ascii_str()}')
+				}
+			}
+
+			// exponent part
+			if checker.checker_idx != checker_end
+				&& (val[checker.checker_idx] == `e` || val[checker.checker_idx] == `E`) {
+				checker.checker_idx++
+
+				if checker.checker_idx == checker_end {
+					checker.checker_idx--
+					return checker.checker_error('expected digit got EOF')
+				}
+
+				if val[checker.checker_idx] == `-` || val[checker.checker_idx] == `+` {
+					checker.checker_idx++
+
+					if checker.checker_idx == checker_end {
+						checker.checker_idx--
+						return checker.checker_error('expected digit got EOF')
 					}
 				}
 
-				if digits_count >= 64 {
-					return checker.error('number exceeds 64 digits')
+				if val[checker.checker_idx] >= `0` && val[checker.checker_idx] <= `9` {
+					for checker.checker_idx < checker_end && val[checker.checker_idx] >= `0`
+						&& val[checker.checker_idx] <= `9` {
+						checker.checker_idx++
+					}
+				} else {
+					return checker.checker_error('expected digit got ${val[checker.checker_idx].ascii_str()}')
 				}
-				digits_count++
-				checker.checker_idx++
 			}
+
+			checker.checker_idx--
 		}
 		.boolean {
 			// check if the JSON string is a valid boolean
 			match val[checker.checker_idx] {
 				`t` {
 					if checker_end - checker.checker_idx <= 3 {
-						return checker.error('EOF error: expecting `true`')
+						return checker.checker_error('EOF error: expecting `true`')
 					}
 
 					is_not_ok := unsafe {
@@ -473,14 +639,14 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 					}
 
 					if is_not_ok != 0 {
-						return checker.error('invalid boolean value. Got `${checker.json[checker.checker_idx..
+						return checker.checker_error('invalid boolean value. Got `${checker.json[checker.checker_idx..
 							checker.checker_idx + 4]}` instead of `true`')
 					}
 					checker.checker_idx += 3
 				}
 				`f` {
 					if checker_end - checker.checker_idx <= 4 {
-						return checker.error('EOF error: expecting `false`')
+						return checker.checker_error('EOF error: expecting `false`')
 					}
 
 					is_not_ok := unsafe {
@@ -489,14 +655,14 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 					}
 
 					if is_not_ok != 0 {
-						return checker.error('invalid boolean value. Got `${checker.json[checker.checker_idx..
+						return checker.checker_error('invalid boolean value. Got `${checker.json[checker.checker_idx..
 							checker.checker_idx + 5]}` instead of `false`')
 					}
 
 					checker.checker_idx += 4
 				}
 				else {
-					return checker.error('invalid boolean')
+					return checker.checker_error('invalid boolean')
 				}
 			}
 		}
@@ -504,14 +670,14 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 
 	actual_value_info_pointer.length = checker.checker_idx + 1 - start_idx_position
 
-	if checker.checker_idx < checker_end - 1 {
+	if checker.checker_idx < checker_end {
 		checker.checker_idx++
 	}
 
-	for checker.checker_idx < checker_end - 1 && val[checker.checker_idx] !in [`,`, `:`, `}`, `]`] {
+	for checker.checker_idx < checker_end && val[checker.checker_idx] !in [`,`, `:`, `}`, `]`] {
 		// get trash characters after the value
 		if val[checker.checker_idx] !in whitespace_chars {
-			checker.error('invalid value. Unexpected character after ${value_kind} end')!
+			checker.checker_error('invalid value. Unexpected character after ${value_kind} end')!
 		} else {
 			// whitespace
 		}
@@ -519,11 +685,33 @@ fn (mut checker Decoder) check_json_format(val string) ! {
 	}
 }
 
+// get_value_kind returns the kind of a JSON value.
+fn get_value_kind(value u8) ValueKind {
+	if value == u8(`"`) {
+		return .string_
+	} else if value == u8(`t`) || value == u8(`f`) {
+		return .boolean
+	} else if value == u8(`{`) {
+		return .object
+	} else if value == u8(`[`) {
+		return .array
+	} else if (value >= u8(48) && value <= u8(57)) || value == u8(`-`) {
+		return .number
+	} else if value == u8(`n`) {
+		return .null
+	}
+	return .unknown
+}
+
 // decode decodes a JSON string into a specified type.
 @[manualfree]
 pub fn decode[T](val string) !T {
 	if val == '' {
-		return error('empty string')
+		return JsonDecodeError{
+			message:   'empty string'
+			line:      1
+			character: 1
+		}
 	}
 	mut decoder := Decoder{
 		json: val
@@ -543,6 +731,61 @@ pub fn decode[T](val string) !T {
 // decode_value decodes a value from the JSON nodes.
 @[manualfree]
 fn (mut decoder Decoder) decode_value[T](mut val T) ! {
+	// Custom Decoders
+	$if val is StringDecoder {
+		struct_info := decoder.current_node.value
+
+		if struct_info.value_kind == .string_ {
+			val.from_json_string(decoder.json[struct_info.position + 1..struct_info.position +
+				struct_info.length - 1]) or {
+				decoder.decode_error('${typeof(*val).name}: ${err.msg()}')!
+			}
+			if decoder.current_node != unsafe { nil } {
+				decoder.current_node = decoder.current_node.next
+			}
+
+			return
+		}
+	}
+	$if val is NumberDecoder {
+		struct_info := decoder.current_node.value
+
+		if struct_info.value_kind == .number {
+			val.from_json_number(decoder.json[struct_info.position..struct_info.position +
+				struct_info.length]) or {
+				decoder.decode_error('${typeof(*val).name}: ${err.msg()}')!
+			}
+			if decoder.current_node != unsafe { nil } {
+				decoder.current_node = decoder.current_node.next
+			}
+
+			return
+		}
+	}
+	$if val is BooleanDecoder {
+		struct_info := decoder.current_node.value
+
+		if struct_info.value_kind == .boolean {
+			val.from_json_boolean(decoder.json[struct_info.position] == `t`)
+			if decoder.current_node != unsafe { nil } {
+				decoder.current_node = decoder.current_node.next
+			}
+
+			return
+		}
+	}
+	$if val is NullDecoder {
+		struct_info := decoder.current_node.value
+
+		if struct_info.value_kind == .null {
+			val.from_json_null()
+			if decoder.current_node != unsafe { nil } {
+				decoder.current_node = decoder.current_node.next
+			}
+
+			return
+		}
+	}
 	$if T.unaliased_typ is string {
 		string_info := decoder.current_node.value
 
@@ -611,20 +854,11 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 
 			val = string_buffer.bytestr()
 		} else {
-			return error('Expected string, but got ${string_info.value_kind}')
+			return decoder.decode_error('Expected string, but got ${string_info.value_kind}')
 		}
 	} $else $if T.unaliased_typ is $sumtype {
 		decoder.decode_sumtype(mut val)!
 		return
-	} $else $if T.unaliased_typ is time.Time {
-		time_info := decoder.current_node.value
-
-		if time_info.value_kind == .string_ {
-			string_time := decoder.json.substr_unsafe(time_info.position + 1, time_info.position +
-				time_info.length - 1)
-
-			val = time.parse_rfc3339(string_time) or { time.Time{} }
-		}
 	} $else $if T.unaliased_typ is $map {
 		decoder.decode_map(mut val)!
 		return
@@ -651,7 +885,7 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 			for attr in field.attrs {
 				if attr.starts_with('json:') {
 					if attr.len <= 6 {
-						return error('`json` attribute must have an argument')
+						return decoder.decode_error('`json` attribute must have an argument')
 					}
 					json_name_str = unsafe { attr.str + 6 }
 					json_name_len = attr.len - 6
@@ -693,15 +927,19 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 
 				current_field_info = struct_fields_info.head
 
+				mut field_used := false
+
 				// field loop
 				for {
 					if current_field_info == unsafe { nil } {
-						decoder.current_node = decoder.current_node.next
+						decoder.current_node = decoder.current_node.next.next // skip value
+
 						break
 					}
 
 					if current_field_info.value.is_skip {
 						if current_field_info.value.is_required == false {
+							field_used = true
 							current_field_info = current_field_info.next
 							continue
 						}
@@ -710,11 +948,13 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 					if current_field_info.value.is_omitempty {
 						match decoder.current_node.next.value.value_kind {
 							.null {
+								field_used = true
 								current_field_info = current_field_info.next
 								continue
 							}
 							.string_ {
 								if decoder.current_node.next.value.length == 2 {
+									field_used = true
 									current_field_info = current_field_info.next
 									continue
 								}
@@ -722,6 +962,7 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 							.number {
 								if decoder.json[decoder.current_node.next.value.position] == `0` {
 									if decoder.current_node.next.value.length == 1 {
+										field_used = true
 										current_field_info = current_field_info.next
 										continue
 									} else if decoder.current_node.next.value.length == 3 {
@@ -730,6 +971,7 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 												decoder.current_node.next.value.position,
 												float_zero_in_string.str, float_zero_in_string.len) == 0
 										} {
+											field_used = true
 											current_field_info = current_field_info.next
 											continue
 										}
@@ -746,6 +988,8 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 							vmemcmp(decoder.json.str + key_info.position + 1, current_field_info.value.json_name_ptr,
 								current_field_info.value.json_name_len) == 0
 						} {
+							field_used = true
+
 							$for field in T.fields {
 								if field.name.len == current_field_info.value.field_name_len {
 									if unsafe {
@@ -756,16 +1000,19 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 
 										if current_field_info.value.is_skip {
 											if current_field_info.value.is_required == false {
-												return error('This should not happen. Please, file a bug. `skip` field should not be processed here without a `required` attribute')
+												return decoder.decode_error('This should not happen. Please, file a bug. `skip` field should not be processed here without a `required` attribute')
 											}
 											current_field_info.value.decoded_with_value_info_node = decoder.current_node
+											if decoder.current_node != unsafe { nil } {
+												decoder.current_node = decoder.current_node.next
+											}
 											break
 										}
 
 										if current_field_info.value.is_raw {
 											$if field.unaliased_typ is $enum {
 												// workaround to avoid the error: enums can only be assigned `int` values
-												return error('`raw` attribute cannot be used with enum fields')
+												return decoder.decode_error('`raw` attribute cannot be used with enum fields')
 											} $else $if field.typ is ?string {
 												position := decoder.current_node.value.position
 												end := position + decoder.current_node.value.length
@@ -797,7 +1044,7 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 													decoder.current_node = decoder.current_node.next
 												}
 											} $else {
-												return error('`raw` attribute can only be used with string fields')
+												return decoder.decode_error('`raw` attribute can only be used with string fields')
 											}
 										} else {
 											$if field.typ is $option {
@@ -805,6 +1052,10 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 												// but options cant be passed to generic functions
 												if decoder.current_node.value.value_kind == .null {
 													val.$(field.name) = none
+
+													if decoder.current_node != unsafe { nil } {
+														decoder.current_node = decoder.current_node.next
+													}
 												} else {
 													mut unwrapped_val := create_value_from_optional(val.$(field.name)) or {
 														return
@@ -825,6 +1076,12 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 					}
 					current_field_info = current_field_info.next
 				}
+
+				if !field_used
+					&& decoder.json[key_info.position + 1..key_info.position + key_info.length - 1] != '_type' {
+					decoder.decode_error('unknown field `${decoder.json[key_info.position..
+						key_info.position + key_info.length]}`')!
+				}
 			}
 
 			// check if all required fields are present
@@ -840,14 +1097,14 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 					continue
 				}
 				if current_field_info.value.decoded_with_value_info_node == unsafe { nil } {
-					return error('missing required field `${unsafe {
+					return decoder.decode_error('missing required field `${unsafe {
 						tos(current_field_info.value.field_name_str, current_field_info.value.field_name_len)
 					}}`')
 				}
 				current_field_info = current_field_info.next
 			}
 		} else {
-			return error('Expected object, but got ${struct_info.value_kind}')
+			return decoder.decode_error('Expected object, but got ${struct_info.value_kind}')
 		}
 		unsafe {
 			struct_fields_info.free()
@@ -857,27 +1114,23 @@ fn (mut decoder Decoder) decode_value[T](mut val T) ! {
 		value_info := decoder.current_node.value
 
 		if value_info.value_kind != .boolean {
-			return error('Expected boolean, but got ${value_info.value_kind}')
+			return decoder.decode_error('Expected boolean, but got ${value_info.value_kind}')
 		}
 
 		unsafe {
 			val = vmemcmp(decoder.json.str + value_info.position, true_in_string.str,
 				true_in_string.len) == 0
 		}
-	} $else $if T.unaliased_typ in [$float, $int, $enum] {
+	} $else $if T.unaliased_typ is $float || T.unaliased_typ is $int || T.unaliased_typ is $enum {
 		value_info := decoder.current_node.value
 
 		if value_info.value_kind == .number {
-			bytes := unsafe { (decoder.json.str + value_info.position).vbytes(value_info.length) }
-
-			unsafe {
-				string_buffer_to_generic_number(val, bytes)
-			}
+			unsafe { decoder.decode_number(&val)! }
 		} else {
-			return error('Expected number, but got ${value_info.value_kind}')
+			return decoder.decode_error('Expected number, but got ${value_info.value_kind}')
 		}
 	} $else {
-		return error('cannot decode value with ${typeof(val).name} type')
+		return decoder.decode_error('cannot decode value with ${typeof(val).name} type')
 	}
 
 	if decoder.current_node != unsafe { nil } {
@@ -907,7 +1160,7 @@ fn (mut decoder Decoder) decode_array[T](mut val []T) ! {
 			val << array_element
 		}
 	} else {
-		return error('Expected array, but got ${array_info.value_kind}')
+		return decoder.decode_error('Expected array, but got ${array_info.value_kind}')
 	}
 }
 
@@ -951,101 +1204,176 @@ fn (mut decoder Decoder) decode_map[K, V](mut val map[K]V) ! {
 			decoder.decode_value(mut val[key])!
 		}
 	} else {
-		return error('Expected object, but got ${map_info.value_kind}')
+		return decoder.decode_error('Expected object, but got ${map_info.value_kind}')
 	}
-}
-
-// get_value_kind returns the kind of a JSON value.
-fn get_value_kind(value u8) ValueKind {
-	if value == u8(`"`) {
-		return .string_
-	} else if value == u8(`t`) || value == u8(`f`) {
-		return .boolean
-	} else if value == u8(`{`) {
-		return .object
-	} else if value == u8(`[`) {
-		return .array
-	} else if (value >= u8(48) && value <= u8(57)) || value == u8(`-`) {
-		return .number
-	} else if value == u8(`n`) {
-		return .null
-	}
-	return .unknown
 }
 
 fn create_value_from_optional[T](val ?T) ?T {
 	return T{}
 }
 
-// string_buffer_to_generic_number converts a buffer of bytes (data) into a generic type T and
-// stores the result in the provided result pointer.
-// The function supports conversion to the following types:
-// - Signed integers: i8, i16, i32, i64
-// - Unsigned integers: u8, u16, u32, u64
-// - Floating-point numbers: f32, f64
-//
-// For signed integers, the function handles negative numbers by checking for a '-' character.
-// For floating-point numbers, the function handles decimal points and adjusts the result
-// accordingly.
-//
-// If the type T is not supported, the function will panic with an appropriate error message.
-//
-// Parameters:
-// - data []u8: The buffer of bytes to be converted.
-// - result &T: A pointer to the variable where the converted result will be stored.
-//
-// NOTE: This aims works with not new memory allocated data, to more efficient use `vbytes` before
-@[direct_array_access; unsafe]
-pub fn string_buffer_to_generic_number[T](result &T, data []u8) {
-	$if T.unaliased_typ is $int {
-		mut is_negative := false
-		for ch in data {
-			if ch == `-` {
-				is_negative = true
-				continue
-			}
-			digit := T(ch - `0`)
-			*result = T(*result * 10 + digit)
-		}
-		if is_negative {
-			*result *= -1
-		}
-	} $else $if T.unaliased_typ is $float {
-		mut is_negative := false
-		mut decimal_seen := false
-		mut decimal_divider := T(1)
+fn get_number_max[T](num T) T {
+	$if num is i8 {
+		return max_i8
+	} $else $if num is i16 {
+		return max_i16
+	} $else $if num is i32 {
+		return max_i32
+	} $else $if num is i64 {
+		return max_i64
+	} $else $if num is u8 {
+		return max_u8
+	} $else $if num is u16 {
+		return max_u16
+	} $else $if num is u32 {
+		return max_u32
+	} $else $if num is u64 {
+		return max_u64
+	} $else $if num is int {
+		return max_int
+	}
+	return 0
+}
 
-		for ch in data {
-			if ch == `-` {
-				is_negative = true
-				continue
-			}
-			if ch == `.` {
-				decimal_seen = true
-				continue
-			}
+fn get_number_min[T](num T) T {
+	$if num is i8 {
+		return min_i8
+	} $else $if num is i16 {
+		return min_i16
+	} $else $if num is i32 {
+		return min_i32
+	} $else $if num is i64 {
+		return min_i64
+	} $else $if num is u8 {
+		return min_u8
+	} $else $if num is u16 {
+		return min_u16
+	} $else $if num is u32 {
+		return min_u32
+	} $else $if num is u64 {
+		return min_u64
+	} $else $if num is int {
+		return min_int
+	}
+	return 0
+}
 
-			digit := T(ch - u8(`0`))
-
-			if decimal_seen {
-				decimal_divider *= 10
-				*result += T(digit / decimal_divider)
-			} else {
-				*result = T(*result * 10 + digit)
-			}
-		}
-		if is_negative {
-			*result *= -1
-		}
-	} $else $if T.unaliased_typ is $enum {
-		// Convert the string to an integer
-		enumeration := 0
-		for ch in data {
-			digit := int(ch - `0`)
-			enumeration = enumeration * 10 + digit
-		}
-		*result = T(enumeration)
+fn get_number_digits[T](num T) int {
+	return $if T.unaliased_typ is i8 || T.unaliased_typ is u8 {
+		3
+	} $else $if T.unaliased_typ is i16 || T.unaliased_typ is u16 {
+		5
+	} $else $if T.unaliased_typ is i32 || T.unaliased_typ is u32 || T.unaliased_typ is int {
+		10
+	} $else $if T.unaliased_typ is i64 {
+		19
+	} $else $if T.unaliased_typ is u64 {
+		20
 	} $else {
-		panic('unsupported type ' + typeof[T]().name)
+		0
+	}
+}
+
+// use pointer instead of mut so enum cast works
+@[unsafe]
+fn (mut decoder Decoder) decode_number[T](val &T) ! {
+	number_info := decoder.current_node.value
+
+	$if T.unaliased_typ is $float {
+		*val = T(strconv.atof_quick(decoder.json[number_info.position..number_info.position +
+			number_info.length]))
+	} $else $if T.unaliased_typ is $enum {
+		mut result := 0
+		decoder.decode_number(&result)!
+		*val = T(result)
+	} $else { // this part is a minefield
+		mut is_negative := false
+		mut index := 0
+
+		if decoder.json[number_info.position] == `-` {
+			$if T.unaliased_typ is u8 || T.unaliased_typ is u16 || T.unaliased_typ is u32
+				|| T.unaliased_typ is u64 || T.unaliased_typ is $enum {
+				decoder.decode_error('expected positive integer for ${typeof(val).name} but got ${decoder.json[number_info.position..
+					number_info.position + number_info.length]}')!
+			}
+
+			is_negative = true
+			index++
+		}
+
+		// doing it like this means the minimum of signed numbers does not overflow before being inverted
+		if !is_negative {
+			digit_amount := get_number_digits(*val)
+
+			if number_info.length > digit_amount {
+				decoder.decode_error('overflows ${typeof(val).name}')!
+			}
+
+			for index < int_min(number_info.length, digit_amount - 1) {
+				digit := T(decoder.json[number_info.position + index] - `0`)
+
+				if digit > 9 { // comma, e and E are all smaller 0 in ASCII so they underflow
+					decoder.decode_error('expected integer but got real number')!
+				}
+
+				*val = *val * 10 + digit
+
+				index++
+			}
+
+			if index == digit_amount - 1 {
+				digit := T(decoder.json[number_info.position + index] - `0`)
+
+				if digit > 9 { // comma, e and E are all smaller 0 in ASCII so they underflow
+					decoder.decode_error('expected integer but got real number')!
+				}
+
+				type_max := get_number_max(*val)
+				max_digits := type_max / 10
+				last_digit := type_max % 10
+
+				if *val > max_digits || (*val == max_digits && digit > last_digit) {
+					decoder.decode_error('overflows ${typeof(val).name}s')!
+				}
+
+				*val = *val * 10 + digit
+			}
+		} else {
+			digit_amount := get_number_digits(*val) + 1
+
+			if number_info.length > digit_amount {
+				decoder.decode_error('underflows ${typeof(val).name}')!
+			}
+
+			for index < int_min(number_info.length, digit_amount - 1) {
+				digit := T(decoder.json[number_info.position + index] - `0`)
+
+				if digit > 9 { // comma, e and E are all smaller 0 in ASCII so they underflow
+					decoder.decode_error('expected integer but got real number')!
+				}
+
+				*val = *val * 10 - digit
+
+				index++
+			}
+
+			if index == digit_amount - 1 {
+				digit := T(decoder.json[number_info.position + index] - `0`)
+
+				if digit > 9 { // comma, e and E are all smaller 0 in ASCII so they underflow
+					decoder.decode_error('expected integer but got real number')!
+				}
+
+				type_min := get_number_min(*val)
+				min_digits := type_min / 10
+				last_digit := type_min % 10
+
+				if *val < min_digits || (*val == min_digits && -digit < last_digit) {
+					decoder.decode_error('underflows ${typeof(val).name}')!
+				}
+
+				*val = *val * 10 - digit
+			}
+		}
 	}
 }
