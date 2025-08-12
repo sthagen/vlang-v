@@ -28,7 +28,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 121
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build V
         if: runner.os != 'Windows'
@@ -39,5 +39,5 @@ jobs:
 
       - name: Run additional crypto tests
         run: |
-          v retry -- git clone --depth 1 https://github.com/vlang/hash_validation_tests
-          v test hash_validation_tests/
+          v retry -- git clone --depth 1 https://github.com/vlang/slower_tests
+          v test slower_tests/
