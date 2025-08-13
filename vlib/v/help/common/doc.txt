@@ -20,7 +20,8 @@ Options:
   -no-color       Forces plain text output, without ANSI colors.
                   Note: -color is on for -f ansi .
   -f              Specifies the output format to be used.
-                  Available formats are: md/markdown, json, text, ansi and html/htm.
+                  Available formats are: none, md/markdown, json, text, ansi and html/htm.
+                  Note: the format `none` is mostly useful in combination with -check-examples .
   -h, -help       Prints this help text.
   -m              Generate docs for modules listed in that folder.
   -o              The output file/folder path where to store the docs. Use `-o stdout`
@@ -28,6 +29,11 @@ Options:
   -readme         Include README.md to docs if present.
   -v              Enables verbose logging. For debugging purposes.
   -no-timestamp   Omits the timestamp in the output file.
+
+  -check-examples       Find and check that all example comments are compilable,
+                        but * without * running them.
+  -unsafe-run-examples  Find and run all `// Example: assert 1 + 1 == 2` lines
+                        in the comments.
 
 For HTML mode:
   -inline-assets  Embeds the contents of the CSS and JS assets into the
