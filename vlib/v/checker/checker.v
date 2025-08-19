@@ -30,7 +30,7 @@ const generic_fn_postprocess_iterations_cutoff_limit = 1_000_000
 // Note that methods that do not return anything, or that return known types, are not listed here, since they are just ordinary non generic methods.
 pub const array_builtin_methods = ['filter', 'clone', 'repeat', 'reverse', 'map', 'slice', 'sort',
 	'sort_with_compare', 'sorted', 'sorted_with_compare', 'contains', 'index', 'wait', 'any', 'all',
-	'first', 'last', 'pop', 'delete', 'insert', 'prepend', 'count']
+	'first', 'last', 'pop_left', 'pop', 'delete', 'insert', 'prepend', 'count']
 pub const array_builtin_methods_chk = token.new_keywords_matcher_from_array_trie(array_builtin_methods)
 pub const fixed_array_builtin_methods = ['contains', 'index', 'any', 'all', 'wait', 'map', 'sort',
 	'sorted', 'sort_with_compare', 'sorted_with_compare', 'reverse', 'reverse_in_place', 'count']
@@ -4377,8 +4377,10 @@ fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 						}
 					}
 				}
-				c.error(util.new_suggestion(node.name, const_names_in_mod).say('undefined ident: `${node.name}`'),
-					node.pos)
+				c.check_known_struct_name(node) or {
+					c.error(util.new_suggestion(node.name, const_names_in_mod).say('undefined ident: `${node.name}`'),
+						node.pos)
+				}
 			} else {
 				// If a variable is not found in the scope of an anonymous function
 				// but is in an external scope, then we can suggest the user add it to the capturing list.
@@ -4398,11 +4400,30 @@ fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 					}
 				}
 
-				c.error('undefined ident: `${node.name}`', node.pos)
+				c.check_known_struct_name(node) or {
+					c.error('undefined ident: `${node.name}`', node.pos)
+				}
 			}
 		}
 	}
 	return ast.void_type
+}
+
+fn (mut c Checker) check_known_struct_name(ident ast.Ident) ? {
+	mut is_struct := false
+	if ident.mod == 'builtin' || ident.mod == 'main' {
+		is_struct = c.table.find_type(ident.name) != 0
+		if !is_struct {
+			is_struct = c.table.find_type('main.${ident.name}') != 0
+		}
+	} else {
+		is_struct = c.table.find_type('${ident.mod}.${ident.name}') != 0
+	}
+	if is_struct {
+		c.error('`${ident.name}` must be initialized', ident.pos)
+		return
+	}
+	return none
 }
 
 fn (mut c Checker) concat_expr(mut node ast.ConcatExpr) ast.Type {
