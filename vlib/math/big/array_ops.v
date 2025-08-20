@@ -34,39 +34,37 @@ fn add_digit_array(operand_a []u64, operand_b []u64, mut sum []u64) {
 		for index in 0 .. operand_b.len {
 			sum[index] = operand_b[index]
 		}
+		shrink_tail_zeros(mut sum)
+		return
 	}
 	if operand_b.len == 0 {
 		for index in 0 .. operand_a.len {
 			sum[index] = operand_a[index]
 		}
+		shrink_tail_zeros(mut sum)
+		return
 	}
 
-	// First pass intersects with both operands
-	smaller_limit := imin(operand_a.len, operand_b.len)
-	larger_limit := imax(operand_a.len, operand_b.len)
 	mut a, mut b := if operand_a.len >= operand_b.len {
 		operand_a, operand_b
 	} else {
 		operand_b, operand_a
 	}
 	mut carry := u64(0)
-	for index in 0 .. smaller_limit {
+	for index in 0 .. b.len {
 		partial := carry + a[index] + b[index]
-		sum[index] = u64(partial) & max_digit
-		carry = u64(partial >> digit_bits)
+		sum[index] = partial & max_digit
+		carry = partial >> digit_bits
 	}
 
-	for index in smaller_limit .. larger_limit {
+	for index in b.len .. a.len {
 		partial := carry + a[index]
-		sum[index] = u64(partial) & max_digit
-		carry = u64(partial >> digit_bits)
+		sum[index] = partial & max_digit
+		carry = partial >> digit_bits
 	}
 
-	if carry == 0 {
-		sum.delete_last()
-	} else {
-		sum[larger_limit] = carry
-	}
+	sum[a.len] = carry
+	shrink_tail_zeros(mut sum)
 }
 
 // Subtracts operand_b from operand_a and stores the difference in storage.
@@ -84,27 +82,21 @@ fn subtract_digit_array(operand_a []u64, operand_b []u64, mut storage []u64) {
 		for index in 0 .. operand_a.len {
 			storage[index] = operand_a[index]
 		}
+		return
 	}
 
-	mut carry := false
+	mut borrow := u64(0)
 	for index in 0 .. operand_b.len {
-		mut a_digit := operand_a[index]
-		b_digit := operand_b[index] + if carry { u64(1) } else { u64(0) }
-		carry = a_digit < b_digit
-		if carry {
-			a_digit = a_digit | (u64(1) << digit_bits)
-		}
-		storage[index] = a_digit - b_digit
+		a := operand_a[index]
+		b := operand_b[index] + borrow
+		diff := a - b
+		borrow = (diff >> digit_bits) & 1
+		storage[index] = diff + (borrow << digit_bits)
 	}
-
 	for index in operand_b.len .. operand_a.len {
-		mut a_digit := operand_a[index]
-		b_digit := if carry { u64(1) } else { u64(0) }
-		carry = a_digit < b_digit
-		if carry {
-			a_digit = a_digit | (u64(1) << digit_bits)
-		}
-		storage[index] = a_digit - b_digit
+		diff := operand_a[index] - borrow
+		borrow = (diff >> digit_bits) & 1
+		storage[index] = diff + (borrow << digit_bits)
 	}
 
 	shrink_tail_zeros(mut storage)
