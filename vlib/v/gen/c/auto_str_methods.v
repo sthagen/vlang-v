@@ -378,6 +378,13 @@ fn (mut g Gen) gen_str_for_enum(info ast.Enum, styp string, str_fn_name string) 
 		}
 		g.auto_str_funcs.writeln('\tret = string__plus(ret, _S("}"));')
 		g.auto_str_funcs.writeln('\treturn ret;')
+	} else if info.uses_exprs {
+		// The enum values could be C macros, expanded later to duplicate values, and we do not know if that is the case, so we can not use a switch here.
+		// Instead we generate multiple if statements, which is slower, but is guaranteed to work in the presence of duplicates.
+		for val in info.vals {
+			g.auto_str_funcs.writeln('\t\tif(it == ${s}__${val}){ return _S("${val}"); }')
+		}
+		g.auto_str_funcs.writeln('\t\treturn _S("unknown enum value");')
 	} else {
 		g.auto_str_funcs.writeln('\tswitch(it) {')
 		// Only use the first multi value on the lookup
@@ -1193,6 +1200,13 @@ fn struct_auto_str_func(sym &ast.TypeSymbol, lang ast.Language, _field_type ast.
 				return '${fn_name.trim_string_right('_str')}_name_table[${iface_obj}${dot}_typ]._method_str(${iface_obj}${dot}_object)', true
 			}
 			return '${fn_name}(${obj})', true
+		}
+		if sym.kind == .struct {
+			if sym.info is ast.Struct && sym.info.is_anon && !_field_type.has_flag(.option)
+				&& !_field_type.has_flag(.shared_f) {
+				typed_obj := '*(${sym.cname}*)&(${obj})'
+				return '${fn_name}(${typed_obj})', true
+			}
 		}
 		return 'indent_${fn_name}(${obj}, indent_count + 1)', true
 	} else if sym.kind in [.array, .array_fixed, .map, .sum_type] {

@@ -163,6 +163,7 @@ mut:
 	inside_cinit              bool
 	inside_global_decl        bool
 	inside_interface_deref    bool
+	inside_assign_fn_var      bool
 	last_tmp_call_var         []string
 	last_if_option_type       ast.Type // stores the expected if type on nested if expr
 	loop_depth                int
@@ -1029,16 +1030,16 @@ pub fn (mut g Gen) init() {
 	if g.pref.gc_mode in [.boehm_full, .boehm_incr, .boehm_full_opt, .boehm_incr_opt, .boehm_leak] {
 		g.comptime_definitions.writeln('#define _VGCBOEHM (1)')
 	}
-	if g.pref.is_debug || 'debug' in g.pref.compile_defines {
+	if g.pref.is_debug {
 		g.comptime_definitions.writeln('#define _VDEBUG (1)')
 	}
-	if g.pref.is_prod || 'prod' in g.pref.compile_defines {
+	if g.pref.is_prod {
 		g.comptime_definitions.writeln('#define _VPROD (1)')
 	}
-	if g.pref.is_test || 'test' in g.pref.compile_defines {
+	if g.pref.is_test {
 		g.comptime_definitions.writeln('#define _VTEST (1)')
 	}
-	if g.pref.is_prof || 'profile' in g.pref.compile_defines {
+	if g.pref.is_prof {
 		g.comptime_definitions.writeln('#define _VPROFILE (1)')
 	}
 	if g.pref.autofree {
@@ -2667,7 +2668,7 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 			g.writeln('goto ${c_name(node.name)};')
 		}
 		ast.AsmStmt {
-			if g.is_cc_msvc {
+			if g.is_cc_msvc && !g.pref.output_cross_c {
 				g.error('msvc does not support inline assembly', node.pos)
 			}
 			g.write_v_source_line_info_stmt(node)
@@ -5360,7 +5361,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 		if node.obj is ast.Var {
 			is_auto_heap = node.obj.is_auto_heap
 				&& (!g.is_assign_lhs || g.assign_op != .decl_assign)
-			if is_auto_heap {
+			if is_auto_heap && !g.inside_assign_fn_var {
 				g.write('(*(')
 			}
 			is_option = is_option || node.obj.orig_type.has_flag(.option)
@@ -5478,7 +5479,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 						}
 						g.write(')')
 					}
-					if is_auto_heap {
+					if is_auto_heap && !g.inside_assign_fn_var {
 						g.write('))')
 					}
 					return
@@ -5502,7 +5503,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 		}
 	}
 	g.write(g.get_ternary_name(name))
-	if is_auto_heap {
+	if is_auto_heap && !g.inside_assign_fn_var {
 		g.write('))')
 		if is_option && node.or_expr.kind != .absent {
 			g.write('.data')
@@ -5727,15 +5728,27 @@ fn (mut g Gen) hash_stmt_guarded_include(node ast.HashStmt) string {
 fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 	line_nr := node.pos.line_nr + 1
 	mut ct_condition := ''
+
 	if node.ct_conds.len > 0 {
-		ct_condition_start := g.out.len
+		mut comptime_branch_context_str := g.gen_branch_context_string()
+		mut is_true := ast.ComptTimeCondResult{}
+		mut sb := strings.new_builder(256)
 		for idx, ct_expr in node.ct_conds {
-			g.comptime_if_cond(ct_expr, false)
+			idx_str := comptime_branch_context_str + '|${g.file.path}|${ct_expr.pos()}|'
+			if comptime_is_true := g.table.comptime_is_true[idx_str] {
+				// `g.table.comptime_is_true` are the branch condition results set by `checker`
+				is_true = comptime_is_true
+			} else {
+				g.error('checker error: condition result idx string not found => [${idx_str}]',
+					ct_expr.pos())
+				return
+			}
+			sb.write_string(is_true.c_str)
 			if idx < node.ct_conds.len - 1 {
-				g.write(' && ')
+				sb.write_string(' && ')
 			}
 		}
-		ct_condition = g.out.cut_to(ct_condition_start).trim_space()
+		ct_condition = sb.str()
 	}
 	// #include etc
 	if node.kind == 'include' {
