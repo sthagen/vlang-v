@@ -117,6 +117,8 @@ pub type Stmt = AsmStmt
 	| StructDecl
 	| TypeDecl
 
+pub type HashStmtNode = IfExpr | HashStmt
+
 pub struct EmptyScopeObject {
 pub mut:
 	name string
@@ -2301,6 +2303,23 @@ pub fn (expr Expr) pos() token.Pos {
 		// Please, do NOT use else{} here.
 		// This match is exhaustive *on purpose*, to help force
 		// maintaining/implementing proper .pos fields.
+	}
+}
+
+pub fn (expr Expr) is_constant() bool {
+	return match expr {
+		IntegerLiteral, FloatLiteral, BoolLiteral, StringLiteral {
+			true
+		}
+		InfixExpr, CastExpr, ArrayInit {
+			true
+		}
+		UnsafeExpr {
+			expr.expr.is_constant()
+		}
+		else {
+			return false
+		}
 	}
 }
 
