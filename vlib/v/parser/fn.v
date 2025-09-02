@@ -213,6 +213,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 	mut is_c2v_variadic := false
 	mut is_c_extern := false
 	mut is_markused := false
+	mut is_weak := false
 	mut is_expand_simple_interpolation := false
 	mut comments := []ast.Comment{}
 	fn_attrs := p.attrs
@@ -253,6 +254,9 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 			}
 			'c2v_variadic' {
 				is_c2v_variadic = true
+			}
+			'weak' {
+				is_weak = true
 			}
 			'use_new' {
 				is_ctor_new = true
@@ -359,6 +363,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 			check_name = if language == .js { p.check_js_name() } else { p.check_name() }
 			name = check_name
 		}
+
 		if language == .v && !p.pref.translated && !p.is_translated && !p.builtin_mod
 			&& util.contains_capital(check_name) {
 			p.error_with_pos('function names cannot contain uppercase letters, use snake_case instead',
@@ -655,6 +660,7 @@ run them via `v file.v` instead',
 	})
 	*/
 	// Body
+	keep_fn_name := p.cur_fn_name
 	p.cur_fn_name = name
 	mut stmts := []ast.Stmt{}
 	body_start_pos := p.tok.pos()
@@ -671,6 +677,7 @@ run them via `v file.v` instead',
 		p.inside_unsafe_fn = false
 		p.inside_fn = false
 	}
+	p.cur_fn_name = keep_fn_name
 	if !no_body && are_params_type_only {
 		p.error_with_pos('functions with type only params can not have bodies', body_start_pos)
 		return ast.FnDecl{
@@ -703,6 +710,7 @@ run them via `v file.v` instead',
 		is_unsafe:          is_unsafe
 		is_must_use:        is_must_use
 		is_markused:        is_markused
+		is_weak:            is_weak
 		is_file_translated: p.is_translated
 		//
 		attrs:          fn_attrs

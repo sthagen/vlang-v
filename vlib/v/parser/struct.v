@@ -338,7 +338,10 @@ fn (mut p Parser) struct_decl(is_anon bool) ast.StructDecl {
 				if p.tok.kind == .assign {
 					// Default value
 					p.next()
+					old_assign_rhs := p.inside_assign_rhs
+					p.inside_assign_rhs = true
 					default_expr = p.expr(0)
+					p.inside_assign_rhs = old_assign_rhs
 					match mut default_expr {
 						ast.EnumVal { default_expr.typ = typ }
 						// TODO: implement all types??
@@ -457,7 +460,7 @@ fn (mut p Parser) struct_decl(is_anon bool) ast.StructDecl {
 		}
 	}
 	// allow duplicate c struct declarations
-	if ret == -1 && language != .c {
+	if ret == -1 && language != .c && !p.pref.is_fmt {
 		p.error_with_pos('cannot register struct `${name}`, another type with this name exists',
 			name_pos)
 		return ast.StructDecl{}
@@ -477,6 +480,7 @@ fn (mut p Parser) struct_decl(is_anon bool) ast.StructDecl {
 		language:         language
 		is_union:         is_union
 		is_option:        is_option
+		is_aligned:       attrs.contains('aligned')
 		attrs:            if is_anon { []ast.Attr{} } else { attrs } // anon structs can't have attributes
 		pre_comments:     pre_comments
 		end_comments:     end_comments
@@ -671,7 +675,7 @@ fn (mut p Parser) interface_decl() ast.InterfaceDecl {
 		}
 		language: language
 	)
-	if reg_idx == -1 {
+	if reg_idx == -1 && !p.pref.is_fmt {
 		p.error_with_pos('cannot register interface `${interface_name}`, another type with this name exists',
 			name_pos)
 		return ast.InterfaceDecl{}
