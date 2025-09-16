@@ -102,6 +102,7 @@ mut:
 	is_shared                 bool // for initialization of hidden mutex in `[rw]shared` literals
 	is_vlines_enabled         bool // is it safe to generate #line directives when -g is passed
 	is_autofree               bool // false, inside the bodies of fns marked with [manualfree], otherwise === g.pref.autofree
+	is_autofree_tmp           bool // when generating autofree temporary variables
 	is_builtin_mod            bool
 	is_json_fn                bool // inside json.encode()
 	is_js_call                bool // for handling a special type arg #1 `json.decode(User, ...)`
@@ -2369,13 +2370,24 @@ fn (mut g Gen) expr_with_tmp_var(expr ast.Expr, expr_typ ast.Type, ret_typ ast.T
 		}
 		mut expr_is_fixed_array_var := false
 		mut fn_option_clone := false
+		mut already_generated := false
 		if ret_typ_is_option {
 			if expr_typ_is_option && expr in [ast.StructInit, ast.ArrayInit, ast.MapInit] {
-				simple_assign = expr is ast.StructInit
+				simple_assign = expr is ast.StructInit && !expr.typ.has_flag(.generic)
 				if simple_assign {
 					g.write('${tmp_var} = ')
 				} else {
-					g.write('builtin___option_none(&(${styp}[]) { ')
+					if expr is ast.StructInit && expr.typ.has_flag(.generic) {
+						// T{}
+						g.write('builtin___option_ok(&(${styp}[]) { ')
+						already_generated = true
+						g.expr(ast.StructInit{
+							...expr
+							typ: g.unwrap_generic(expr.typ).clear_flag(.option)
+						})
+					} else {
+						g.write('builtin___option_none(&(${styp}[]) { ')
+					}
 				}
 			} else {
 				simple_assign =
@@ -2427,7 +2439,10 @@ fn (mut g Gen) expr_with_tmp_var(expr ast.Expr, expr_typ ast.Type, ret_typ ast.T
 		} else {
 			g.write('builtin___result_ok(&(${styp}[]) { ')
 		}
-		g.expr_with_cast(expr, expr_typ, ret_typ)
+		if !already_generated {
+			g.expr_with_cast(expr, expr_typ, ret_typ)
+		}
+
 		if fn_option_clone {
 			g.write('.data')
 		}

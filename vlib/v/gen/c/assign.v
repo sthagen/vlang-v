@@ -219,8 +219,14 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 	}
 	// Free the old value assigned to this string var (only if it's `str = [new value]`
 	// or `x.str = [new value]` )
-	mut af := g.is_autofree && !g.is_builtin_mod && node.op == .assign && node.left_types.len == 1
-		&& node.left[0] in [ast.Ident, ast.SelectorExpr]
+	mut af := g.is_autofree && !g.is_builtin_mod && !g.is_autofree_tmp && node.op == .assign
+		&& node.left_types.len == 1 && node.left[0] in [ast.Ident, ast.SelectorExpr]
+	if af && node.right.len == 1 && node.right[0] is ast.CallExpr {
+		call_expr := node.right[0] as ast.CallExpr
+		if call_expr.is_method && call_expr.left is ast.CallExpr {
+			af = false
+		}
+	}
 	mut sref_name := ''
 	mut type_to_free := ''
 	if af {
@@ -430,6 +436,10 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 								g.type_resolver.update_ct_type(left.name, ctyp)
 							}
 						}
+					} else if var_type.has_flag(.generic) && val is ast.StructInit
+						&& val_type.has_flag(.generic) {
+						val_type = g.unwrap_generic(val_type)
+						var_type = val_type
 					}
 				}
 				is_auto_heap = left.obj.is_auto_heap
@@ -1042,6 +1052,14 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 						g.expr_with_opt_or_block(val, val_type, left, var_type, false)
 					} else if node.has_cross_var {
 						g.gen_cross_tmp_variable(node.left, val)
+					} else if val is ast.None {
+						if var_type.has_flag(.generic)
+							&& g.unwrap_generic(var_type).has_flag(.option)
+							&& var_type.nr_muls() > 0 {
+							g.gen_option_error(var_type.set_nr_muls(0), ast.None{})
+						} else {
+							g.gen_option_error(var_type, ast.None{})
+						}
 					} else {
 						if op_overloaded {
 							g.op_arg(val, op_expected_right, val_type)
