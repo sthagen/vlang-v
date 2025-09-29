@@ -168,6 +168,7 @@ mut:
 	last_tmp_call_var         []string
 	last_if_option_type       ast.Type // stores the expected if type on nested if expr
 	loop_depth                int
+	unsafe_level              int
 	ternary_names             map[string]string
 	ternary_level_names       map[string][]string
 	arraymap_set_pos          int      // map or array set value position
@@ -1001,6 +1002,9 @@ pub fn (mut g Gen) init() {
 			g.cheaders.writeln(c_bare_headers)
 		} else {
 			g.cheaders.writeln(c_headers)
+		}
+		if !g.pref.skip_unused || g.table.used_features.safe_int {
+			g.cheaders.writeln(c_unsigned_comparison_functions)
 		}
 		if !g.pref.skip_unused || g.table.used_features.used_attr_weak {
 			g.cheaders.writeln(c_common_weak_attr)
@@ -2523,6 +2527,10 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 		}
 		ast.Block {
 			g.write_v_source_line_info_stmt(node)
+			if node.is_unsafe {
+				g.unsafe_level++
+			}
+
 			if !node.is_unsafe {
 				g.writeln('{')
 			} else {
@@ -2534,6 +2542,9 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 			}
 			g.stmts(node.stmts)
 			g.writeln('}')
+			if node.is_unsafe {
+				g.unsafe_level--
+			}
 		}
 		ast.AssignStmt {
 			g.write_v_source_line_info_stmt(node)
@@ -4084,7 +4095,9 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 			g.typeof_expr(node)
 		}
 		ast.UnsafeExpr {
+			g.unsafe_level++
 			g.expr(node.expr)
+			g.unsafe_level--
 		}
 	}
 	g.discard_or_result = old_discard_or_result
