@@ -973,11 +973,12 @@ fn (mut g Gen) gen_array_filter(node ast.CallExpr) {
 	}
 
 	sym := g.table.final_sym(node.return_type)
-	if sym.kind != .array {
+	if sym.kind !in [.array_fixed, .array] {
 		verror('filter() requires an array')
 	}
 	info := sym.info as ast.Array
 	styp := g.styp(node.return_type)
+	left_sym := g.table.final_sym(node.left_type)
 	elem_type_str := g.styp(info.elem_type)
 	noscan := g.check_noscan(info.elem_type)
 	has_infix_left_var_name := g.write_prepared_tmp_value(past.tmp_var, node, styp, '{0}')
@@ -997,7 +998,7 @@ fn (mut g Gen) gen_array_filter(node ast.CallExpr) {
 	i := g.new_tmp_var()
 	g.writeln('for (${ast.int_type_name} ${i} = 0; ${i} < ${past.tmp_var}_len; ++${i}) {')
 	g.indent++
-	g.write_prepared_var(var_name, info.elem_type, elem_type_str, past.tmp_var, i, true,
+	g.write_prepared_var(var_name, info.elem_type, elem_type_str, past.tmp_var, i, left_sym.kind == .array,
 		false)
 	g.set_current_pos_as_last_stmt_pos()
 	mut is_embed_map_filter := false
@@ -1431,8 +1432,8 @@ fn (mut g Gen) gen_array_wait(node ast.CallExpr) {
 	thread_type := arr.array_info().elem_type
 	thread_sym := g.table.sym(thread_type)
 	thread_ret_type := thread_sym.thread_info().return_type
-	eltyp := g.table.sym(thread_ret_type).cname
-	fn_name := g.register_thread_array_wait_call(eltyp)
+	elsymcname := g.table.sym(thread_ret_type).cname
+	fn_name := g.register_thread_array_wait_call(elsymcname)
 	g.write('${fn_name}(')
 	if node.left_type.is_ptr() {
 		g.write('*')
@@ -1446,8 +1447,8 @@ fn (mut g Gen) gen_fixed_array_wait(node ast.CallExpr) {
 	thread_type := arr.array_fixed_info().elem_type
 	thread_sym := g.table.sym(thread_type)
 	thread_ret_type := thread_sym.thread_info().return_type
-	eltyp := g.table.sym(thread_ret_type).cname
-	fn_name := g.register_thread_fixed_array_wait_call(node, eltyp)
+	elsymcname := g.table.sym(thread_ret_type).cname
+	fn_name := g.register_thread_fixed_array_wait_call(node, elsymcname)
 	g.write('${fn_name}(')
 	g.expr(node.left)
 	g.write(')')
