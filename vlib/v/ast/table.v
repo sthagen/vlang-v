@@ -88,7 +88,7 @@ pub mut:
 	gostmts            int    // how many `go` statements there were in the parsed files.
 	// When table.gostmts > 0, __VTHREADS__ is defined, which can be checked with `$if threads {`
 	enum_decls        map[string]EnumDecl
-	vls_info          map[string]VLSInfo
+	vls_info          map[string]VlsInfo
 	module_deprecated map[string]bool
 	module_attrs      map[string][]Attr // module attributes
 	builtin_pub_fns   map[string]bool
@@ -113,12 +113,10 @@ pub mut:
 	c_str string
 }
 
-pub struct VLSInfo {
+pub struct VlsInfo {
 pub mut:
-	pos          token.Pos
-	pre_comments []Comment
-	comments     []Comment
-	end_comments []Comment
+	pos token.Pos
+	doc string // documentation
 }
 
 // used by vls to avoid leaks
@@ -1878,6 +1876,11 @@ pub fn (mut t Table) convert_generic_type(generic_type Type, generic_names []str
 				type_changed = true
 			}
 			if type_changed {
+				// map[Type]T where T is an alias to map type
+				if to_types.len == 1 && sym.info.value_type.has_flag(.generic)
+					&& t.type_kind(to_types[0]) == .alias && t.final_sym(to_types[0]).kind == .map {
+					return unwrapped_value_type
+				}
 				idx := t.find_or_register_map(unwrapped_key_type, unwrapped_value_type)
 				if unwrapped_key_type.has_flag(.generic) || unwrapped_value_type.has_flag(.generic) {
 					return new_type(idx).derive_add_muls(generic_type).set_flag(.generic)
@@ -2777,6 +2780,6 @@ pub fn (mut t Table) get_veb_result_type_idx() int {
 }
 
 @[inline]
-pub fn (mut t Table) register_vls_info(key string, val VLSInfo) {
+pub fn (mut t Table) register_vls_info(key string, val VlsInfo) {
 	t.vls_info[key] = val
 }
