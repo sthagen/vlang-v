@@ -7,7 +7,9 @@ import strings
 import v.ast
 import v.util
 
-const c_fn_name_escape_seq = ['[', '_T_', ']', '']
+// has[int]() => has_T_int()
+// has[int, string]() => has_T_int_string()
+const c_fn_name_escape_seq = ['[', '_T_', ', ', '_', ']', '']
 
 fn (mut g Gen) is_used_by_main(node ast.FnDecl) bool {
 	$if trace_unused_by_main ? {
@@ -454,7 +456,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 	}
 	g.indent++
 	for defer_stmt in node.defer_stmts {
-		if defer_stmt.mode != .function && g.pref.scoped_defer {
+		if defer_stmt.mode != .function {
 			continue
 		}
 		g.writeln('bool ${g.defer_flag_var(defer_stmt)} = false;')
