@@ -34,11 +34,14 @@ fn (mut g Gen) expr_with_opt_or_block(expr ast.Expr, expr_typ ast.Type, var_expr
 			defer {
 				g.inside_or_block = false
 			}
-			stmts := (expr as ast.Ident).or_expr.stmts
+			or_expr := (expr as ast.Ident).or_expr
+			stmts := or_expr.stmts
+			scope := or_expr.scope
 			// handles stmt block which returns something
 			// e.g. { return none }
 			if stmts.len > 0 && stmts.last() is ast.ExprStmt && stmts.last().typ != ast.void_type {
-				g.gen_or_block_stmts(c_name(var_expr.str()), '', stmts, ret_typ, false)
+				g.gen_or_block_stmts(c_name(var_expr.str()), '', stmts, ret_typ, false,
+					scope, expr.pos())
 			} else {
 				// handles stmt block which doesn't returns value
 				// e.g. { return }
@@ -46,6 +49,7 @@ fn (mut g Gen) expr_with_opt_or_block(expr ast.Expr, expr_typ ast.Type, var_expr
 				if stmts.len > 0 && stmts.last() is ast.ExprStmt {
 					g.writeln(';')
 				}
+				g.write_defer_stmts(scope, false, expr.pos())
 			}
 		}
 		g.writeln('}')
@@ -250,7 +254,7 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 					g.write('->val')
 				}
 				g.writeln('); // free ${type_to_free} on re-assignment2')
-				defer {
+				defer(fn) {
 					if af {
 						g.writeln('builtin__${type_to_free}_free(&${sref_name});')
 					}
@@ -532,7 +536,7 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 
 		g.left_is_opt = var_type.has_option_or_result()
 		g.right_is_opt = val_type.has_option_or_result()
-		defer {
+		defer(fn) {
 			g.left_is_opt = false
 			g.right_is_opt = false
 		}
@@ -947,7 +951,7 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 					&& ((var_type.has_flag(.option) && !val_type.has_flag(.option))
 					|| (var_type.has_flag(.result) && !val_type.has_flag(.result))) {
 					old_inside_opt_or_res := g.inside_opt_or_res
-					defer {
+					defer(fn) {
 						g.inside_opt_or_res = old_inside_opt_or_res
 					}
 					g.inside_opt_or_res = true
@@ -1047,7 +1051,7 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 				} else {
 					// var = &auto_heap_var
 					old_is_auto_heap := g.is_option_auto_heap
-					defer {
+					defer(fn) {
 						g.is_option_auto_heap = old_is_auto_heap
 					}
 					if val is ast.Ident && val.is_mut() && var_type.is_ptr() {

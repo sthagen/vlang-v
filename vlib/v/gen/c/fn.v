@@ -11,7 +11,7 @@ const c_fn_name_escape_seq = ['[', '_T_', ']', '']
 
 fn (mut g Gen) is_used_by_main(node ast.FnDecl) bool {
 	$if trace_unused_by_main ? {
-		defer {
+		defer(fn) {
 			used_by_main := $res()
 			if !used_by_main {
 				fkey := node.fkey()
@@ -186,7 +186,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 	} else {
 		if node.defer_stmts.len > 0 {
 			g.defer_vars = []string{}
-			defer {
+			defer(fn) {
 				g.defer_vars = tmp_defer_vars
 			}
 		}
@@ -2067,7 +2067,7 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 	if is_print && (node.args[0].typ != ast.string_type
 		|| g.comptime.comptime_for_method != unsafe { nil } || node.args[0].ct_expr) {
 		g.inside_interface_deref = true
-		defer {
+		defer(fn) {
 			g.inside_interface_deref = false
 		}
 		mut typ := g.type_resolver.get_type_or_default(node.args[0].expr, node.args[0].typ)
@@ -2133,7 +2133,7 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 	if !print_auto_str {
 		if is_print {
 			g.inside_interface_deref = true
-			defer {
+			defer(fn) {
 				g.inside_interface_deref = false
 			}
 		}
@@ -2311,7 +2311,7 @@ fn (mut g Gen) autofree_call_pregen(node ast.CallExpr) {
 		if !arg.is_tmp_autofree {
 			if arg.expr is ast.CallExpr && arg.expr.name in ['json.encode', 'json.encode_pretty'] {
 				t := '_arg_expr_${arg.expr.name.replace('.', '_')}_${arg.expr.pos.pos}'
-				defer {
+				defer(fn) {
 					g.writeln(';\n\tbuiltin__string_free(&${t});')
 				}
 			}
@@ -2406,6 +2406,40 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 						{
 							expected_types[i] = utyp
 						}
+					}
+				}
+			}
+		}
+	}
+	if node.is_method {
+		left_sym := g.table.sym(node.left_type)
+		if left_sym.info is ast.Struct && left_sym.info.generic_types.len > 0
+			&& left_sym.info.concrete_types.len > 0 {
+			base_type_idx := g.table.find_type_idx(left_sym.name.all_before('['))
+			mut func := ast.Fn{}
+			mut found := false
+			for {
+				if base_type_idx > 0 {
+					base_sym := g.table.sym(ast.idx_to_type(base_type_idx))
+					if base_func := g.table.find_method(base_sym, node.name) {
+						func = base_func
+						found = true
+						break
+					}
+				}
+				if base_func := g.table.find_method(left_sym, node.name) {
+					func = base_func
+					found = true
+				}
+				break
+			}
+			if found && func.generic_names.len > 0 {
+				for i in 0 .. expected_types.len {
+					mut muttable := unsafe { &ast.Table(g.table) }
+					if utyp := muttable.convert_generic_type(node.expected_arg_types[i],
+						func.generic_names, left_sym.info.concrete_types)
+					{
+						expected_types[i] = utyp
 					}
 				}
 			}
