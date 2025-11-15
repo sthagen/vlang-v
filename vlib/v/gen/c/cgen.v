@@ -1980,7 +1980,7 @@ pub fn (mut g Gen) write_fn_typesymbol_declaration(sym ast.TypeSymbol) {
 			''
 		}
 		ret_typ :=
-			if !func.return_type.has_flag(.option) && g.table.sym(func.return_type).kind == .array_fixed { '_v_' } else { '' } +
+			if !func.return_type.has_flag(.option) && !func.return_type.has_flag(.result) && g.table.sym(func.return_type).kind == .array_fixed { '_v_' } else { '' } +
 			g.styp(func.return_type)
 		g.type_definitions.write_string('typedef ${ret_typ} (${msvc_call_conv}*${fn_name})(')
 		for i, param in func.params {
@@ -3895,7 +3895,12 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 		}
 		ast.ParExpr {
 			g.write('(')
-			g.expr(node.expr)
+			if node.expr is ast.ArrayInit && node.expr.is_fixed && !g.inside_assign {
+				array_init := node.expr as ast.ArrayInit
+				g.fixed_array_init_with_cast(array_init, array_init.typ)
+			} else {
+				g.expr(node.expr)
+			}
 			g.write(')')
 		}
 		ast.PostfixExpr {
