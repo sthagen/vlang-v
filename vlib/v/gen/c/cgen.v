@@ -5569,14 +5569,13 @@ fn (mut g Gen) ident(node ast.Ident) {
 							}
 						}
 						if i == 0 && node.obj.ct_type_var != .smartcast && node.obj.is_unwrapped {
-							dot := if (!node.obj.ct_type_unwrapped && !node.obj.orig_type.is_ptr()
+							if (!node.obj.ct_type_unwrapped && !node.obj.orig_type.is_ptr()
 								&& !node.obj.orig_type.has_flag(.generic) && obj_sym.is_heap())
 								|| node.obj.orig_type.has_flag(.option_mut_param_t) {
-								'->'
+								g.write('->data')
 							} else {
-								'.'
+								g.write('.data')
 							}
-							g.write('${dot}data')
 						}
 						g.write(')')
 					}
@@ -7034,8 +7033,8 @@ fn (mut g Gen) write_types(symbols []&ast.TypeSymbol) {
 			ast.ArrayFixed {
 				elem_sym := g.table.sym(sym.info.elem_type)
 				if !elem_sym.is_builtin() && !sym.info.elem_type.has_flag(.generic)
-					&& (!g.pref.skip_unused || (!sym.info.is_fn_ret
-					&& sym.idx in g.table.used_features.used_syms)) {
+					&& !sym.info.is_fn_ret && (!g.pref.skip_unused
+					|| (!sym.info.is_fn_ret && sym.idx in g.table.used_features.used_syms)) {
 					// .array_fixed {
 					styp := sym.cname
 					// array_fixed_char_300 => char x[300]
