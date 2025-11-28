@@ -227,7 +227,7 @@ pub mut:
 	fatal_errors     bool // unconditionally exit after the first error with exit(1)
 	reuse_tmpc       bool // do not use random names for .tmp.c and .tmp.c.rsp files, and do not remove them
 	no_rsp           bool // when true, pass C backend options directly on the CLI (do not use `.rsp` files for them, some older C compilers do not support them)
-	no_std           bool // when true, do not pass -std=gnu99(linux)/-std=c99 to the C backend
+	no_std           bool // when true, do not pass -std=c99 to the C backend
 
 	no_parallel       bool // do not use threads when compiling; slower, but more portable and sometimes less buggy
 	parallel_cc       bool // whether to split the resulting .c file into many .c files + a common .h file, that are then compiled in parallel, then linked together.
@@ -996,10 +996,8 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 					so_url := 'https://raw.githubusercontent.com/vlang/photonbin/master/photonwrapper_${os.user_os()}_${arch}.so'
 					if !os.exists(so_path) {
 						println('coroutines .so not found, downloading...')
-						os.execute_opt('wget -O "${so_path}" "${so_url}"') or {
-							os.execute_opt('curl -o "${so_path}" "${so_url}"') or {
-								panic('coroutines .so could not be downloaded with wget or curl. Download ${so_url}, place it in ${so_path} then try again.')
-							}
+						os.execute_opt('${os.quoted_path(vexe)} download -o "${so_path}" "${so_url}"') or {
+							panic('coroutines .so could not be downloaded with `v download`. Download ${so_url}, place it in ${so_path} then try again.')
 						}
 						println('done!')
 					}
