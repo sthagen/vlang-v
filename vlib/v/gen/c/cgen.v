@@ -2149,9 +2149,11 @@ fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) bool {
 	if g.inside_ternary > 0 {
 		g.write('(')
 	}
+	expected_cast_type := g.expected_cast_type
 	mut last_stmt_was_return := false
 	for i, stmt in stmts {
 		if i == stmts.len - 1 {
+			g.expected_cast_type = expected_cast_type
 			if stmt is ast.Return {
 				last_stmt_was_return = true
 			}
@@ -3213,7 +3215,9 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 	}
 	if (exp_sym.kind == .function && !expected_type.has_option_or_result())
 		|| (g.inside_struct_init && expected_type == ast.voidptr_type
-		&& expected_type != got_type_raw && expr !is ast.StructInit) {
+		&& expected_type != got_type_raw && expr !is ast.StructInit)
+		|| (g.inside_call && expected_type == ast.voidptr_type && expr is ast.ArrayInit
+		&& (expr as ast.ArrayInit).is_fixed) {
 		g.write('(voidptr)')
 	}
 	// no cast
@@ -3289,7 +3293,8 @@ fn (mut g Gen) asm_stmt(stmt ast.AsmStmt) {
 		}
 		// swap destination and operands for att syntax, not for arm64
 		if template.args.len != 0 && !template.is_directive && stmt.arch != .arm64
-			&& stmt.arch != .s390x && stmt.arch != .ppc64le && stmt.arch != .loongarch64 {
+			&& stmt.arch != .s390x && stmt.arch != .ppc64le && stmt.arch != .loongarch64
+			&& stmt.arch != .rv64 {
 			template.args.prepend(template.args.last())
 			template.args.delete(template.args.len - 1)
 		}
@@ -3366,7 +3371,8 @@ fn (mut g Gen) asm_arg(arg ast.AsmArg, stmt ast.AsmStmt) {
 		ast.IntegerLiteral {
 			if stmt.arch == .arm64 {
 				g.write('#${arg.val}')
-			} else if stmt.arch == .s390x || stmt.arch == .ppc64le || stmt.arch == .loongarch64 {
+			} else if stmt.arch == .s390x || stmt.arch == .ppc64le || stmt.arch == .loongarch64
+				|| stmt.arch == .rv64 {
 				g.write('${arg.val}')
 			} else {
 				g.write('\$${arg.val}')
@@ -3383,7 +3389,9 @@ fn (mut g Gen) asm_arg(arg ast.AsmArg, stmt ast.AsmStmt) {
 			g.write('\$${arg.val.str()}')
 		}
 		ast.AsmRegister {
-			if stmt.arch == .loongarch64 {
+			if stmt.arch == .rv64 {
+				g.write('${arg.name}')
+			} else if stmt.arch == .loongarch64 {
 				g.write('$${arg.name}')
 			} else {
 				if !stmt.is_basic {
@@ -4830,7 +4838,7 @@ fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 							'&'
 						} else if !str_method_expects_ptr && obj.typ.is_ptr() {
 							'*'.repeat(obj.typ.nr_muls())
-						} else if !str_method_expects_ptr && obj_sym.is_heap() {
+						} else if !str_method_expects_ptr && (obj_sym.is_heap() || obj.is_auto_heap) {
 							'*'
 						} else if obj.is_auto_heap && var_typ.is_ptr() && str_method_expects_ptr {
 							'*'
@@ -5122,6 +5130,9 @@ fn (mut g Gen) map_init(node ast.MapInit) {
 				g.expr_with_cast(expr, node.val_types[i], unwrap_val_typ)
 			} else if node.val_types[i].has_flag(.option) || node.val_types[i] == ast.none_type {
 				g.expr_with_opt(expr, node.val_types[i], unwrap_val_typ)
+			} else if expr !is ast.ArrayInit && value_sym.info is ast.ArrayFixed {
+				tmpvar := g.expr_with_var(expr, node.val_types[i], false)
+				g.fixed_array_var_init(tmpvar, false, value_sym.info.elem_type, value_sym.info.size)
 			} else {
 				g.expr(expr)
 			}
@@ -5676,11 +5687,24 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 			}
 			g.expr(node.expr)
 		}
-	} else if expr_type == ast.bool_type && node.typ.is_int() {
-		styp := g.styp(node_typ)
-		g.write('(${styp}[]){(')
-		g.expr(node.expr)
-		g.write(')?1:0}[0]')
+	} else if (expr_type == ast.bool_type && node.typ.is_int()) || node.typ == ast.bool_type {
+		if node_typ_is_option {
+			g.expr_with_opt(node.expr, expr_type, node.typ)
+		} else {
+			if (g.pref.translated || g.file.is_translated) && g.inside_global_decl {
+				styp := g.styp(node.typ)
+				g.write('(${styp})')
+				g.expr(node.expr)
+			} else if node.typ == ast.bool_type && expr_type == ast.bool_type {
+				g.expr(node.expr)
+			} else {
+				// due to tcc(0.9.27) bug, can't use `(cond)?1:0` here
+				styp := g.styp(node.typ)
+				g.write('(${styp}[]){(')
+				g.expr(node.expr)
+				g.write(')?1:0}[0]')
+			}
+		}
 	} else {
 		styp := g.styp(node.typ)
 		if (g.pref.translated || g.file.is_translated) && sym.kind == .function {
@@ -5740,6 +5764,8 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 				g.expr(node.expr)
 				g.write('), sizeof(${expr_styp})),._typ=${u32(expr_typ)}})')
 			} else {
+				old_inside_assign_fn_var := g.inside_assign_fn_var
+				g.inside_assign_fn_var = g.table.final_sym(expr_type).kind == .function
 				g.write('(')
 				if node.expr is ast.Ident {
 					if !node.typ.is_ptr() && node.expr_type.is_ptr() && node.expr.obj is ast.Var
@@ -5753,7 +5779,13 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 						g.write('&'.repeat(ptr_cnt))
 					}
 				}
+				if node.typ == ast.voidptr_type && node.expr is ast.ArrayInit
+					&& (node.expr as ast.ArrayInit).is_fixed {
+					expr_styp := g.styp(node.expr_type)
+					g.write('(${expr_styp})')
+				}
 				g.expr(node.expr)
+				g.inside_assign_fn_var = old_inside_assign_fn_var
 				g.write('))')
 			}
 		}
@@ -7191,7 +7223,7 @@ fn (mut g Gen) sort_structs(typesa []&ast.TypeSymbol) []&ast.TypeSymbol {
 					}
 				}
 				if !skip {
-					dep := g.table.final_sym(sym.info.elem_type).name
+					dep := g.table.final_sym(sym.info.elem_type).scoped_name()
 					if dep in type_names {
 						field_deps << dep
 					}
@@ -7689,8 +7721,15 @@ fn (mut g Gen) type_default_impl(typ_ ast.Type, decode_sumtype bool) string {
 						if field.has_default_expr {
 							mut expr_str := ''
 							if field_sym.kind in [.sum_type, .interface] {
+								default_expr_typ := if field.default_expr_typ == 0
+									&& field.default_expr.is_nil()
+									&& field.typ.is_any_kind_of_pointer() {
+									field.typ
+								} else {
+									field.default_expr_typ
+								}
 								expr_str = g.expr_string_with_cast(field.default_expr,
-									field.default_expr_typ, field.typ)
+									default_expr_typ, field.typ)
 							} else if field_sym.is_array_fixed() && g.inside_global_decl {
 								array_info := field_sym.array_fixed_info()
 								match field.default_expr {
@@ -7739,7 +7778,7 @@ fn (mut g Gen) type_default_impl(typ_ ast.Type, decode_sumtype bool) string {
 							zero_str := if field_sym.language == .v && field_sym.info is ast.Struct
 								&& field_sym.info.is_empty_struct() {
 								'{E_STRUCT}'
-							} else if field_sym.kind == .sum_type {
+							} else if field_sym.kind == .sum_type && !field.typ.is_ptr() {
 								if decode_sumtype {
 									g.type_default_sumtype(field.typ, field_sym)
 								} else {

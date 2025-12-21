@@ -439,7 +439,7 @@ fn (mut w Walker) expr(node_ ast.Expr) {
 					w.uses_array = true
 					w.mark_by_type(node.typ)
 				}
-			} else {
+			} else { // fixed arrays
 				w.mark_by_type(node.typ)
 			}
 			if node.elem_type.has_flag(.option) {
@@ -454,7 +454,9 @@ fn (mut w Walker) expr(node_ ast.Expr) {
 		}
 		ast.CallExpr {
 			w.call_expr(mut node)
-			if node.name == 'json.decode' {
+			if node.is_fn_a_const {
+				w.mark_const_as_used(node.name)
+			} else if node.name == 'json.decode' {
 				w.mark_by_type((node.args[0].expr as ast.TypeNode).typ)
 			} else if node.name == 'json.encode' && node.args[0].typ != 0 {
 				sym := w.table.final_sym(node.args[0].typ)
@@ -485,6 +487,12 @@ fn (mut w Walker) expr(node_ ast.Expr) {
 			if node.is_method && node.left_type != 0
 				&& w.table.final_sym(node.left_type).kind in [.array_fixed, .array] {
 				w.mark_by_type(node.return_type)
+			}
+			if node.name.contains('new_array_from_c_array') {
+				if !w.inside_in_op {
+					w.uses_array = true
+					w.mark_by_type(node.return_type) // the transformer fills this with the correct type
+				}
 			}
 		}
 		ast.CastExpr {
@@ -1440,6 +1448,10 @@ fn (mut w Walker) mark_resource_dependencies() {
 	if w.features.auto_str || w.uses_dump {
 		w.fn_by_name(ast.string_type_idx.str() + '.repeat')
 		w.fn_by_name('tos3')
+		builderptr_idx := int(w.table.find_type('strings.Builder').ref()).str()
+		w.fn_by_name(builderptr_idx + '.write_string')
+		w.fn_by_name(builderptr_idx + '.writeln')
+		w.fn_by_name(builderptr_idx + '.indent')
 	}
 	if w.uses_index || w.pref.is_shared {
 		w.fn_by_name(array_idx_str + '.slice')

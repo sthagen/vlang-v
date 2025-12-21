@@ -2219,6 +2219,21 @@ pub fn (mut t Table) unwrap_generic_type_ex(typ Type, generic_names []string, co
 							}
 						}
 					}
+					if fields[i].has_default_expr {
+						if fields[i].default_expr_typ.has_flag(.generic) {
+							if t_typ := t.convert_generic_type(fields[i].default_expr_typ,
+								t_generic_names, t_concrete_types)
+							{
+								fields[i].default_expr_typ = t_typ
+							}
+						} else if fields[i].default_expr_typ == 0
+							|| fields[i].default_expr_typ == nil_type {
+							if fields[i].default_expr.is_nil()
+								&& fields[i].typ.is_any_kind_of_pointer() {
+								fields[i].default_expr_typ = fields[i].typ
+							}
+						}
+					}
 				}
 				// update concrete types
 				for i in 0 .. ts.info.generic_types.len {
@@ -2649,9 +2664,15 @@ pub fn (t &Table) dependent_names_in_expr(expr Expr) []string {
 			for elem_expr in expr.exprs {
 				names << t.dependent_names_in_expr(elem_expr)
 			}
-			names << t.dependent_names_in_expr(expr.len_expr)
-			names << t.dependent_names_in_expr(expr.cap_expr)
-			names << t.dependent_names_in_expr(expr.init_expr)
+			if expr.has_len {
+				names << t.dependent_names_in_expr(expr.len_expr)
+			}
+			if expr.has_cap {
+				names << t.dependent_names_in_expr(expr.cap_expr)
+			}
+			if expr.has_init {
+				names << t.dependent_names_in_expr(expr.init_expr)
+			}
 		}
 		CallExpr {
 			if expr.is_method {
