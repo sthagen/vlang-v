@@ -296,6 +296,17 @@ pub mut:
 	name_pos       token.Pos
 }
 
+pub fn (ti TypeInfo) get_name_pos() ?token.Pos {
+	return match ti {
+		Struct, Alias, SumType, Enum, Interface {
+			ti.name_pos
+		}
+		else {
+			none
+		}
+	}
+}
+
 // <atomic.h> defines special typenames
 pub fn (t Type) atomic_typename() string {
 	idx := t.idx()
@@ -395,6 +406,12 @@ pub fn (t Type) deref() Type {
 		panic('deref: type `${t}` is not a pointer')
 	}
 	return t & 0xff00ffff | (nr_muls - 1) << 16
+}
+
+// flags returns type's flags
+@[inline]
+pub fn (t Type) flags() int {
+	return t >> 16
 }
 
 // has_flag returns whether the given named `flag` is set
