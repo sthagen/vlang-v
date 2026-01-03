@@ -553,6 +553,90 @@ pub fn (mut g Gen) if_expr(ifexpr ast.IfExpr, expected ast.Type, existing_rvars 
 	g.if_branch(ifexpr, expected, params, 0, existing_rvars)
 }
 
+pub fn (mut g Gen) match_expr(node ast.MatchExpr, expected ast.Type, existing_rvars []Var) {
+	results := if expected == ast.void_type {
+		[]wasm.ValType{}
+	} else if existing_rvars.len == 0 {
+		g.unpack_type(expected).map(g.get_wasm_type(it))
+	} else {
+		g.unpack_type(expected).filter(!g.is_param_type(it)).map(g.get_wasm_type(it))
+	}
+	g.match_branch(node, expected, results, 0, existing_rvars)
+}
+
+fn (mut g Gen) match_branch(node ast.MatchExpr, expected ast.Type, unpacked_params []wasm.ValType, branch_idx int, existing_rvars []Var) {
+	if branch_idx >= node.branches.len {
+		return
+	}
+
+	branch := node.branches[branch_idx]
+	mut is_last_branch := branch_idx + 1 >= node.branches.len
+	mut has_else := branch.is_else
+
+	if has_else {
+		if branch.stmts.len > 0 {
+			g.rvar_expr_stmts(branch.stmts, expected, existing_rvars)
+		}
+		return
+	}
+
+	if branch.exprs.len > 0 {
+		g.match_branch_exprs(node, expected, unpacked_params, branch_idx, 0, existing_rvars,
+			branch)
+	} else {
+		if branch.stmts.len > 0 {
+			g.rvar_expr_stmts(branch.stmts, expected, existing_rvars)
+		}
+		if !is_last_branch {
+			g.match_branch(node, expected, unpacked_params, branch_idx + 1, existing_rvars)
+		}
+	}
+}
+
+fn (mut g Gen) match_branch_exprs(node ast.MatchExpr, expected ast.Type, unpacked_params []wasm.ValType, branch_idx int, expr_idx int, existing_rvars []Var, branch ast.MatchBranch) {
+	if expr_idx >= branch.exprs.len {
+		return
+	}
+
+	mut is_last_branch := branch_idx + 1 >= node.branches.len
+	mut is_last_expr := expr_idx + 1 >= branch.exprs.len
+
+	wasm_type := g.as_numtype(g.get_wasm_type(node.cond_type))
+
+	expr := branch.exprs[expr_idx]
+
+	if expr is ast.RangeExpr {
+		is_signed := node.cond_type.is_signed()
+
+		g.expr(node.cond, node.cond_type)
+		g.expr(expr.high, node.cond_type)
+		g.func.le(wasm_type, is_signed)
+	} else {
+		g.expr(node.cond, node.cond_type)
+		g.expr(expr, node.cond_type)
+		g.func.eq(wasm_type)
+	}
+
+	blk := g.func.c_if([], unpacked_params)
+	{
+		if branch.stmts.len > 0 {
+			g.rvar_expr_stmts(branch.stmts, expected, existing_rvars)
+		}
+	}
+	{
+		g.func.c_else(blk)
+		if is_last_expr {
+			if !is_last_branch {
+				g.match_branch(node, expected, unpacked_params, branch_idx + 1, existing_rvars)
+			}
+		} else {
+			g.match_branch_exprs(node, expected, unpacked_params, branch_idx, expr_idx + 1,
+				existing_rvars, branch)
+		}
+	}
+	g.func.c_end(blk)
+}
+
 pub fn (mut g Gen) call_expr(node ast.CallExpr, expected ast.Type, existing_rvars []Var) {
 	mut wasm_ns := ?string(none)
 	mut name := node.name
@@ -850,7 +934,7 @@ pub fn (mut g Gen) expr(node ast.Expr, expected ast.Type) {
 			g.cast(node.typ, expected)
 		}
 		ast.MatchExpr {
-			g.w_error('wasm backend does not support match expressions yet')
+			g.match_expr(node, expected, [])
 		}
 		ast.EnumVal {
 			type_name := g.table.get_type_name(node.typ)
@@ -955,6 +1039,49 @@ pub fn (mut g Gen) expr(node ast.Expr, expected ast.Type) {
 	}
 }
 
+pub fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
+	loop_var_type := unpack_literal_int(node.val_type)
+	block := g.func.c_block([], [])
+	{
+		mut loop_var := Var{}
+		loop_var = g.new_local(node.val_var, loop_var_type)
+
+		g.expr(node.cond, loop_var_type)
+		g.set(loop_var)
+
+		loop := g.func.c_loop([], [])
+		{
+			g.loop_breakpoint_stack << LoopBreakpoint{
+				c_continue: loop
+				c_break:    block
+				name:       node.label
+			}
+
+			g.get(loop_var)
+			g.expr(node.high, loop_var_type)
+			wtyp := g.as_numtype(g.get_wasm_type(loop_var_type))
+			g.func.lt(wtyp, loop_var_type.is_signed())
+			g.func.eqz(.i32_t)
+			g.func.c_br_if(block)
+
+			g.expr_stmts(node.stmts, ast.void_type)
+
+			g.set_prepare(loop_var)
+			{
+				g.get(loop_var)
+				g.literalint(1, loop_var_type)
+				g.func.add(wtyp)
+			}
+			g.set(loop_var)
+
+			g.func.c_br(loop)
+			g.loop_breakpoint_stack.pop()
+		}
+		g.func.c_end(loop)
+	}
+	g.func.c_end(block)
+}
+
 pub fn (g &Gen) file_pos(pos token.Pos) string {
 	return '${g.file_path}:${pos.line_nr + 1}:${pos.col + 1}'
 }
@@ -1009,30 +1136,38 @@ pub fn (mut g Gen) expr_stmt(node ast.Stmt, expected ast.Type) {
 
 				loop := g.func.c_loop([], [])
 				{
-					g.loop_breakpoint_stack << LoopBreakpoint{
-						c_continue: loop
-						c_break:    block
-						name:       node.label
-					}
+					continue_block := g.func.c_block([], [])
+					{
+						g.loop_breakpoint_stack << LoopBreakpoint{
+							c_continue: continue_block
+							c_break:    block
+							name:       node.label
+						}
 
-					if node.has_cond {
-						g.expr(node.cond, ast.bool_type)
-						g.func.eqz(.i32_t)
-						g.func.c_br_if(block) // !cond, goto end
-					}
+						if node.has_cond {
+							g.expr(node.cond, ast.bool_type)
+							g.func.eqz(.i32_t)
+							g.func.c_br_if(block) // !cond, goto end
+						}
 
-					g.expr_stmts(node.stmts, ast.void_type)
+						g.expr_stmts(node.stmts, ast.void_type)
+
+						g.loop_breakpoint_stack.pop()
+					}
+					g.func.c_end(continue_block)
 
 					if node.has_inc {
 						g.expr_stmt(node.inc, ast.void_type)
 					}
 
 					g.func.c_br(loop)
-					g.loop_breakpoint_stack.pop()
 				}
 				g.func.c_end(loop)
 			}
 			g.func.c_end(block)
+		}
+		ast.ForInStmt {
+			g.for_in_stmt(node)
 		}
 		ast.BranchStmt {
 			mut bp := g.loop_breakpoint_stack.last()
