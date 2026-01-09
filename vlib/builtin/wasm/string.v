@@ -63,3 +63,35 @@ pub fn (s string) < (other string) bool {
 	}
 	return false
 }
+
+// at returns the byte at index `idx`.
+// Example: assert 'ABC'.at(1) == u8(`B`)
+// NOTE: Adapted from C built-in, modified for WASM
+pub fn (s string) at(idx int) u8 {
+	$if !no_bounds_checking {
+		if idx < 0 || idx >= s.len {
+			panic('string index out of range')
+		}
+	}
+	return unsafe { s.str[idx] }
+}
+
+// Convert C string to V string
+pub fn cstring_to_vstring(ptr &u8) string {
+	if ptr == 0 {
+		return ''
+	}
+
+	mut len := 0
+	unsafe {
+		for ptr[len] != 0 {
+			len++
+		}
+	}
+	unsafe {
+		return string{
+			str: ptr
+			len: len
+		}
+	}
+}
