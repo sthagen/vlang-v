@@ -1763,7 +1763,7 @@ pub fn (mut g Gen) write_typedef_types() {
 			.array_fixed {
 				info := sym.info as ast.ArrayFixed
 				elem_sym := g.table.sym(info.elem_type)
-				if elem_sym.is_builtin() {
+				if elem_sym.kind != .struct && elem_sym.is_builtin() {
 					styp := sym.cname
 					len := info.size
 					if len > 0 {
@@ -1787,6 +1787,8 @@ pub fn (mut g Gen) write_typedef_types() {
 										g.typedefs.writeln('typedef struct ${styp_elem} ${styp_elem};')
 										g.type_definitions.writeln('${g.option_type_text(styp_elem,
 											elem_base)};')
+									}
+									if styp !in g.done_options {
 										g.type_definitions.writeln('typedef ${fixed} ${styp} [${len}];')
 										g.done_options << styp
 									}
@@ -4301,6 +4303,9 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 					mut name_type := node.name_type
 					if node.expr is ast.TypeOf {
 						name_type = g.type_resolver.typeof_type(node.expr.expr, name_type)
+						if name_type == ast.void_type_idx {
+							name_type = node.name_type
+						}
 					}
 					g.type_name(name_type)
 					return
@@ -7085,9 +7090,10 @@ fn (mut g Gen) write_types(symbols []&ast.TypeSymbol) {
 			}
 			ast.ArrayFixed {
 				elem_sym := g.table.sym(sym.info.elem_type)
-				if !elem_sym.is_builtin() && !sym.info.elem_type.has_flag(.generic)
-					&& !sym.info.is_fn_ret && (!g.pref.skip_unused
-					|| (!sym.info.is_fn_ret && sym.idx in g.table.used_features.used_syms)) {
+				if (elem_sym.kind == .struct || !elem_sym.is_builtin())
+					&& !sym.info.elem_type.has_flag(.generic) && !sym.info.is_fn_ret
+					&& (!g.pref.skip_unused || (!sym.info.is_fn_ret
+					&& sym.idx in g.table.used_features.used_syms)) {
 					// .array_fixed {
 					styp := sym.cname
 					// array_fixed_char_300 => char x[300]
