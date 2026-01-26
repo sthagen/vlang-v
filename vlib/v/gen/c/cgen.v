@@ -2029,6 +2029,13 @@ pub fn (mut g Gen) write_array_fixed_return_types() {
 			// unresolved sizes e.g. [unknown_const]int
 			continue
 		}
+		// Skip if element type is a non-builtin struct that isn't marked as used
+		// This prevents generating wrapper structs that reference undefined types
+		elem_sym := g.table.sym(info.elem_type)
+		if g.pref.skip_unused && elem_sym.kind == .struct && !elem_sym.is_builtin()
+			&& elem_sym.idx !in g.table.used_features.used_syms {
+			continue
+		}
 		mut fixed_elem_name := g.styp(info.elem_type.set_nr_muls(0))
 		if info.elem_type.is_ptr() {
 			fixed_elem_name += '*'.repeat(info.elem_type.nr_muls())
@@ -3330,6 +3337,10 @@ fn (mut g Gen) gen_attrs(attrs []ast.Attr) {
 }
 
 fn (mut g Gen) asm_stmt(stmt ast.AsmStmt) {
+	if stmt.templates.len == 0 && stmt.input.len == 0 && stmt.output.len == 0
+		&& stmt.global_labels.len == 0 && !stmt.is_goto && !stmt.is_volatile {
+		return
+	}
 	g.write('__asm__')
 	if stmt.is_volatile {
 		g.write(' volatile')
@@ -3470,8 +3481,7 @@ fn (mut g Gen) asm_arg(arg ast.AsmArg, stmt ast.AsmStmt) {
 				.base {
 					if stmt.arch == .arm64 {
 						g.write('[')
-					}
-					if stmt.arch == .loongarch64 {
+					} else if stmt.arch == .loongarch64 {
 						g.write('')
 					} else {
 						g.write('(')
@@ -3479,8 +3489,7 @@ fn (mut g Gen) asm_arg(arg ast.AsmArg, stmt ast.AsmStmt) {
 					g.asm_arg(base, stmt)
 					if stmt.arch == .arm64 {
 						g.write(']')
-					}
-					if stmt.arch == .loongarch64 {
+					} else if stmt.arch == .loongarch64 {
 						g.write('')
 					} else {
 						g.write(')')
@@ -7397,7 +7406,19 @@ fn (mut g Gen) gen_or_block_stmts(cvar_name string, cast_typ string, stmts []ast
 						g.write('${cvar_name} = ')
 					}
 					if is_array_fixed {
-						g.write('memcpy(${cvar_name}${tmp_op}data, (${cast_typ})')
+						// For fixed arrays, we need memcpy. Use compound literal cast only for
+						// expressions that generate brace-enclosed initializers (which need
+						// to become compound literals), not for constants/variables where
+						// casting to array type is invalid C.
+						is_array_init := expr_stmt.expr is ast.ArrayInit
+							|| expr_stmt.expr is ast.StructInit
+							|| (expr_stmt.expr is ast.CastExpr
+							&& (expr_stmt.expr as ast.CastExpr).expr is ast.ArrayInit)
+						if is_array_init {
+							g.write('memcpy(${cvar_name}${tmp_op}data, (${cast_typ})')
+						} else {
+							g.write('memcpy(${cvar_name}${tmp_op}data, ')
+						}
 					}
 					// return expr or { fn_returns_option() }
 					if is_option && g.inside_return && expr_stmt.expr is ast.CallExpr
