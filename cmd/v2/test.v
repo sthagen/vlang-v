@@ -18,6 +18,36 @@ mut:
 	right int
 }
 
+enum Color {
+	red
+	green
+	blue
+	yellow
+}
+
+enum Status {
+	pending = 0
+	active  = 1
+	done    = 2
+}
+
+// Interface declaration
+interface Drawable {
+	draw() int
+}
+
+// Another interface with multiple methods
+interface Shape {
+	area() int
+	perimeter() int
+}
+
+// Type alias
+type MyInt = int
+
+// Sum type
+type Number = int | Point
+
 __global (
 	g_val   int
 	g_count int
@@ -29,6 +59,12 @@ __global (
 
 fn (p Point) sum() int {
 	return p.x + p.y
+}
+
+// Implements Drawable interface
+fn (p Point) draw() int {
+	// Return a unique identifier for drawing
+	return p.x * 1000 + p.y
 }
 
 fn (p Point) product() int {
@@ -87,6 +123,37 @@ fn gcd(a int, b int) int {
 		return a
 	}
 	return gcd(b, a % b)
+}
+
+// Multi-return functions
+fn swap(a int, b int) (int, int) {
+	return b, a
+}
+
+fn divmod(a int, b int) (int, int) {
+	return a / b, a % b
+}
+
+fn min_max(a int, b int, c int) (int, int) {
+	mut min := a
+	mut max := a
+	if b < min {
+		min = b
+	}
+	if b > max {
+		max = b
+	}
+	if c < min {
+		min = c
+	}
+	if c > max {
+		max = c
+	}
+	return min, max
+}
+
+fn triple_return(x int) (int, int, int) {
+	return x, x * 2, x * 3
 }
 
 fn power(base int, exp int) int {
@@ -200,6 +267,9 @@ fn print_str(s string) {
 	C.puts(s.str)
 }
 
+// C function with keyword name (tests parser allowing keywords after C.)
+fn C.select(ndfs int, readfds voidptr, writefds voidptr, exceptfds voidptr, timeout voidptr) int
+
 fn nested_return(x int) int {
 	if x < 10 {
 		return 100
@@ -210,6 +280,90 @@ fn nested_return(x int) int {
 			return 300
 		}
 	}
+}
+
+// Helper for comptime test
+fn get_comptime_value() int {
+	$if macos {
+		return 50
+	} $else $if linux {
+		return 51
+	} $else $if windows {
+		return 52
+	} $else {
+		return 59
+	}
+}
+
+// Function using type alias (type alias is same as base type in C)
+fn add_my_ints(a int, b int) int {
+	return a + b
+}
+
+// Helper function to test defer with explicit return
+fn defer_test() int {
+	mut x := 0
+	defer {
+		x = 42
+	}
+	return x + 42 // Return 42, but x is modified by defer before return
+}
+
+// Helper function to test defer order (LIFO)
+fn defer_order_test() {
+	defer {
+		print_str('First')
+	}
+	defer {
+		print_str('Second')
+	}
+	defer {
+		print_str('Third')
+	}
+}
+
+// Helper function to test defer(fn) - function-level defer
+fn defer_fn_test() int {
+	mut x := 0
+	for i := 0; i < 3; i++ {
+		defer(fn) {
+			x += 100
+		}
+		x += 1
+	}
+	return x // returns 3, but defer(fn) adds 300 at function end
+}
+
+// ===================== IF-GUARD HELPERS =====================
+
+// Returns the value if positive, none otherwise
+fn maybe_positive(x int) ?int {
+	if x > 0 {
+		return x
+	}
+	return none
+}
+
+// Returns the doubled value if in range, none otherwise
+fn maybe_double(x int) ?int {
+	if x >= 0 && x <= 50 {
+		return x * 2
+	}
+	return none
+}
+
+// Returns sum if both positive, none otherwise
+fn maybe_sum(a int, b int) ?int {
+	if a > 0 && b > 0 {
+		return a + b
+	}
+	return none
+}
+
+// Uses `or { return }` pattern to propagate none
+fn maybe_triple(x int) ?int {
+	val := maybe_positive(x) or { return none }
+	return val * 3
 }
 
 // ===================== IF-EXPRESSION HELPERS =====================
@@ -1616,45 +1770,1006 @@ fn main() {
 	c := if a < b && b < 30 { a + b } else { 0 }
 	print_int(c) // 30
 
+	// ==================== 33. ARRAY INITIALIZATION ====================
+	print_str('--- 33. Array Initialization ---')
+
+	// 33.1 Basic array literal
+	arr1 := [10, 20, 30]
+	print_int(arr1[0]) // 10
+	print_int(arr1[1]) // 20
+	print_int(arr1[2]) // 30
+
+	// 33.2 Array element sum
+	arr2 := [5, 10, 15]
+	arr2_sum := arr2[0] + arr2[1] + arr2[2]
+	print_int(arr2_sum) // 30
+
+	// 33.3 Array with computed values
+	base_val := 7
+	arr3 := [base_val, base_val * 2, base_val * 3]
+	print_int(arr3[0]) // 7
+	print_int(arr3[1]) // 14
+	print_int(arr3[2]) // 21
+
+	// 33.4 Array element in expression
+	arr4 := [100, 200, 300]
+	result4 := arr4[0] * 2 + arr4[1]
+	print_int(result4) // 400
+
+	// 33.5 Array with function call on elements
+	arr5 := [3, 4, 5]
+	print_int(add(arr5[0], arr5[1])) // 7
+	print_int(mul(arr5[1], arr5[2])) // 20
+
+	// ==================== 34. STRING INTERPOLATION ====================
+	print_str('--- 34. String Interpolation ---')
+
+	// 34.1 Basic integer interpolation
+	interp_x := 42
+	s1 := 'The answer is ${interp_x}'
+	print_str(s1) // The answer is 42
+
+	// 34.2 Multiple interpolations
+	interp_a := 10
+	interp_b := 20
+	s2 := '${interp_a} + ${interp_b} = ${interp_a + interp_b}'
+	print_str(s2) // 10 + 20 = 30
+
+	// 34.3 String at beginning and end
+	interp_val := 100
+	s3 := 'Value: ${interp_val}!'
+	print_str(s3) // Value: 100!
+
+	// 34.4 Just interpolation (no literal parts)
+	interp_num := 999
+	s4 := '${interp_num}'
+	print_str(s4) // 999
+
+	// 34.5 Multiple consecutive values
+	interp_v1 := 1
+	interp_v2 := 2
+	interp_v3 := 3
+	s5 := '${interp_v1}-${interp_v2}-${interp_v3}'
+	print_str(s5) // 1-2-3
+
+	// ==================== 35. IF-GUARD EXPRESSIONS ====================
+	print_str('--- 35. If-Guard Expressions ---')
+
+	// 35.1 Basic if-guard with success (positive value)
+	if g1_val := maybe_positive(42) {
+		print_int(g1_val) // 42
+	} else {
+		print_int(0)
+	}
+
+	// 35.2 If-guard with failure (non-positive value)
+	if g2_val := maybe_positive(-5) {
+		print_int(g2_val)
+	} else {
+		print_int(999) // 999 (else branch taken)
+	}
+
+	// 35.3 If-guard with computation in then branch
+	if g3_val := maybe_double(25) {
+		print_int(g3_val + 10) // 50 + 10 = 60
+	} else {
+		print_int(0)
+	}
+
+	// 35.4 If-guard with function call
+	if g4_result := maybe_sum(10, 20) {
+		print_int(g4_result) // 30
+	} else {
+		print_int(0)
+	}
+
+	// 35.5 Nested if with if-guard
+	g5_outer := 5
+	if g5_outer > 0 {
+		if g5_inner := maybe_positive(g5_outer * 10) {
+			print_int(g5_inner) // 50
+		} else {
+			print_int(0)
+		}
+	}
+
+	// 35.6 If-guard in sequence
+	mut g6_sum := 0
+	if g6_a := maybe_positive(10) {
+		g6_sum += g6_a
+	}
+	if g6_b := maybe_positive(20) {
+		g6_sum += g6_b
+	}
+	if g6_c := maybe_positive(-5) {
+		g6_sum += g6_c
+	}
+	print_int(g6_sum) // 10 + 20 + 0 = 30
+
+	// 35.7 If-guard with else-if chain
+	g7_test := 100
+	if g7_val := maybe_positive(-g7_test) {
+		print_int(g7_val)
+	} else {
+		if g7_val2 := maybe_positive(g7_test) {
+			print_int(g7_val2) // 100
+		} else {
+			print_int(0)
+		}
+	}
+
+	// 35.8 or { return } pattern with value
+	if or_val := maybe_triple(5) {
+		print_int(or_val) // 15 (5 * 3)
+	} else {
+		print_int(-1)
+	}
+
+	// 35.9 or { return } pattern with negative (returns none)
+	if or_val2 := maybe_triple(-5) {
+		print_int(or_val2)
+	} else {
+		print_int(0) // 0 (none case)
+	}
+
+	// ==================== 36. RANGE EXPRESSIONS ====================
+	print_str('--- 36. Range Expressions ---')
+
+	// 36.1 Basic array slicing with range
+	rng_arr1 := [10, 20, 30, 40, 50]
+	rng_slice1 := rng_arr1[1..4]
+	print_int(rng_slice1[0]) // 20
+	print_int(rng_slice1[1]) // 30
+	print_int(rng_slice1[2]) // 40
+
+	// 36.2 Range from start
+	rng_arr2 := [100, 200, 300, 400]
+	rng_slice2 := rng_arr2[0..2]
+	print_int(rng_slice2[0]) // 100
+	print_int(rng_slice2[1]) // 200
+
+	// 36.3 Range with variable indices
+	rng_start := 1
+	rng_end := 3
+	rng_arr3 := [5, 10, 15, 20, 25]
+	rng_slice3 := rng_arr3[rng_start..rng_end]
+	print_int(rng_slice3[0]) // 10
+	print_int(rng_slice3[1]) // 15
+
+	// 36.4 Consecutive slicing
+	rng_arr4 := [1, 2, 3, 4, 5, 6, 7, 8]
+	rng_first_half := rng_arr4[0..4]
+	rng_second_half := rng_arr4[4..8]
+	print_int(rng_first_half[0]) // 1
+	print_int(rng_first_half[3]) // 4
+	print_int(rng_second_half[0]) // 5
+	print_int(rng_second_half[3]) // 8
+
+	// 36.5 Single element range
+	rng_arr5 := [42, 84, 126]
+	rng_single := rng_arr5[1..2]
+	print_int(rng_single[0]) // 84
+
+	// ==================== 37. FOR-IN RANGE ====================
+	print_str('--- 37. For-In Range ---')
+
+	// 37.1 Basic for-in range
+	mut forin_sum1 := 0
+	for i in 0 .. 5 {
+		forin_sum1 += i
+	}
+	print_int(forin_sum1) // 0+1+2+3+4 = 10
+
+	// 37.2 For-in range with non-zero start
+	mut forin_sum2 := 0
+	for i in 5 .. 10 {
+		forin_sum2 += i
+	}
+	print_int(forin_sum2) // 5+6+7+8+9 = 35
+
+	// 37.3 For-in range with expressions
+	forin_start := 2
+	forin_end := 6
+	mut forin_sum3 := 0
+	for i in forin_start .. forin_end {
+		forin_sum3 += i
+	}
+	print_int(forin_sum3) // 2+3+4+5 = 14
+
+	// 37.4 Nested for-in ranges
+	mut forin_count := 0
+	for i in 0 .. 3 {
+		for j in 0 .. 4 {
+			forin_count += i + j + 1
+		}
+	}
+	print_int(forin_count) // sum of (i+j+1) for i in 0..3, j in 0..4 = 42
+
+	// 37.5 For-in range with computation in body
+	mut forin_product := 1
+	for i in 1 .. 6 {
+		forin_product *= i
+	}
+	print_int(forin_product) // 1*2*3*4*5 = 120
+
+	// 37.6 For-in range with break
+	mut forin_sum4 := 0
+	for i in 0 .. 100 {
+		if i >= 5 {
+			break
+		}
+		forin_sum4 += i
+	}
+	print_int(forin_sum4) // 0+1+2+3+4 = 10
+
+	// 37.7 For-in range with continue
+	mut forin_sum5 := 0
+	for i in 0 .. 10 {
+		if i % 2 == 0 {
+			continue
+		}
+		forin_sum5 += i
+	}
+	print_int(forin_sum5) // 1+3+5+7+9 = 25
+
+	// ==================== 38. DEFER STATEMENTS ====================
+	print_str('--- 38. Defer Statements ---')
+
+	// 38.1 Basic defer (should print after the other prints)
+	g_val = 0
+	defer {
+		g_val += 100
+	}
+	g_val += 1
+	print_int(g_val) // 1 (defer not executed yet, will be 101 at function end)
+
+	// 38.2 Multiple defers execute in reverse order (LIFO)
+	g_count = 0
+	defer {
+		g_count += 1
+	}
+	defer {
+		g_count += 10
+	}
+	defer {
+		g_count += 100
+	}
+	// At end of function: g_count = 0 + 100 + 10 + 1 = 111
+
+	// 38.3 Defer with function call
+	defer {
+		print_str('Defer 38.3 executed')
+	}
+	// 38.4 Test defer_test function with explicit return
+	print_int(defer_test()) // Should print 42
+
+	// 38.5 Test defer order in function
+	defer_order_test() // Should print: Third, Second, First
+
+	// 38.6 Test defer(fn) - function-level defer
+	print_int(defer_fn_test()) // 303 (3 from loop + 300 from function-level defers)
+
+	// ==================== 39. ENUMS ====================
+	print_str('--- 39. Enums ---')
+
+	// 39.1 Basic enum value
+	color1 := Color.red
+	print_int(int(color1)) // 0
+
+	// 39.2 Other enum values
+	color2 := Color.green
+	color3 := Color.blue
+	print_int(int(color2)) // 1
+	print_int(int(color3)) // 2
+
+	// 39.3 Enum with explicit values
+	status1 := Status.pending
+	status2 := Status.active
+	status3 := Status.done
+	print_int(int(status1)) // 0
+	print_int(int(status2)) // 1
+	print_int(int(status3)) // 2
+
+	// 39.4 Enum in match
+	match color1 {
+		.red { print_int(100) } // 100
+		.green { print_int(200) }
+		.blue { print_int(300) }
+		else { print_int(0) }
+	}
+
+	// 39.5 Enum comparison
+	if color1 == Color.red {
+		print_int(1) // 1
+	} else {
+		print_int(0)
+	}
+
+	// ==================== 40. FOR-IN ARRAY ====================
+	print_str('--- 40. For-In Array ---')
+
+	// 40.1 Basic for-in array iteration
+	arr_iter1 := [10, 20, 30]
+	mut sum_iter1 := 0
+	for elem in arr_iter1 {
+		sum_iter1 += elem
+	}
+	print_int(sum_iter1) // 60
+
+	// 40.2 For-in with index
+	arr_iter2 := [5, 10, 15]
+	mut weighted_sum2 := 0
+	for i, elem in arr_iter2 {
+		weighted_sum2 += (i + 1) * elem
+	}
+	print_int(weighted_sum2) // 1*5 + 2*10 + 3*15 = 70
+
+	// 40.3 For-in with break
+	arr_iter3 := [1, 2, 3, 4, 5]
+	mut sum_iter3 := 0
+	for elem in arr_iter3 {
+		if elem > 3 {
+			break
+		}
+		sum_iter3 += elem
+	}
+	print_int(sum_iter3) // 1+2+3 = 6
+
+	// 40.4 For-in with continue
+	arr_iter4 := [1, 2, 3, 4, 5]
+	mut sum_iter4 := 0
+	for elem in arr_iter4 {
+		if elem % 2 == 0 {
+			continue
+		}
+		sum_iter4 += elem
+	}
+	print_int(sum_iter4) // 1+3+5 = 9
+
+	// 40.5 Nested for-in
+	arr_outer := [1, 2, 3]
+	arr_inner := [10, 20]
+	mut nested_sum := 0
+	for outer in arr_outer {
+		for inner in arr_inner {
+			nested_sum += outer * inner
+		}
+	}
+	print_int(nested_sum) // (1*10+1*20) + (2*10+2*20) + (3*10+3*20) = 30+60+90 = 180
+
+	// ==================== 41. FIXED SIZE ARRAYS ====================
+	print_str('--- 41. Fixed Size Arrays ---')
+
+	// 41.1 Fixed array with literal initialization
+	fixed_arr1 := [5, 10, 15]
+	print_int(fixed_arr1[0]) // 5
+	print_int(fixed_arr1[1]) // 10
+	print_int(fixed_arr1[2]) // 15
+
+	// 41.2 Fixed array with computed index
+	idx := 1
+	print_int(fixed_arr1[idx]) // 10
+
+	// 41.3 Fixed array sum
+	mut fixed_sum := 0
+	for elem in fixed_arr1 {
+		fixed_sum += elem
+	}
+	print_int(fixed_sum) // 30
+
+	// 41.4 Fixed array with larger size
+	fixed_arr2 := [1, 2, 3, 4, 5]
+	mut fixed_product := 1
+	for elem in fixed_arr2 {
+		fixed_product *= elem
+	}
+	print_int(fixed_product) // 120
+
+	// 41.5 Nested fixed arrays access
+	fixed_outer := [100, 200, 300]
+	fixed_inner := [1, 2, 3]
+	print_int(fixed_outer[0] + fixed_inner[2]) // 103
+
+	// ==================== 42. INTERFACE IMPLEMENTATION ====================
+	print_str('--- 42. Interface Implementation ---')
+
+	// 42.1 Call draw() method directly on Point (implements Drawable)
+	draw_pt1 := Point{
+		x: 5
+		y: 10
+	}
+	print_int(draw_pt1.draw()) // 5*1000 + 10 = 5010
+
+	// 42.2 Another point with draw
+	draw_pt2 := Point{
+		x: 12
+		y: 34
+	}
+	print_int(draw_pt2.draw()) // 12*1000 + 34 = 12034
+
+	// 42.3 Interface method on zero-init struct
+	draw_pt3 := Point{}
+	print_int(draw_pt3.draw()) // 0*1000 + 0 = 0
+
+	// 42.4 Interface method with heap-allocated struct
+	draw_pt4 := &Point{
+		x: 100
+		y: 200
+	}
+	print_int(draw_pt4.draw()) // 100*1000 + 200 = 100200
+
+	// 42.5 Multiple interface method calls
+	mut draw_total := 0
+	draw_a := Point{
+		x: 1
+		y: 2
+	}
+	draw_b := Point{
+		x: 3
+		y: 4
+	}
+	draw_total += draw_a.draw() // 1002
+	draw_total += draw_b.draw() // 3004
+	print_int(draw_total) // 4006
+
+	// ==================== 43. TYPE ALIAS USAGE ====================
+	print_str('--- 43. Type Alias Usage ---')
+
+	// 43.1 Basic type alias (MyInt is typedef'd to int)
+	my_a := 10
+	my_b := 20
+	print_int(my_a + my_b) // 30
+
+	// 43.2 Type alias in function
+	my_result := add_my_ints(15, 25)
+	print_int(my_result) // 40
+
+	// 43.3 Type alias with arithmetic
+	my_c := 100
+	my_d := my_c * 3
+	print_int(my_d) // 300
+
+	// 43.4 Type alias comparison
+	my_e := 50
+	my_f := 50
+	if my_e == my_f {
+		print_int(1) // 1
+	} else {
+		print_int(0)
+	}
+
+	// 43.5 Type alias in loop
+	mut my_sum := 0
+	for i in 1 .. 6 {
+		my_sum += i
+	}
+	print_int(my_sum) // 1+2+3+4+5 = 15
+
+	// ==================== 44. COMPTIME ====================
+	print_str('--- 44. Comptime ---')
+
+	// 44.1 Basic $if macos/$else
+	$if macos {
+		print_int(1) // 1 on macOS
+	} $else {
+		print_int(0) // 0 on other platforms
+	}
+
+	// 44.2 $if linux
+	$if linux {
+		print_int(2) // 2 on Linux
+	} $else {
+		print_int(20) // 20 on non-Linux
+	}
+
+	// 44.3 $if windows
+	$if windows {
+		print_int(3) // 3 on Windows
+	} $else {
+		print_int(30) // 30 on non-Windows
+	}
+
+	// 44.4 Negation: $if !windows
+	$if !windows {
+		print_int(4) // 4 on non-Windows
+	} $else {
+		print_int(40) // 40 on Windows
+	}
+
+	// 44.5 Comptime in function call
+	print_int(get_comptime_value())
+
+	// ==================== 45. STRING STRUCT FIELDS ====================
+	print_str('--- 45. String Struct Fields ---')
+
+	// 45.1 String literal .str field
+	s45_1 := 'Hello'
+	print_str(s45_1) // Hello
+
+	// 45.2 String literal .len field
+	s45_2 := 'World'
+	print_int(s45_2.len) // 5
+
+	// 45.3 Interpolated string .len field
+	val45 := 123
+	s45_3 := 'Val: ${val45}'
+	print_int(s45_3.len) // 8
+
+	// 45.4 Multiple string operations
+	a45 := 'AB'
+	b45 := 'CDE'
+	print_int(a45.len + b45.len) // 5
+
+	// 45.5 String in function parameter
+	print_str('Passed directly') // Passed directly
+
+	// ==================== 46. UNSAFE EXPRESSIONS ====================
+	print_str('--- 46. Unsafe Expressions ---')
+
+	// 46.1 Basic unsafe block returning value
+	unsafe_val1 := unsafe {
+		42
+	}
+	print_int(unsafe_val1) // 42
+
+	// 46.2 Unsafe block with computation
+	unsafe_val2 := unsafe {
+		10 + 20 + 30
+	}
+	print_int(unsafe_val2) // 60
+
+	// 46.3 Unsafe block with variable access
+	base_for_unsafe := 100
+	unsafe_val3 := unsafe {
+		base_for_unsafe * 2
+	}
+	print_int(unsafe_val3) // 200
+
+	// 46.4 Unsafe block in expression context
+	result_unsafe := unsafe { 7 } * unsafe { 8 }
+	print_int(result_unsafe) // 56
+
+	// 46.5 Unsafe with struct field access
+	unsafe_pt := Point{
+		x: 15
+		y: 25
+	}
+	unsafe_sum := unsafe {
+		unsafe_pt.x + unsafe_pt.y
+	}
+	print_int(unsafe_sum) // 40
+
+	// ==================== 47. INTERFACE VTABLE ====================
+	print_str('--- 47. Interface Vtable ---')
+
+	// 47.1 Basic interface assignment and method call
+	vtable_pt1 := Point{
+		x: 7
+		y: 3
+	}
+	d1 := Drawable(vtable_pt1)
+	print_int(d1.draw()) // 7*1000 + 3 = 7003
+
+	// 47.2 Interface with different values
+	vtable_pt2 := Point{
+		x: 15
+		y: 25
+	}
+	d2 := Drawable(vtable_pt2)
+	print_int(d2.draw()) // 15*1000 + 25 = 15025
+
+	// 47.3 Multiple interface calls
+	vtable_pt3 := Point{
+		x: 1
+		y: 1
+	}
+	d3 := Drawable(vtable_pt3)
+	print_int(d3.draw() + d3.draw()) // 1001 + 1001 = 2002
+
+	// 47.4 Shape interface with multiple methods
+	shape_rect := Rectangle{
+		width:  10
+		height: 5
+		origin: Point{
+			x: 0
+			y: 0
+		}
+	}
+	shape1 := Shape(shape_rect)
+	print_int(shape1.area()) // 10 * 5 = 50
+	print_int(shape1.perimeter()) // 2 * (10 + 5) = 30
+
+	// 47.5 Sum of interface method results
+	vtable_pt4 := Point{
+		x: 2
+		y: 3
+	}
+	d4 := Drawable(vtable_pt4)
+	vtable_pt5 := Point{
+		x: 4
+		y: 5
+	}
+	d5 := Drawable(vtable_pt5)
+	print_int(d4.draw() + d5.draw()) // 2003 + 4005 = 6008
+
+	// ==================== 48. STRUCT FIELD OPERATIONS ====================
+	print_str('--- 48. Struct Field Operations ---')
+
+	// 48.1 Basic field assignment with arithmetic
+	mut sf1 := Point{
+		x: 10
+		y: 20
+	}
+	sf1.x = sf1.x + 5
+	sf1.y = sf1.y - 3
+	print_int(sf1.x) // 15
+	print_int(sf1.y) // 17
+
+	// 48.2 Field multiplication and division
+	mut sf2 := Point{
+		x: 6
+		y: 100
+	}
+	sf2.x = sf2.x * 7
+	sf2.y = sf2.y / 4
+	print_int(sf2.x) // 42
+	print_int(sf2.y) // 25
+
+	// 48.3 Compound assignment on fields
+	mut sf3 := Point{
+		x: 50
+		y: 30
+	}
+	sf3.x += 25
+	sf3.y -= 10
+	print_int(sf3.x) // 75
+	print_int(sf3.y) // 20
+
+	// 48.4 Compound multiply/divide on fields
+	mut sf4 := Point{
+		x: 8
+		y: 64
+	}
+	sf4.x *= 5
+	sf4.y /= 8
+	print_int(sf4.x) // 40
+	print_int(sf4.y) // 8
+
+	// 48.5 Field used in expression with other field
+	mut sf5 := Point{
+		x: 3
+		y: 4
+	}
+	sf5.x = sf5.x + sf5.y
+	sf5.y = sf5.x * sf5.y
+	print_int(sf5.x) // 7 (3+4)
+	print_int(sf5.y) // 28 (7*4)
+
+	// 48.6 Chained field operations
+	mut sf6 := Point{
+		x: 2
+		y: 3
+	}
+	sf6.x = sf6.x * 2
+	sf6.x = sf6.x + 1
+	sf6.x = sf6.x * 3
+	sf6.y = sf6.y + sf6.x
+	print_int(sf6.x) // 15 ((2*2+1)*3)
+	print_int(sf6.y) // 18 (3+15)
+
+	// 48.7 Field modulo operation
+	mut sf7 := Point{
+		x: 17
+		y: 23
+	}
+	sf7.x = sf7.x % 5
+	sf7.y = sf7.y % 7
+	print_int(sf7.x) // 2
+	print_int(sf7.y) // 2
+
+	// 48.8 Field bitwise operations
+	mut sf8 := Point{
+		x: 0b1100
+		y: 0b1010
+	}
+	sf8.x = sf8.x & sf8.y
+	sf8.y = sf8.x | 0b0101
+	print_int(sf8.x) // 8 (0b1000)
+	print_int(sf8.y) // 13 (0b1101)
+
+	// 48.9 Field with function call result
+	mut sf9 := Point{
+		x: 5
+		y: 10
+	}
+	sf9.x = add(sf9.x, sf9.y)
+	sf9.y = mul(sf9.x, 2)
+	print_int(sf9.x) // 15
+	print_int(sf9.y) // 30
+
+	// 48.10 Nested struct field modification
+	mut rect_mod := Rectangle{
+		width:  10
+		height: 20
+		origin: Point{
+			x: 0
+			y: 0
+		}
+	}
+	rect_mod.width = rect_mod.width * 2
+	rect_mod.height += 5
+	rect_mod.origin.x = 100
+	rect_mod.origin.y = rect_mod.origin.x / 2
+	print_int(rect_mod.width) // 20
+	print_int(rect_mod.height) // 25
+	print_int(rect_mod.origin.x) // 100
+	print_int(rect_mod.origin.y) // 50
+
+	// ==================== 49. PRINTLN ====================
+	print_str('--- 49. Println ---')
+
+	// 49.1 Test println
+	println('hello world')
+
+	// ==================== 50. ALGEBRAIC OPTIMIZATIONS ====================
+	print_str('--- 50. Algebraic Optimizations ---')
+
+	// 50.1 x - x = 0
+	opt_val := 42
+	print_int(opt_val - opt_val) // 0
+
+	// 50.2 x ^ x = 0
+	opt_xor := 123
+	print_int(opt_xor ^ opt_xor) // 0
+
+	// 50.3 x & x = x
+	opt_and := 99
+	print_int(opt_and & opt_and) // 99
+
+	// 50.4 x | x = x
+	opt_or := 77
+	print_int(opt_or | opt_or) // 77
+
+	// 50.5 x * 2 = x << 1
+	opt_mul2 := 25
+	print_int(opt_mul2 * 2) // 50
+
+	// 50.6 Combined optimizations
+	opt_a := 10
+	opt_b := opt_a - opt_a // Should be 0
+	opt_c := opt_a | opt_a // Should be 10
+	print_int(opt_b) // 0
+	print_int(opt_c) // 10
+
+	// 50.7 2 * x = x << 1 (commutative)
+	opt_mul2_comm := 13
+	print_int(2 * opt_mul2_comm) // 26
+
+	// 50.8 Algebraic opts in expressions
+	opt_expr := 7
+	print_int((opt_expr ^ opt_expr) + 5) // 0 + 5 = 5
+	print_int((opt_expr & opt_expr) * 2) // 7 * 2 = 14
+
+	// 50.9 Algebraic opts with different values
+	opt_large := 12345
+	print_int(opt_large - opt_large) // 0
+	print_int(opt_large ^ opt_large) // 0
+	print_int(opt_large & opt_large) // 12345
+	print_int(opt_large | opt_large) // 12345
+
+	// 50.10 Algebraic opts in loop
+	mut opt_loop_sum := 0
+	for i in 1 .. 5 {
+		opt_loop_sum += i - i // Should add 0 each iteration
+		opt_loop_sum += i & i // Should add i each iteration
+	}
+	print_int(opt_loop_sum) // 0+1 + 0+2 + 0+3 + 0+4 = 10
+
+	// ==================== 51. DEAD STORE ELIMINATION ====================
+	print_str('--- 51. Dead Store Elimination ---')
+
+	// 51.1 Basic dead store - local var never read
+	// The optimizer should remove stores to variables that are never used
+	{
+		mut dead_var := 100
+		dead_var = 200 // dead store, never read
+		_ = dead_var
+	}
+	print_int(1) // 1 - verify execution continues
+
+	// 51.2 Dead store with live store after
+	mut dse_var := 10
+	dse_var = 20 // dead store (overwritten before read)
+	dse_var = 30 // this is the live store
+	print_int(dse_var) // 30
+
+	// 51.3 Multiple dead stores
+	mut dse_multi := 1
+	dse_multi = 2 // dead
+	dse_multi = 3 // dead
+	dse_multi = 4 // dead
+	dse_multi = 5 // live
+	print_int(dse_multi) // 5
+
+	// 51.4 Dead store in branch not taken
+	mut dse_branch := 100
+	if false {
+		dse_branch = 999 // dead (branch never taken)
+	}
+	print_int(dse_branch) // 100
+
+	// 51.5 Live store in taken branch
+	mut dse_live := 50
+	if true {
+		dse_live = 75
+	}
+	print_int(dse_live) // 75
+
+	// ==================== 52. DEAD PHI ELIMINATION ====================
+	print_str('--- 52. Dead Phi Elimination ---')
+
+	// 52.1 Phi from if-else where result is unused
+	// The phi node should be eliminated if not used
+	mut phi_unused := 0
+	if true {
+		phi_unused = 10
+	} else {
+		phi_unused = 20
+	}
+	// phi_unused is reassigned, so previous phi is dead
+	phi_unused = 99
+	print_int(phi_unused) // 99
+
+	// 52.2 Multiple phi nodes, some dead
+	mut phi_a := 0
+	mut phi_b := 0
+	if true {
+		phi_a = 1
+		phi_b = 2
+	} else {
+		phi_a = 3
+		phi_b = 4
+	}
+	// phi_b is dead (overwritten), phi_a is live
+	phi_b = 100
+	print_int(phi_a) // 1
+	print_int(phi_b) // 100
+
+	// 52.3 Loop phi - variable assigned in loop body
+	mut phi_loop := 0
+	for i in 0 .. 3 {
+		phi_loop = i // intermediate values are dead, only final matters
+	}
+	print_int(phi_loop) // 2 (last iteration value)
+
+	// 52.4 Nested if with dead phi
+	mut phi_nested := 0
+	if true {
+		if true {
+			phi_nested = 10
+		} else {
+			phi_nested = 20
+		}
+		phi_nested = 30 // overwrites inner phi result
+	}
+	print_int(phi_nested) // 30
+
+	// 52.5 Complex phi scenario with loop and conditionals
+	mut phi_complex := 1
+	for i in 0 .. 4 {
+		if i % 2 == 0 {
+			phi_complex = phi_complex + 1
+		} else {
+			phi_complex = phi_complex * 2
+		}
+	}
+	print_int(phi_complex) // 1 -> 2 -> 4 -> 5 -> 10
+
+	// ==================== 53. CONSTANT DEDUPLICATION ====================
+	print_str('--- 53. Constant Deduplication ---')
+
+	// 53.1 Same constant used multiple times
+	const_a := 42
+	const_b := 42
+	const_c := 42
+	print_int(const_a + const_b + const_c) // 126
+
+	// 53.2 Zero constant deduplication
+	zero1 := 0
+	zero2 := 0
+	zero3 := 0
+	print_int(zero1 + zero2 + zero3) // 0
+
+	// 53.3 Constant from algebraic opts should be deduplicated
+	dedup_x := 50
+	result1 := dedup_x - dedup_x // creates zero
+	dedup_y := 60
+	result2 := dedup_y - dedup_y // should reuse same zero
+	print_int(result1 + result2) // 0
+
+	// 53.4 Multiple shifts with same constant
+	shift_a := 1
+	shift_b := 2
+	shift_c := 4
+	// All these use constant 1 for the shift amount when x*2 is optimized
+	print_int(shift_a * 2 + shift_b * 2 + shift_c * 2) // 2 + 4 + 8 = 14
+
+	// 53.5 Constants in expressions
+	expr_const := (10 + 10) * (5 + 5) // Both 10s and 5s should be deduplicated
+	print_int(expr_const) // 200
+
+	// ==================== 54. HASHMAPS ====================
+	print_str('--- 54. Hashmaps ---')
+
+	// 54.1 Basic map initialization and assignment
+	mut hm1 := map[int]int{}
+	hm1[1] = 10
+	hm1[2] = 20
+	hm1[3] = 30
+	print_int(hm1[1]) // 10
+	print_int(hm1[2]) // 20
+	print_int(hm1[3]) // 30
+
+	// 54.2 Map len
+	print_int(hm1.len) // 3
+
+	// 54.3 Map with different keys
+	mut hm2 := map[int]int{}
+	hm2[100] = 1000
+	hm2[200] = 2000
+	print_int(hm2[100]) // 1000
+	print_int(hm2[200]) // 2000
+	print_int(hm2.len) // 2
+
+	// 54.4 Map value update
+	mut hm3 := map[int]int{}
+	hm3[5] = 50
+	print_int(hm3[5]) // 50
+	hm3[5] = 500
+	print_int(hm3[5]) // 500
+	print_int(hm3.len) // 1 (still 1, not 2)
+
+	// 54.5 Map with computed values
+	mut hm4 := map[int]int{}
+	for i in 0 .. 5 {
+		hm4[i] = i * i
+	}
+	print_int(hm4[0]) // 0
+	print_int(hm4[1]) // 1
+	print_int(hm4[2]) // 4
+	print_int(hm4[3]) // 9
+	print_int(hm4[4]) // 16
+
+	// ==================== 55. MULTI-RETURN ====================
+	print_str('--- 55. Multi-return ---')
+
+	// 55.1 Basic two-value return
+	a1, b1 := swap(10, 20)
+	print_int(a1) // 20
+	print_int(b1) // 10
+
+	// 55.2 Division and modulo
+	quot, rem := divmod(17, 5)
+	print_int(quot) // 3
+	print_int(rem) // 2
+
+	// 55.3 Min/max of three values
+	min1, max1 := min_max(5, 2, 8)
+	print_int(min1) // 2
+	print_int(max1) // 8
+
+	// 55.4 Three-value return
+	t1, t2, t3 := triple_return(7)
+	print_int(t1) // 7
+	print_int(t2) // 14
+	print_int(t3) // 21
+
+	// 55.5 Ignore some return values with _
+	_, only_rem := divmod(23, 4)
+	print_int(only_rem) // 3
+
+	only_quot, _ := divmod(23, 4)
+	print_int(only_quot) // 5
+
 	print_str('=== All tests completed ===')
 }
-
-/*
-fn test_string_inter_literal() {
-       // Test basic integer interpolation
-       x := 42
-       s1 := 'The answer is ${x}'
-       print_str(s1)
-
-       // Test multiple interpolations
-       a := 10
-       b := 20
-       s2 := '${a} + ${b} = ${a + b}'
-
-       // Test with format specifiers
-       val := 255
-       s3 := 'hex: ${val:x}, dec: ${val:d}'
-
-       // Test float formatting
-       f := 3.14159
-       s4 := 'pi is approximately ${f:.2f}'
-
-       // Test with width specifier
-       n := 42
-       s5 := 'padded: ${n:5d}'
-
-       // Test string at beginning and end
-       name := 'world'
-       s6 := 'Hello, ${name}!'
-
-       // Test consecutive interpolations
-       x1 := 1
-       x2 := 2
-       x3 := 3
-       s7 := '${x1}${x2}${x3}'
-
-       // Test empty string parts
-       v := 100
-       s8 := '${v}'
-}
-*/

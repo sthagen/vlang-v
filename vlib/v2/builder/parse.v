@@ -9,17 +9,27 @@ import v2.parser
 fn (mut b Builder) parse_files(files []string) []ast.File {
 	mut parser_reused := parser.Parser.new(b.pref)
 	mut ast_files := []ast.File{}
-	// parse builtin (skip for native backends which don't yet support the full stdlib)
-	skip_builtin := b.pref.skip_builtin || b.pref.backend in [.x64, .arm64]
+	skip_builtin := b.pref.skip_builtin
 	if !skip_builtin {
+		// Parse builtin
 		ast_files << parser_reused.parse_files(get_v_files_from_dir(b.pref.get_vlib_module_path('builtin')), mut
 			b.file_set)
-		// ast_files << parser_reused.parse_files(get_v_files_from_dir(b.pref.get_vlib_module_path('sync')), mut b.file_set)
+		// Parse strconv (used by builtin for string formatting)
+		ast_files << parser_reused.parse_files(get_v_files_from_dir(b.pref.get_vlib_module_path('strconv')), mut
+			b.file_set)
+		// Parse strings (used by builtin for string building)
+		ast_files << parser_reused.parse_files(get_v_files_from_dir(b.pref.get_vlib_module_path('strings')), mut
+			b.file_set)
+		// Parse hash (used by maps for wyhash)
+		ast_files << parser_reused.parse_files(get_v_files_from_dir(b.pref.get_vlib_module_path('hash')), mut
+			b.file_set)
+		// Parse math.bits (used by strconv for bit operations)
+		ast_files << parser_reused.parse_files(get_v_files_from_dir(b.pref.get_vlib_module_path('math.bits')), mut
+			b.file_set)
 	}
 	// parse user files
 	ast_files << parser_reused.parse_files(files, mut b.file_set)
-	// skip imports for native backends which don't yet support the full stdlib
-	skip_imports := b.pref.skip_imports || b.pref.backend in [.x64, .arm64]
+	skip_imports := b.pref.skip_imports
 	if skip_imports {
 		return ast_files
 	}

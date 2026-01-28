@@ -23,6 +23,9 @@ pub mut:
 	blocks  []BasicBlock
 	funcs   []Function
 	globals []GlobalVar
+
+	// Constant cache: (type, name) -> ValueID for deduplication
+	const_cache map[string]ValueID
 }
 
 pub fn Module.new(name string) &Module {
@@ -40,6 +43,12 @@ pub fn Module.new(name string) &Module {
 }
 
 pub fn (mut m Module) new_function(name string, ret TypeID, params []TypeID) int {
+	// Check if function already exists (avoid duplicates from multiple files)
+	for i, f in m.funcs {
+		if f.name == name {
+			return i
+		}
+	}
 	id := m.funcs.len
 	m.funcs << Function{
 		id:   id
@@ -81,6 +90,18 @@ pub fn (mut m Module) add_value_node(kind ValueKind, typ TypeID, name string, in
 	return id
 }
 
+// Get or create a constant value, reusing existing ones when possible.
+// This maintains SSA's immutability principle by avoiding duplicate constants.
+pub fn (mut m Module) get_or_add_const(typ TypeID, name string) ValueID {
+	key := '${typ}:${name}'
+	if existing := m.const_cache[key] {
+		return existing
+	}
+	id := m.add_value_node(.constant, typ, name, 0)
+	m.const_cache[key] = id
+	return id
+}
+
 pub fn (m Module) get_block_from_val(val_id int) int {
 	return m.values[val_id].index
 }
@@ -114,11 +135,16 @@ pub fn (mut m Module) add_instr(op OpCode, block BlockID, typ TypeID, operands [
 }
 
 pub fn (mut m Module) add_global(name string, typ TypeID, is_const bool) int {
+	return m.add_global_with_value(name, typ, is_const, 0)
+}
+
+pub fn (mut m Module) add_global_with_value(name string, typ TypeID, is_const bool, initial_value i64) int {
 	id := m.globals.len
 	g := GlobalVar{
-		name:        name
-		typ:         typ
-		is_constant: is_const
+		name:          name
+		typ:           typ
+		is_constant:   is_const
+		initial_value: initial_value
 	}
 	m.globals << g
 

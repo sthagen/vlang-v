@@ -8,41 +8,86 @@ import v2.ast
 import strings
 
 pub struct Gen {
-	file ast.File
+	files []ast.File
 mut:
-	sb            strings.Builder
-	indent        int
-	fn_types      map[string]string
-	var_types     map[string]string
-	mut_receivers map[string]bool // Track which methods have mutable receivers
+	sb              strings.Builder
+	indent          int
+	tmp_counter     int // Counter for unique temp variable names
+	fn_types        map[string]string
+	fn_ret_counts   map[string]int // Track number of return values for multi-return functions
+	var_types       map[string]string
+	mut_receivers   map[string]bool     // Track which methods have mutable receivers
+	defer_stmts     [][]ast.Stmt        // Deferred statements for current function
+	enum_names      map[string]bool     // Track enum type names
+	interface_names map[string]bool     // Track interface type names
+	interface_meths map[string][]string // Interface name -> method names
+	type_methods    map[string][]string // Type name -> method names (for vtable generation)
+	cur_match_type  string              // Current match expression type for enum shorthand
 }
 
-pub fn Gen.new(file ast.File) &Gen {
+pub fn Gen.new(files []ast.File) &Gen {
 	mut g := &Gen{
-		file:          file
-		sb:            strings.new_builder(4096)
-		fn_types:      map[string]string{}
-		var_types:     map[string]string{}
-		mut_receivers: map[string]bool{}
+		files:           files
+		sb:              strings.new_builder(4096)
+		fn_types:        map[string]string{}
+		fn_ret_counts:   map[string]int{}
+		var_types:       map[string]string{}
+		mut_receivers:   map[string]bool{}
+		enum_names:      map[string]bool{}
+		interface_names: map[string]bool{}
+		interface_meths: map[string][]string{}
+		type_methods:    map[string][]string{}
 	}
-	// Pass 0: Register function return types and mutable receivers
-	for stmt in file.stmts {
-		if stmt is ast.FnDecl {
-			mut ret := 'void'
-			ret_expr := stmt.typ.return_type
-			if ret_expr !is ast.EmptyExpr {
-				ret = g.expr_type_to_c(ret_expr)
+	// Pass 0: Register function return types, mutable receivers, enum names, and interfaces
+	for file in files {
+		for stmt in file.stmts {
+			if stmt is ast.EnumDecl {
+				g.enum_names[stmt.name] = true
 			}
+			if stmt is ast.InterfaceDecl {
+				g.interface_names[stmt.name] = true
+				// Collect method names for this interface
+				mut methods := []string{}
+				for field in stmt.fields {
+					methods << field.name
+				}
+				g.interface_meths[stmt.name] = methods
+			}
+			if stmt is ast.FnDecl {
+				mut ret := 'void'
+				mut ret_count := 1
+				ret_expr := stmt.typ.return_type
+				if ret_expr !is ast.EmptyExpr {
+					// Check for multi-return (TupleType)
+					if ret_expr is ast.Type {
+						if ret_expr is ast.TupleType {
+							ret_count = ret_expr.types.len
+							ret = 'Tuple_${ret_count}_int'
+						} else {
+							ret = g.expr_type_to_c(ret_expr)
+						}
+					} else {
+						ret = g.expr_type_to_c(ret_expr)
+					}
+				}
 
-			if stmt.is_method {
-				// For methods, use mangled name
-				receiver_type := g.expr_type_to_c(stmt.receiver.typ)
-				mangled := '${receiver_type}__${stmt.name}'
-				g.fn_types[mangled] = ret
-				// Track if receiver is mutable
-				g.mut_receivers[mangled] = stmt.receiver.is_mut
-			} else {
-				g.fn_types[stmt.name] = ret
+				if stmt.is_method {
+					// For methods, use mangled name
+					receiver_type := g.expr_type_to_c(stmt.receiver.typ)
+					mangled := '${receiver_type}__${stmt.name}'
+					g.fn_types[mangled] = ret
+					g.fn_ret_counts[mangled] = ret_count
+					// Track if receiver is mutable
+					g.mut_receivers[mangled] = stmt.receiver.is_mut
+					// Track methods per type for vtable generation
+					if receiver_type !in g.type_methods {
+						g.type_methods[receiver_type] = []string{}
+					}
+					g.type_methods[receiver_type] << stmt.name
+				} else {
+					g.fn_types[stmt.name] = ret
+					g.fn_ret_counts[stmt.name] = ret_count
+				}
 			}
 		}
 	}
@@ -55,49 +100,197 @@ pub fn (mut g Gen) gen() string {
 	g.sb.writeln('#include <stdlib.h>')
 	g.sb.writeln('#include <stdbool.h>')
 	g.sb.writeln('#include <stdint.h>')
+	g.sb.writeln('#include <stddef.h>')
+	g.sb.writeln('#include <string.h>')
+	g.sb.writeln('')
+
+	// V primitive type aliases
+	g.sb.writeln('// V primitive types')
+	g.sb.writeln('typedef int8_t i8;')
+	g.sb.writeln('typedef int16_t i16;')
+	g.sb.writeln('typedef int32_t i32;')
+	g.sb.writeln('typedef int64_t i64;')
+	g.sb.writeln('typedef uint8_t u8;')
+	g.sb.writeln('typedef uint16_t u16;')
+	g.sb.writeln('typedef uint32_t u32;')
+	g.sb.writeln('typedef uint64_t u64;')
+	g.sb.writeln('typedef float f32;')
+	g.sb.writeln('typedef double f64;')
+	g.sb.writeln('typedef u8 byte;')
+	g.sb.writeln('typedef size_t usize;')
+	g.sb.writeln('typedef ptrdiff_t isize;')
+	g.sb.writeln('typedef u32 rune;')
 	g.sb.writeln('')
 
 	g.sb.writeln('typedef struct { char* str; int len; } string;')
+	g.sb.writeln('typedef struct { int start; int end; } Range_;')
+	g.sb.writeln('')
+	// Builtin function declarations
+	g.sb.writeln('static inline void println(string s) { printf("%.*s\\n", s.len, s.str); }')
+	g.sb.writeln('static inline void print(string s) { printf("%.*s", s.len, s.str); }')
+	g.sb.writeln('')
+	// Array type and builtin function
+	g.sb.writeln('typedef struct { void* data; int len; int cap; } Array;')
+	g.sb.writeln('typedef Array Array_int;')
+	g.sb.writeln('')
+	// Tuple types for multi-return functions
+	g.sb.writeln('typedef struct { int f0; int f1; } Tuple_2_int;')
+	g.sb.writeln('typedef struct { int f0; int f1; int f2; } Tuple_3_int;')
+	g.sb.writeln('')
+	// Simple hashmap implementation for map[int]int
+	g.sb.writeln('typedef struct { int* keys; int* values; int len; int cap; } Map_int_int;')
+	g.sb.writeln('static inline Map_int_int __new_map_int_int() {')
+	g.sb.writeln('\tMap_int_int m;')
+	g.sb.writeln('\tm.cap = 16;')
+	g.sb.writeln('\tm.len = 0;')
+	g.sb.writeln('\tm.keys = (int*)calloc(m.cap, sizeof(int));')
+	g.sb.writeln('\tm.values = (int*)calloc(m.cap, sizeof(int));')
+	g.sb.writeln('\treturn m;')
+	g.sb.writeln('}')
+	g.sb.writeln('static inline void __map_int_int_set(Map_int_int* m, int key, int val) {')
+	g.sb.writeln('\tfor (int i = 0; i < m->len; i++) {')
+	g.sb.writeln('\t\tif (m->keys[i] == key) { m->values[i] = val; return; }')
+	g.sb.writeln('\t}')
+	g.sb.writeln('\tif (m->len >= m->cap) {')
+	g.sb.writeln('\t\tm->cap *= 2;')
+	g.sb.writeln('\t\tm->keys = (int*)realloc(m->keys, m->cap * sizeof(int));')
+	g.sb.writeln('\t\tm->values = (int*)realloc(m->values, m->cap * sizeof(int));')
+	g.sb.writeln('\t}')
+	g.sb.writeln('\tm->keys[m->len] = key;')
+	g.sb.writeln('\tm->values[m->len] = val;')
+	g.sb.writeln('\tm->len++;')
+	g.sb.writeln('}')
+	g.sb.writeln('static inline int __map_int_int_get(Map_int_int* m, int key) {')
+	g.sb.writeln('\tfor (int i = 0; i < m->len; i++) {')
+	g.sb.writeln('\t\tif (m->keys[i] == key) return m->values[i];')
+	g.sb.writeln('\t}')
+	g.sb.writeln('\treturn 0;')
+	g.sb.writeln('}')
+	g.sb.writeln('')
+	g.sb.writeln('static inline Array __new_array_from_c_array(int len, int cap, int elem_size, void* data) {')
+	g.sb.writeln('\tArray a;')
+	g.sb.writeln('\ta.len = len;')
+	g.sb.writeln('\ta.cap = cap;')
+	g.sb.writeln('\ta.data = malloc(cap * elem_size);')
+	g.sb.writeln('\tif (data && len > 0) {')
+	g.sb.writeln('\t\tfor (int i = 0; i < len * elem_size; i++) {')
+	g.sb.writeln('\t\t\t((char*)a.data)[i] = ((char*)data)[i];')
+	g.sb.writeln('\t\t}')
+	g.sb.writeln('\t}')
+	g.sb.writeln('\treturn a;')
+	g.sb.writeln('}')
 	g.sb.writeln('')
 
 	// 1. Struct Declarations (Typedefs)
-	for stmt in g.file.stmts {
-		if stmt is ast.StructDecl {
-			g.sb.writeln('typedef struct ${stmt.name} ${stmt.name};')
+	for file in g.files {
+		for stmt in file.stmts {
+			if stmt is ast.StructDecl {
+				g.sb.writeln('typedef struct ${stmt.name} ${stmt.name};')
+			}
+		}
+	}
+	// Also forward-declare interfaces
+	for file in g.files {
+		for stmt in file.stmts {
+			if stmt is ast.InterfaceDecl {
+				g.sb.writeln('typedef struct ${stmt.name} ${stmt.name};')
+			}
+		}
+	}
+	// Forward-declare sum types
+	for file in g.files {
+		for stmt in file.stmts {
+			if stmt is ast.TypeDecl {
+				if stmt.variants.len > 0 {
+					g.sb.writeln('typedef struct ${stmt.name} ${stmt.name};')
+				}
+			}
 		}
 	}
 	g.sb.writeln('')
 
 	// 2. Struct Definitions
-	for stmt in g.file.stmts {
-		if stmt is ast.StructDecl {
-			g.gen_struct_decl(stmt)
-			g.sb.writeln('')
+	for file in g.files {
+		for stmt in file.stmts {
+			if stmt is ast.StructDecl {
+				g.gen_struct_decl(stmt)
+				g.sb.writeln('')
+			}
+		}
+	}
+
+	// 2.5. Enum Declarations
+	for file in g.files {
+		for stmt in file.stmts {
+			if stmt is ast.EnumDecl {
+				g.gen_enum_decl(stmt)
+				g.sb.writeln('')
+			}
+		}
+	}
+
+	// 2.6. Interface Declarations
+	for file in g.files {
+		for stmt in file.stmts {
+			if stmt is ast.InterfaceDecl {
+				g.gen_interface_decl(stmt)
+				g.sb.writeln('')
+			}
+		}
+	}
+
+	// 2.7. Type Declarations
+	for file in g.files {
+		for stmt in file.stmts {
+			if stmt is ast.TypeDecl {
+				g.gen_type_decl(stmt)
+				g.sb.writeln('')
+			}
 		}
 	}
 
 	// 3. Globals
-	for stmt in g.file.stmts {
-		if stmt is ast.GlobalDecl {
-			g.gen_global_decl(stmt)
-			g.sb.writeln('')
+	for file in g.files {
+		for stmt in file.stmts {
+			if stmt is ast.GlobalDecl {
+				g.gen_global_decl(stmt)
+				g.sb.writeln('')
+			}
+		}
+	}
+
+	// 3.5. Constants
+	for file in g.files {
+		for stmt in file.stmts {
+			if stmt is ast.ConstDecl {
+				g.gen_const_decl(stmt)
+				g.sb.writeln('')
+			}
 		}
 	}
 
 	// 4. Function Prototypes
-	for stmt in g.file.stmts {
-		if stmt is ast.FnDecl {
-			g.gen_fn_head(stmt)
-			g.sb.writeln(';')
+	for file in g.files {
+		for stmt in file.stmts {
+			if stmt is ast.FnDecl {
+				g.gen_fn_head(stmt)
+				g.sb.writeln(';')
+			}
 		}
 	}
 	g.sb.writeln('')
 
+	// 4.5. Interface vtable wrapper functions (after prototypes so methods are declared)
+	// These cast void* to the concrete type and call the real method
+	g.gen_interface_wrappers()
+
 	// 5. Functions
-	for stmt in g.file.stmts {
-		if stmt is ast.FnDecl {
-			g.gen_fn_decl(stmt)
-			g.sb.writeln('')
+	for file in g.files {
+		for stmt in file.stmts {
+			if stmt is ast.FnDecl {
+				g.gen_fn_decl(stmt)
+				g.sb.writeln('')
+			}
 		}
 	}
 
@@ -151,6 +344,26 @@ fn (mut g Gen) expr_type_to_c(e ast.Expr) string {
 		ast.EmptyExpr {
 			return 'void'
 		}
+		ast.Type {
+			// Handle Type variants
+			if e is ast.MapType {
+				return 'Map_int_int'
+			}
+			if e is ast.TupleType {
+				// Multi-return tuple type
+				return 'Tuple_${e.types.len}_int'
+			}
+			// Handle Option and Result types
+			if e is ast.OptionType {
+				// For ?T, we use the base type (simplified - no proper optional handling)
+				return g.expr_type_to_c(e.base_type)
+			}
+			if e is ast.ResultType {
+				// For !T, we use the base type (simplified - no proper result handling)
+				return g.expr_type_to_c(e.base_type)
+			}
+			return 'int'
+		}
 		else {
 			return 'int'
 		}
@@ -161,6 +374,10 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 	match node {
 		ast.BasicLiteral {
 			if node.kind == .number {
+				// Check if it's a float literal (contains decimal point or exponent)
+				if node.value.contains('.') || node.value.contains('e') || node.value.contains('E') {
+					return 'double'
+				}
 				return 'int'
 			}
 			if node.kind in [.key_true, .key_false] {
@@ -173,7 +390,24 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 			}
 			return 'string'
 		}
+		ast.StringInterLiteral {
+			return 'string'
+		}
+		ast.ArrayInitExpr {
+			// For array literals, infer element type from first expr
+			if node.exprs.len > 0 {
+				elem_type := g.infer_type(node.exprs[0])
+				return 'Array_${elem_type}'
+			}
+			return 'Array_int'
+		}
 		ast.InitExpr {
+			// Check if it's a map type
+			if node.typ is ast.Type {
+				if node.typ is ast.MapType {
+					return 'Map_int_int'
+				}
+			}
 			return g.expr_type_to_c(node.typ)
 		}
 		ast.PrefixExpr {
@@ -224,6 +458,10 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 			mut name := ''
 			if node.lhs is ast.Ident {
 				name = node.lhs.name
+				// Check if this is interface boxing - return the interface type
+				if name in g.interface_names {
+					return name
+				}
 			}
 			if t := g.fn_types[name] {
 				return t
@@ -243,13 +481,42 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 			return g.infer_type(node.lhs)
 		}
 		ast.SelectorExpr {
+			// Check if this is an enum value access (EnumName.value)
+			if node.lhs is ast.Ident {
+				if node.lhs.name in g.enum_names {
+					return node.lhs.name
+				}
+			}
 			// For selector expressions, we return the field type
 			// Since struct fields in this test are mostly int, we return int
 			// TODO: Implement proper field type lookup
 			return 'int'
 		}
+		ast.IndexExpr {
+			// Check if this is a slice (range) operation
+			if node.expr is ast.RangeExpr {
+				// Slice returns same type as the base array
+				return g.infer_type(node.lhs)
+			}
+			// For regular array/map indexing, get the element type
+			base_type := g.infer_type(node.lhs)
+			if base_type.starts_with('Map_') {
+				// Map_int_int -> return int (the value type)
+				return 'int'
+			}
+			if base_type.starts_with('Array_') {
+				return base_type['Array_'.len..]
+			}
+			return 'int'
+		}
 		ast.ModifierExpr {
 			return g.infer_type(node.expr)
+		}
+		ast.RangeExpr {
+			return 'Range_'
+		}
+		ast.MapInitExpr {
+			return 'Map_int_int'
 		}
 		else {
 			return 'int'
@@ -273,6 +540,139 @@ fn (mut g Gen) gen_global_decl(node ast.GlobalDecl) {
 	for field in node.fields {
 		t := g.expr_type_to_c(field.typ)
 		g.sb.writeln('${t} ${field.name};')
+	}
+}
+
+fn (mut g Gen) gen_const_decl(node ast.ConstDecl) {
+	for field in node.fields {
+		t := g.infer_type(field.value)
+		g.sb.write_string('const ${t} ${field.name} = ')
+		g.gen_expr(field.value)
+		g.sb.writeln(';')
+	}
+}
+
+fn (mut g Gen) gen_enum_decl(node ast.EnumDecl) {
+	// Generate C enum declaration
+	g.sb.writeln('typedef enum {')
+	for i, field in node.fields {
+		g.sb.write_string('\t${node.name}__${field.name}')
+		if field.value !is ast.EmptyExpr {
+			g.sb.write_string(' = ')
+			g.gen_expr(field.value)
+		}
+		if i < node.fields.len - 1 {
+			g.sb.writeln(',')
+		} else {
+			g.sb.writeln('')
+		}
+	}
+	g.sb.writeln('} ${node.name};')
+}
+
+fn (mut g Gen) gen_interface_decl(node ast.InterfaceDecl) {
+	// Generate C struct for interface (vtable-style)
+	// Note: typedef forward declaration is already generated above
+	g.sb.writeln('struct ${node.name} {')
+	g.sb.writeln('\tvoid* _object;  // Pointer to concrete object')
+	g.sb.writeln('\tint _type_id;   // Type identifier')
+	// Generate function pointers for each method
+	for field in node.fields {
+		g.write_indent()
+		g.sb.write_string('\t')
+		// Interface fields can be method signatures or regular fields
+		// FnType is wrapped: Expr -> Type -> FnType
+		if field.typ is ast.Type {
+			if field.typ is ast.FnType {
+				// Method signature - generate function pointer
+				fn_type := field.typ as ast.FnType
+				mut ret := 'void'
+				if fn_type.return_type !is ast.EmptyExpr {
+					ret = g.expr_type_to_c(fn_type.return_type)
+				}
+				g.sb.write_string('${ret} (*${field.name})(void*')
+				for param in fn_type.params {
+					g.sb.write_string(', ')
+					t := g.expr_type_to_c(param.typ)
+					g.sb.write_string(t)
+				}
+				g.sb.writeln(');')
+			} else {
+				// Other type expression
+				t := g.expr_type_to_c(field.typ)
+				g.sb.writeln('${t} ${field.name};')
+			}
+		} else {
+			// Regular field
+			t := g.expr_type_to_c(field.typ)
+			g.sb.writeln('${t} ${field.name};')
+		}
+	}
+	g.sb.writeln('};')
+}
+
+// gen_interface_wrappers generates wrapper functions for interface vtables
+// Each wrapper casts void* to the concrete type and calls the actual method
+fn (mut g Gen) gen_interface_wrappers() {
+	// For each interface
+	for iface_name, methods in g.interface_meths {
+		// For each concrete type that has these methods
+		for type_name, type_meths in g.type_methods {
+			// Check if this type implements all interface methods
+			if !g.type_implements_interface(methods, type_meths) {
+				continue
+			}
+
+			// Generate wrapper functions for this type implementing this interface
+			for meth in methods {
+				// Get return type from the registered function
+				mangled := '${type_name}__${meth}'
+				ret_type := g.fn_types[mangled] or { 'int' }
+
+				// Generate: RetType InterfaceName_TypeName_method_wrapper(void* _obj) {
+				//     return TypeName__method(*(TypeName*)_obj);
+				// }
+				g.sb.writeln('static ${ret_type} ${iface_name}_${type_name}_${meth}_wrapper(void* _obj) {')
+				g.sb.writeln('\treturn ${type_name}__${meth}(*(${type_name}*)_obj);')
+				g.sb.writeln('}')
+				g.sb.writeln('')
+			}
+		}
+	}
+}
+
+// type_implements_interface checks if a type has all the interface methods
+fn (g Gen) type_implements_interface(iface_methods []string, type_methods []string) bool {
+	for meth in iface_methods {
+		if meth !in type_methods {
+			return false
+		}
+	}
+	return true
+}
+
+fn (mut g Gen) gen_type_decl(node ast.TypeDecl) {
+	if node.variants.len > 0 {
+		// Sum type: generate a tagged union
+		// Note: typedef forward declaration is already generated above
+		g.sb.writeln('struct ${node.name} {')
+		g.sb.writeln('\tint _tag;')
+		g.sb.writeln('\tunion {')
+		for i, variant in node.variants {
+			// Use a safe name for union fields (prefix with underscore to avoid reserved words)
+			variant_name := if variant is ast.Ident {
+				'_${variant.name}'
+			} else {
+				'_v${i}'
+			}
+			g.sb.writeln('\t\tvoid* ${variant_name};')
+		}
+		g.sb.writeln('\t} _data;')
+		g.sb.writeln('};')
+	} else if node.base_type !is ast.EmptyExpr {
+		// Type alias: generate typedef
+		base_type := g.expr_type_to_c(node.base_type)
+		g.sb.writeln('typedef ${base_type} ${node.name};')
 	}
 }
 
@@ -331,6 +731,7 @@ fn (mut g Gen) gen_fn_head(node ast.FnDecl) {
 
 fn (mut g Gen) gen_fn_decl(node ast.FnDecl) {
 	g.var_types = map[string]string{}
+	g.defer_stmts.clear()
 
 	// Register receiver for methods
 	if node.is_method {
@@ -357,6 +758,9 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl) {
 	g.indent++
 	g.gen_stmts(node.stmts)
 
+	// Emit deferred statements before implicit return (for all functions)
+	g.emit_deferred_stmts()
+
 	if node.name == 'main' {
 		g.write_indent()
 		g.sb.writeln('return 0;')
@@ -374,9 +778,29 @@ fn (mut g Gen) gen_stmts(stmts []ast.Stmt) {
 fn (mut g Gen) gen_stmt(node ast.Stmt) {
 	match node {
 		ast.AssignStmt {
-			g.write_indent()
+			// Handle multi-return assignments: a, b := func()
+			if node.lhs.len > 1 && node.rhs.len == 1 && node.op == .decl_assign {
+				g.gen_multi_return_assign(node)
+				return
+			}
 			lhs := node.lhs[0]
 			rhs := node.rhs[0]
+			// Check if LHS is blank identifier '_'
+			mut is_blank := false
+			if lhs is ast.Ident {
+				if lhs.name == '_' {
+					is_blank = true
+				}
+			}
+			if is_blank {
+				// Skip blank identifier assignments, but evaluate RHS for side effects
+				g.write_indent()
+				g.sb.write_string('(void)(')
+				g.gen_expr(rhs)
+				g.sb.writeln(');')
+				return
+			}
+			g.write_indent()
 			if node.op == .decl_assign {
 				// var decl
 				mut name := ''
@@ -395,6 +819,21 @@ fn (mut g Gen) gen_stmt(node ast.Stmt) {
 				g.sb.writeln(';')
 			} else {
 				// assignment
+				// Check if LHS is a map index expression
+				if lhs is ast.IndexExpr {
+					lhs_type := g.infer_type(lhs.lhs)
+					if lhs_type.starts_with('Map_') {
+						// Map assignment: __map_int_int_set(&m, key, val)
+						g.sb.write_string('__map_int_int_set(&')
+						g.gen_expr(lhs.lhs)
+						g.sb.write_string(', ')
+						g.gen_expr(lhs.expr)
+						g.sb.write_string(', ')
+						g.gen_expr(rhs)
+						g.sb.writeln(');')
+						return
+					}
+				}
 				g.gen_expr(lhs)
 				op_str := match node.op {
 					.assign { '=' }
@@ -421,13 +860,47 @@ fn (mut g Gen) gen_stmt(node ast.Stmt) {
 			g.sb.writeln(';')
 		}
 		ast.ReturnStmt {
-			g.write_indent()
-			g.sb.write_string('return')
-			if node.exprs.len > 0 {
-				g.sb.write_string(' ')
+			// Handle multi-return: return a, b -> return (Tuple_N_int){a, b}
+			if node.exprs.len > 1 {
+				// Emit deferred statements first (if any)
+				g.emit_deferred_stmts()
+				g.write_indent()
+				g.sb.write_string('return (Tuple_${node.exprs.len}_int){')
+				for i, expr in node.exprs {
+					if i > 0 {
+						g.sb.write_string(', ')
+					}
+					g.gen_expr(expr)
+				}
+				g.sb.writeln('};')
+			} else if node.exprs.len > 0 && g.defer_stmts.len > 0 {
+				// In V/Go semantics: evaluate return value FIRST, then run defer
+				// Store return value in temp variable before running defers
+				ret_type := g.infer_type(node.exprs[0])
+				g.write_indent()
+				g.sb.write_string('${ret_type} __ret_val = ')
 				g.gen_expr(node.exprs[0])
+				g.sb.writeln(';')
+				// Emit deferred statements
+				g.emit_deferred_stmts()
+				// Return the stored value
+				g.write_indent()
+				g.sb.writeln('return __ret_val;')
+			} else {
+				// Emit deferred statements (if any)
+				g.emit_deferred_stmts()
+				g.write_indent()
+				g.sb.write_string('return')
+				if node.exprs.len > 0 {
+					g.sb.write_string(' ')
+					g.gen_expr(node.exprs[0])
+				}
+				g.sb.writeln(';')
 			}
-			g.sb.writeln(';')
+		}
+		ast.DeferStmt {
+			// Collect deferred statements to be executed before return
+			g.defer_stmts << node.stmts
 		}
 		ast.BlockStmt {
 			g.write_indent()
@@ -439,6 +912,12 @@ fn (mut g Gen) gen_stmt(node ast.Stmt) {
 			g.sb.writeln('}')
 		}
 		ast.ForStmt {
+			// Check for for-in: `for i in 1..10` or `for elem in array`
+			if node.init is ast.ForInStmt {
+				g.gen_for_in(node, node.init)
+				return
+			}
+
 			g.write_indent()
 			if node.init is ast.EmptyStmt && node.cond is ast.EmptyExpr
 				&& node.post is ast.EmptyStmt {
@@ -481,6 +960,18 @@ fn (mut g Gen) gen_stmt(node ast.Stmt) {
 			g.sb.write_string('if (!(')
 			g.gen_expr(node.expr)
 			g.sb.writeln(')) { fprintf(stderr, "Assertion failed\\n"); exit(1); }')
+		}
+		ast.LabelStmt {
+			// Labels for labeled loops (break/continue targets)
+			// Generate: label_name: stmt
+			g.write_indent()
+			g.sb.write_string('${node.name}:')
+			if node.stmt !is ast.EmptyStmt {
+				g.sb.writeln('')
+				g.gen_stmt(node.stmt)
+			} else {
+				g.sb.writeln(';')
+			}
 		}
 		else {
 			g.sb.writeln('// Unhandled stmt: ${node.type_name()}')
@@ -541,6 +1032,36 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 				g.sb.write_string('(string){"${val}", ${val.len}}')
 			}
 		}
+		ast.StringInterLiteral {
+			// String interpolation: 'prefix${a}middle${b}suffix'
+			// Generate: ({ char buf[256]; sprintf(buf, "prefix%lldmiddle%lldsuffix", a, b); (string){buf, strlen(buf)}; })
+			g.sb.write_string('({ char _buf[256]; sprintf(_buf, "')
+			// Build format string
+			for i, val in node.values {
+				// Strip quotes from the first and last value parts
+				mut clean_val := val
+				if i == 0 {
+					// First part: strip leading quote
+					clean_val = clean_val.trim_left("'").trim_left('"')
+				}
+				if i == node.values.len - 1 {
+					// Last part: strip trailing quote
+					clean_val = clean_val.trim_right("'").trim_right('"')
+				}
+				g.sb.write_string(clean_val)
+				if i < node.inters.len {
+					inter := node.inters[i]
+					g.sb.write_string(g.get_printf_format(inter))
+				}
+			}
+			g.sb.write_string('"')
+			// Add arguments
+			for inter in node.inters {
+				g.sb.write_string(', ')
+				g.gen_expr(inter.expr)
+			}
+			g.sb.write_string('); (string){_buf, strlen(_buf)}; })')
+		}
 		ast.Ident {
 			g.sb.write_string(node.name)
 		}
@@ -579,6 +1100,20 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 			g.gen_expr(node.expr)
 		}
 		ast.IfExpr {
+			// Check if this if-expression can be converted to a ternary operator
+			// (i.e., used as a value rather than a statement)
+			if g.can_be_ternary(node) {
+				// Generate C ternary: (cond) ? true_val : false_val
+				g.sb.write_string('(')
+				g.gen_expr(node.cond)
+				g.sb.write_string(') ? (')
+				g.gen_if_value(node.stmts)
+				g.sb.write_string(') : (')
+				g.gen_else_value(node.else_expr)
+				g.sb.write_string(')')
+				return
+			}
+
 			// Statement IF
 			// First check if this is just an else block (no condition)
 			if node.cond is ast.EmptyExpr {
@@ -589,6 +1124,12 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 				g.indent--
 				g.write_indent()
 				g.sb.writeln('}')
+				return
+			}
+
+			// Check if condition is an if-guard expression
+			if node.cond is ast.IfGuardExpr {
+				g.gen_if_guard(node, node.cond)
 				return
 			}
 
@@ -631,6 +1172,10 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 			g.sb.write_string('switch (')
 			g.gen_expr(node.expr)
 			g.sb.writeln(') {')
+			// Set match type context for enum shorthand (.value syntax)
+			match_type := g.infer_type(node.expr)
+			old_match_type := g.cur_match_type
+			g.cur_match_type = match_type
 			for branch in node.branches {
 				if branch.cond.len == 0 {
 					g.write_indent()
@@ -649,6 +1194,7 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 				g.sb.writeln('break;')
 				g.indent--
 			}
+			g.cur_match_type = old_match_type
 			g.write_indent()
 			g.sb.writeln('}')
 		}
@@ -722,6 +1268,37 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 				} else {
 					receiver_type
 				}
+
+				// Check if receiver is an interface type - call through vtable
+				if clean_type in g.interface_names {
+					// Interface method call: iface.method(args)
+					// Generate: iface.method(iface._object, args)
+					g.gen_expr(receiver_expr)
+					g.sb.write_string('.${name}(')
+					g.gen_expr(receiver_expr)
+					g.sb.write_string('._object')
+					if node.args.len > 0 {
+						g.sb.write_string(', ')
+					}
+					for i, arg in node.args {
+						if i > 0 {
+							g.sb.write_string(', ')
+						}
+						if arg is ast.ModifierExpr {
+							if arg.kind == .key_mut {
+								g.sb.write_string('&')
+								g.gen_expr(arg.expr)
+							} else {
+								g.gen_expr(arg)
+							}
+						} else {
+							g.gen_expr(arg)
+						}
+					}
+					g.sb.write_string(')')
+					return
+				}
+
 				mangled := '${clean_type}__${name}'
 				method_wants_mut := g.mut_receivers[mangled] or { false }
 
@@ -775,10 +1352,41 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 			g.sb.write_string(')')
 		}
 		ast.CallOrCastExpr {
-			// This is a call that looks like a cast, e.g., fib(n-1)
+			// This is a call that looks like a cast, e.g., fib(n-1) or int(color)
 			mut name := ''
 			if node.lhs is ast.Ident {
 				name = node.lhs.name
+				// Check if this is a primitive type cast (int, i64, etc.)
+				// For enums, int(enum_val) just returns the value since C enums are ints
+				if name in ['int', 'i64', 'i32', 'i16', 'i8', 'u64', 'u32', 'u16', 'u8', 'f32',
+					'f64'] {
+					g.sb.write_string('((${name})(')
+					g.gen_expr(node.expr)
+					g.sb.write_string('))')
+					return
+				}
+				// Check if this is interface boxing: Drawable(point)
+				if name in g.interface_names {
+					// Get the concrete type being boxed
+					concrete_type := g.infer_type(node.expr)
+					// Generate interface struct initialization with vtable
+					g.sb.write_string('({ ')
+					// Allocate heap memory for the object
+					g.sb.write_string('${concrete_type}* _iface_obj = (${concrete_type}*)malloc(sizeof(${concrete_type})); ')
+					g.sb.write_string('*_iface_obj = ')
+					g.gen_expr(node.expr)
+					g.sb.write_string('; ')
+					// Create interface struct with function pointers
+					g.sb.write_string('(${name}){._object = _iface_obj, ._type_id = 0')
+					// Add function pointers for each interface method
+					if methods := g.interface_meths[name] {
+						for meth in methods {
+							g.sb.write_string(', .${meth} = ${name}_${concrete_type}_${meth}_wrapper')
+						}
+					}
+					g.sb.write_string('}; })')
+					return
+				}
 			} else if node.lhs is ast.SelectorExpr {
 				// Check for C library call (C.putchar, etc.)
 				if node.lhs.lhs is ast.Ident && node.lhs.lhs.name == 'C' {
@@ -803,6 +1411,14 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 			g.sb.write_string(')')
 		}
 		ast.InitExpr {
+			// Check if it's a map type
+			if node.typ is ast.Type {
+				if node.typ is ast.MapType {
+					// Generate empty map initialization
+					g.sb.write_string('__new_map_int_int()')
+					return
+				}
+			}
 			// Get the type name properly
 			typ_name := g.expr_type_to_c(node.typ)
 			g.sb.write_string('(${typ_name}){')
@@ -816,6 +1432,25 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 			g.sb.write_string('}')
 		}
 		ast.SelectorExpr {
+			// Check if this is an enum value access (EnumName.value)
+			if node.lhs is ast.Ident {
+				if node.lhs.name in g.enum_names {
+					// Enum value access: generate EnumName__field
+					g.sb.write_string('${node.lhs.name}__${node.rhs.name}')
+					return
+				}
+			}
+			// Check for enum shorthand (.value) - LHS is EmptyExpr
+			if node.lhs is ast.EmptyExpr {
+				// Use the match expression type context
+				if g.cur_match_type in g.enum_names {
+					g.sb.write_string('${g.cur_match_type}__${node.rhs.name}')
+					return
+				}
+				// Fallback: just output the field name (might not be valid C)
+				g.sb.write_string('${node.rhs.name}')
+				return
+			}
 			// Check if we need to use -> for pointers
 			lhs_type := g.infer_type(node.lhs)
 			g.gen_expr(node.lhs)
@@ -827,10 +1462,35 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 			g.sb.write_string(node.rhs.name)
 		}
 		ast.IndexExpr {
-			g.gen_expr(node.lhs)
-			g.sb.write_string('[')
-			g.gen_expr(node.expr)
-			g.sb.write_string(']')
+			// Check if this is a slice operation (arr[start..end])
+			if node.expr is ast.RangeExpr {
+				g.gen_slice_expr(node.lhs, node.expr)
+				return
+			}
+			// Check if this is an array access (Array struct type)
+			lhs_type := g.infer_type(node.lhs)
+			if lhs_type.starts_with('Map_') {
+				// Map access: __map_int_int_get(&m, key)
+				g.sb.write_string('__map_int_int_get(&')
+				g.gen_expr(node.lhs)
+				g.sb.write_string(', ')
+				g.gen_expr(node.expr)
+				g.sb.write_string(')')
+			} else if lhs_type.starts_with('Array_') {
+				// For Array types, access via ((elem_type*)arr.data)[index]
+				elem_type := lhs_type['Array_'.len..]
+				g.sb.write_string('((${elem_type}*)')
+				g.gen_expr(node.lhs)
+				g.sb.write_string('.data)[')
+				g.gen_expr(node.expr)
+				g.sb.write_string(']')
+			} else {
+				// Regular C array access
+				g.gen_expr(node.lhs)
+				g.sb.write_string('[')
+				g.gen_expr(node.expr)
+				g.sb.write_string(']')
+			}
 		}
 		ast.PostfixExpr {
 			g.gen_expr(node.expr)
@@ -844,8 +1504,243 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 			// Handle mut, shared, etc.
 			g.gen_expr(node.expr)
 		}
+		ast.ArrayInitExpr {
+			// Generate array using __new_array_from_c_array builtin
+			len := node.exprs.len
+			elem_type := if len > 0 { g.infer_type(node.exprs[0]) } else { 'int' }
+			// __new_array_from_c_array(len, len, sizeof(elem), (elem_type[len]){values})
+			g.sb.write_string('__new_array_from_c_array(${len}, ${len}, sizeof(${elem_type}), (${elem_type}[${len}]){')
+			for i, expr in node.exprs {
+				if i > 0 {
+					g.sb.write_string(', ')
+				}
+				g.gen_expr(expr)
+			}
+			g.sb.write_string('})')
+		}
+		ast.MapInitExpr {
+			// Generate empty map initialization
+			g.sb.write_string('__new_map_int_int()')
+		}
+		ast.IfGuardExpr {
+			// If-guard expression: `if x := opt() { ... }`
+			// For cleanc, we generate the RHS expression and use it as condition
+			// The variable binding is handled in the if-statement context
+			if node.stmt.rhs.len > 0 {
+				g.gen_expr(node.stmt.rhs[0])
+			} else {
+				g.sb.write_string('0')
+			}
+		}
+		ast.Keyword {
+			// Handle keywords like 'none'
+			if node.tok == .key_none {
+				g.sb.write_string('0') // none is represented as 0/NULL
+			} else if node.tok == .key_true {
+				g.sb.write_string('true')
+			} else if node.tok == .key_false {
+				g.sb.write_string('false')
+			} else {
+				g.sb.write_string('/* keyword: ${node.tok} */')
+			}
+		}
+		ast.Type {
+			// Handle type expressions (e.g., in return statements)
+			if node is ast.NoneType {
+				g.sb.write_string('0') // none
+			} else {
+				g.sb.write_string('/* type expr */')
+			}
+		}
+		ast.RangeExpr {
+			// RangeExpr: start..end or start...end
+			// Generate a compound literal for the range struct
+			g.sb.write_string('(Range_){')
+			g.gen_expr(node.start)
+			g.sb.write_string(', ')
+			g.gen_expr(node.end)
+			g.sb.write_string('}')
+		}
+		ast.ComptimeExpr {
+			// Handle comptime expressions like $if macos { ... } $else { ... }
+			g.gen_comptime_expr(node)
+		}
+		ast.UnsafeExpr {
+			// Unsafe block - generate as GCC compound expression
+			if node.stmts.len == 0 {
+				g.sb.write_string('0')
+			} else {
+				g.sb.write_string('({ ')
+				// Generate all but last statement
+				for i, stmt in node.stmts {
+					if i < node.stmts.len - 1 {
+						g.gen_stmt(stmt)
+					}
+				}
+				// Generate last statement - if it's an ExprStmt, we need its value
+				last := node.stmts[node.stmts.len - 1]
+				if last is ast.ExprStmt {
+					g.gen_expr(last.expr)
+					g.sb.write_string('; ')
+				} else {
+					g.gen_stmt(last)
+					g.sb.write_string('0; ')
+				}
+				g.sb.write_string('})')
+			}
+		}
+		ast.EmptyExpr {
+			// Empty expression - output nothing or 0
+			g.sb.write_string('0')
+		}
+		ast.OrExpr {
+			// Or expression: expr or { fallback }
+			// For now, just generate the main expression
+			// TODO: Add proper optional/error handling
+			g.gen_expr(node.expr)
+		}
 		else {
 			g.sb.write_string('/* expr: ${node.type_name()} */')
+		}
+	}
+}
+
+// gen_comptime_expr handles compile-time conditionals like $if macos { ... } $else { ... }
+fn (mut g Gen) gen_comptime_expr(node ast.ComptimeExpr) {
+	// The inner expression should be an IfExpr
+	if node.expr is ast.IfExpr {
+		g.gen_comptime_if(node.expr)
+	} else {
+		// For other comptime expressions, just emit them
+		g.gen_expr(node.expr)
+	}
+}
+
+// gen_comptime_if handles $if/$else compile-time conditionals
+fn (mut g Gen) gen_comptime_if(node ast.IfExpr) {
+	// Evaluate the comptime condition
+	cond_result := g.eval_comptime_cond(node.cond)
+
+	if cond_result {
+		// Condition is true - emit then branch
+		g.gen_stmts(node.stmts)
+	} else {
+		// Condition is false - emit else branch if present
+		if node.else_expr !is ast.EmptyExpr {
+			if node.else_expr is ast.IfExpr {
+				// Could be $else if or plain $else
+				if node.else_expr.cond is ast.EmptyExpr {
+					// Plain $else block
+					g.gen_stmts(node.else_expr.stmts)
+				} else {
+					// $else $if - recursive comptime evaluation
+					g.gen_comptime_if(node.else_expr)
+				}
+			}
+		}
+	}
+}
+
+// eval_comptime_cond evaluates a compile-time condition expression
+fn (g Gen) eval_comptime_cond(cond ast.Expr) bool {
+	match cond {
+		ast.Ident {
+			// Platform and feature flags
+			return g.eval_comptime_flag(cond.name)
+		}
+		ast.PrefixExpr {
+			// Handle negation: !macos
+			if cond.op == .not {
+				return !g.eval_comptime_cond(cond.expr)
+			}
+		}
+		ast.InfixExpr {
+			// Handle && and ||
+			if cond.op == .and {
+				return g.eval_comptime_cond(cond.lhs) && g.eval_comptime_cond(cond.rhs)
+			}
+			if cond.op == .logical_or {
+				return g.eval_comptime_cond(cond.lhs) || g.eval_comptime_cond(cond.rhs)
+			}
+		}
+		ast.PostfixExpr {
+			// Handle optional feature check: feature?
+			if cond.op == .question {
+				if cond.expr is ast.Ident {
+					return g.eval_comptime_flag(cond.expr.name)
+				}
+			}
+		}
+		ast.ParenExpr {
+			return g.eval_comptime_cond(cond.expr)
+		}
+		else {}
+	}
+	return false
+}
+
+// eval_comptime_flag evaluates a single comptime flag/identifier
+fn (g Gen) eval_comptime_flag(name string) bool {
+	// OS checks - use comptime conditionals with direct returns
+	match name {
+		'macos', 'darwin' {
+			$if macos {
+				return true
+			}
+			return false
+		}
+		'linux' {
+			$if linux {
+				return true
+			}
+			return false
+		}
+		'windows' {
+			$if windows {
+				return true
+			}
+			return false
+		}
+		'freebsd' {
+			$if freebsd {
+				return true
+			}
+			return false
+		}
+		'posix', 'unix' {
+			$if macos {
+				return true
+			} $else $if linux {
+				return true
+			} $else $if freebsd {
+				return true
+			}
+			return false
+		}
+		// Architecture checks
+		'amd64', 'x86_64' {
+			$if amd64 {
+				return true
+			}
+			return false
+		}
+		'arm64', 'aarch64' {
+			$if arm64 {
+				return true
+			}
+			return false
+		}
+		'x86' {
+			// x86 (32-bit) is rarely used in modern systems
+			return false
+		}
+		// Common feature flags (typically false in simple compilers)
+		'freestanding', 'ios', 'android', 'termux', 'debug', 'test' {
+			return false
+		}
+		else {
+			// Unknown flag - default to false
+			return false
 		}
 	}
 }
@@ -853,5 +1748,391 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 fn (mut g Gen) write_indent() {
 	for _ in 0 .. g.indent {
 		g.sb.write_string('\t')
+	}
+}
+
+// Check if an IfExpr can be converted to a C ternary operator
+// This is true when the branches contain simple value expressions (single ExprStmt)
+fn (g Gen) can_be_ternary(node ast.IfExpr) bool {
+	// If-guard expressions cannot be ternary (they need variable declarations)
+	if node.cond is ast.IfGuardExpr {
+		return false
+	}
+	// Must have both branches
+	if node.else_expr is ast.EmptyExpr {
+		return false
+	}
+	// Check if true branch has exactly one ExprStmt with a simple expression
+	if node.stmts.len != 1 {
+		return false
+	}
+	stmt := node.stmts[0]
+	if stmt !is ast.ExprStmt {
+		return false
+	}
+	// Exclude complex expressions that can't be used in ternary (MatchExpr, IfExpr as statement)
+	expr_stmt := stmt as ast.ExprStmt
+	if expr_stmt.expr is ast.MatchExpr {
+		return false
+	}
+	if expr_stmt.expr is ast.IfExpr {
+		// If nested, check if it's also a value expression
+		nested_if := expr_stmt.expr as ast.IfExpr
+		if !g.can_be_ternary(nested_if) {
+			return false
+		}
+	}
+	// Check else branch
+	if node.else_expr is ast.IfExpr {
+		// Could be else-if chain or pure else
+		else_if := node.else_expr
+		if else_if.cond is ast.EmptyExpr {
+			// Pure else: check its statements
+			if else_if.stmts.len != 1 {
+				return false
+			}
+			else_stmt := else_if.stmts[0]
+			if else_stmt !is ast.ExprStmt {
+				return false
+			}
+			else_expr_stmt := else_stmt as ast.ExprStmt
+			if else_expr_stmt.expr is ast.MatchExpr {
+				return false
+			}
+		} else {
+			// Nested if-expression (else if) - can be ternary if nested can
+			return g.can_be_ternary(else_if)
+		}
+	}
+	return true
+}
+
+// Generate the value from the if-branch statements
+fn (mut g Gen) gen_if_value(stmts []ast.Stmt) {
+	if stmts.len == 1 {
+		stmt := stmts[0]
+		if stmt is ast.ExprStmt {
+			g.gen_expr(stmt.expr)
+			return
+		}
+	}
+	g.sb.write_string('0')
+}
+
+// Generate the value from the else-branch expression
+fn (mut g Gen) gen_else_value(else_expr ast.Expr) {
+	if else_expr is ast.IfExpr {
+		if else_expr.cond is ast.EmptyExpr {
+			// Pure else: extract value from its statements
+			g.gen_if_value(else_expr.stmts)
+		} else {
+			// Nested if-expression (else if) - recurse with ternary
+			g.sb.write_string('(')
+			g.gen_expr(else_expr.cond)
+			g.sb.write_string(') ? (')
+			g.gen_if_value(else_expr.stmts)
+			g.sb.write_string(') : (')
+			g.gen_else_value(else_expr.else_expr)
+			g.sb.write_string(')')
+		}
+	} else if else_expr is ast.EmptyExpr {
+		g.sb.write_string('0')
+	} else {
+		g.gen_expr(else_expr)
+	}
+}
+
+// Generate if-guard statement: `if x := opt() { ... } else { ... }`
+fn (mut g Gen) gen_if_guard(node ast.IfExpr, guard ast.IfGuardExpr) {
+	// For if-guard, we:
+	// 1. Declare the guard variable(s)
+	// 2. Assign the RHS to the variable(s)
+	// 3. Use the value as condition (non-zero = success)
+
+	// Get the variable name(s) from LHS
+	mut var_names := []string{}
+	for lhs_expr in guard.stmt.lhs {
+		if lhs_expr is ast.Ident {
+			var_names << lhs_expr.name
+		} else if lhs_expr is ast.ModifierExpr {
+			// Handle 'mut x'
+			if lhs_expr.expr is ast.Ident {
+				var_names << lhs_expr.expr.name
+			}
+		}
+	}
+
+	// Infer type from RHS
+	mut rhs_type := 'int'
+	if guard.stmt.rhs.len > 0 {
+		rhs_type = g.infer_type(guard.stmt.rhs[0])
+	}
+
+	// Generate: { type var = rhs; if (var) { ... } else { ... } }
+	g.sb.writeln('{')
+	g.indent++
+
+	// Declare and assign guard variable(s)
+	for i, var_name in var_names {
+		g.write_indent()
+		g.var_types[var_name] = rhs_type
+		g.sb.write_string('${rhs_type} ${var_name} = ')
+		if i < guard.stmt.rhs.len {
+			g.gen_expr(guard.stmt.rhs[i])
+		} else if guard.stmt.rhs.len > 0 {
+			g.gen_expr(guard.stmt.rhs[0])
+		} else {
+			g.sb.write_string('0')
+		}
+		g.sb.writeln(';')
+	}
+
+	// Generate the if statement using the first variable as condition
+	g.write_indent()
+	if var_names.len > 0 {
+		g.sb.write_string('if (${var_names[0]})')
+	} else {
+		g.sb.write_string('if (0)')
+	}
+	g.sb.writeln(' {')
+	g.indent++
+	g.gen_stmts(node.stmts)
+	g.indent--
+	g.write_indent()
+	g.sb.write_string('}')
+
+	// Handle else branch
+	if node.else_expr !is ast.EmptyExpr {
+		if node.else_expr is ast.IfExpr {
+			if node.else_expr.cond is ast.EmptyExpr {
+				// Pure else block
+				g.sb.writeln(' else {')
+				g.indent++
+				g.gen_stmts(node.else_expr.stmts)
+				g.indent--
+				g.write_indent()
+				g.sb.writeln('}')
+			} else {
+				// Else-if chain
+				g.sb.write_string(' else ')
+				g.gen_expr(node.else_expr)
+			}
+		} else {
+			g.sb.write_string(' else ')
+			g.gen_expr(node.else_expr)
+		}
+	} else {
+		g.sb.writeln('')
+	}
+
+	g.indent--
+	g.write_indent()
+	g.sb.writeln('}')
+}
+
+// Generate for-in loop: dispatches to range or array handling
+fn (mut g Gen) gen_for_in(node ast.ForStmt, for_in ast.ForInStmt) {
+	if for_in.expr is ast.RangeExpr {
+		g.gen_for_in_range(node, for_in)
+	} else {
+		g.gen_for_in_array(node, for_in)
+	}
+}
+
+// Generate for-in loop with range: `for i in start..end { ... }`
+fn (mut g Gen) gen_for_in_range(node ast.ForStmt, for_in ast.ForInStmt) {
+	// Get loop variable name
+	mut var_name := ''
+	if for_in.value is ast.Ident {
+		var_name = for_in.value.name
+	} else if for_in.value is ast.ModifierExpr {
+		if for_in.value.expr is ast.Ident {
+			var_name = for_in.value.expr.name
+		}
+	}
+
+	range_expr := for_in.expr as ast.RangeExpr
+
+	// Register loop variable type
+	g.var_types[var_name] = 'int'
+
+	// Generate: for (int i = start; i < end; i++) { ... }
+	g.write_indent()
+	g.sb.write_string('for (int ${var_name} = ')
+	g.gen_expr(range_expr.start)
+	g.sb.write_string('; ${var_name} < ')
+	g.gen_expr(range_expr.end)
+	g.sb.write_string('; ${var_name}++')
+	g.sb.writeln(') {')
+	g.indent++
+	g.gen_stmts(node.stmts)
+	g.indent--
+	g.write_indent()
+	g.sb.writeln('}')
+}
+
+// Generate for-in loop over array: `for elem in array { ... }` or `for i, elem in array { ... }`
+fn (mut g Gen) gen_for_in_array(node ast.ForStmt, for_in ast.ForInStmt) {
+	// Get key variable name (index)
+	mut key_name := ''
+	if for_in.key !is ast.EmptyExpr {
+		if for_in.key is ast.Ident {
+			key_name = for_in.key.name
+		} else if for_in.key is ast.ModifierExpr {
+			if for_in.key.expr is ast.Ident {
+				key_name = for_in.key.expr.name
+			}
+		}
+	}
+
+	// Get value variable name
+	mut value_name := ''
+	if for_in.value is ast.Ident {
+		value_name = for_in.value.name
+	} else if for_in.value is ast.ModifierExpr {
+		if for_in.value.expr is ast.Ident {
+			value_name = for_in.value.expr.name
+		}
+	}
+
+	// Infer array type
+	arr_type := g.infer_type(for_in.expr)
+
+	// Determine element type
+	mut elem_type := 'int'
+	if arr_type.starts_with('Array_') {
+		elem_type = arr_type['Array_'.len..]
+	}
+
+	// Register variable types
+	g.var_types[value_name] = elem_type
+	if key_name != '' {
+		g.var_types[key_name] = 'int'
+	}
+
+	// Use a hidden index if no key specified
+	idx_var := if key_name != '' { key_name } else { '_idx_${value_name}' }
+
+	g.write_indent()
+	g.sb.write_string('for (int ${idx_var} = 0; ${idx_var} < ')
+	g.gen_expr(for_in.expr)
+	g.sb.writeln('.len; ${idx_var}++) {')
+	g.indent++
+
+	// Declare and assign value variable
+	g.write_indent()
+	g.sb.write_string('${elem_type} ${value_name} = ((${elem_type}*)')
+	g.gen_expr(for_in.expr)
+	g.sb.writeln('.data)[${idx_var}];')
+
+	g.gen_stmts(node.stmts)
+	g.indent--
+	g.write_indent()
+	g.sb.writeln('}')
+}
+
+// Generate array slice expression: arr[start..end]
+fn (mut g Gen) gen_slice_expr(base ast.Expr, range_expr ast.RangeExpr) {
+	// Get the base array type
+	lhs_type := g.infer_type(base)
+
+	if lhs_type.starts_with('Array_') {
+		// For Array struct types
+		elem_type := lhs_type['Array_'.len..]
+		// Generate: __slice_array(arr, start, end, sizeof(elem_type))
+		// For simplicity, generate inline slice creation
+		g.sb.write_string('({ ')
+		g.sb.write_string('int _start = ')
+		g.gen_expr(range_expr.start)
+		g.sb.write_string('; int _end = ')
+		g.gen_expr(range_expr.end)
+		g.sb.write_string('; int _len = _end - _start; ')
+		g.sb.write_string('Array _slice = __new_array_from_c_array(_len, _len, sizeof(${elem_type}), ')
+		g.sb.write_string('((${elem_type}*)')
+		g.gen_expr(base)
+		g.sb.write_string('.data) + _start); _slice; })')
+	} else {
+		// For C-style arrays, return pointer to start
+		g.sb.write_string('(&(')
+		g.gen_expr(base)
+		g.sb.write_string(')[')
+		g.gen_expr(range_expr.start)
+		g.sb.write_string('])')
+	}
+}
+
+// Convert V string interpolation format to C printf format specifier
+fn (g Gen) get_printf_format(inter ast.StringInter) string {
+	base_fmt := match inter.format {
+		.unformatted { '%lld' } // Default: assume integer
+		.decimal { '%lld' }
+		.hex { '%llx' }
+		.octal { '%llo' }
+		.binary { '%lld' } // C doesn't have binary, use decimal
+		.float { '%f' }
+		.exponent { '%e' }
+		.exponent_short { '%g' }
+		.character { '%c' }
+		.string { '%s' }
+		.pointer_address { '%p' }
+	}
+
+	// Handle width and precision if specified
+	if inter.width > 0 && inter.precision > 0 {
+		return '%${inter.width}.${inter.precision}' + base_fmt[1..]
+	} else if inter.width > 0 {
+		return '%${inter.width}' + base_fmt[1..]
+	} else if inter.precision > 0 {
+		return '%.${inter.precision}' + base_fmt[1..]
+	}
+	return base_fmt
+}
+
+// emit_deferred_stmts emits all deferred statements in reverse order
+fn (mut g Gen) emit_deferred_stmts() {
+	// Execute deferred statements in LIFO order (last defer first)
+	for i := g.defer_stmts.len - 1; i >= 0; i-- {
+		g.gen_stmts(g.defer_stmts[i])
+	}
+}
+
+// gen_multi_return_assign handles multi-return assignments like: a, b := func()
+fn (mut g Gen) gen_multi_return_assign(node ast.AssignStmt) {
+	rhs := node.rhs[0]
+
+	// Generate tuple type name based on number of return values
+	tuple_type := 'Tuple_${node.lhs.len}_int'
+
+	// Get a unique temp variable name
+	tmp_name := '__tmp_${g.tmp_counter}'
+	g.tmp_counter++
+
+	// Generate: TupleN_int __tmp = func();
+	g.write_indent()
+	g.sb.write_string('${tuple_type} ${tmp_name} = ')
+	g.gen_expr(rhs)
+	g.sb.writeln(';')
+
+	// Extract each field: int a = __tmp.f0; int b = __tmp.f1;
+	for i, lhs_expr in node.lhs {
+		mut name := ''
+		mut is_blank := false
+		if lhs_expr is ast.Ident {
+			name = lhs_expr.name
+			is_blank = name == '_'
+		} else if lhs_expr is ast.ModifierExpr {
+			if lhs_expr.expr is ast.Ident {
+				name = lhs_expr.expr.name
+				is_blank = name == '_'
+			}
+		}
+
+		if is_blank {
+			continue // Skip blank identifiers
+		}
+
+		g.var_types[name] = 'int' // Simplified - assume int return type
+		g.write_indent()
+		g.sb.writeln('int ${name} = ${tmp_name}.f${i};')
 	}
 }

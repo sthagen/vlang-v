@@ -14,7 +14,7 @@ pub enum OpCode {
 	switch_
 	unreachable
 
-	// Binary
+	// Binary (integer)
 	add
 	sub
 	mul
@@ -22,6 +22,13 @@ pub enum OpCode {
 	udiv
 	srem
 	urem
+
+	// Binary (float)
+	fadd
+	fsub
+	fmul
+	fdiv
+	frem
 
 	// Bitwise
 	shl
@@ -61,8 +68,15 @@ pub enum OpCode {
 	// Other
 	phi
 	call
+	call_indirect // Indirect call through function pointer
+	call_sret     // Call with struct return (x8 indirect return on ARM64)
 	select
-	assign // copy for phi elimination
+	assign             // copy for phi elimination
+	inline_string_init // Create string struct by value: (string){str, len, is_lit}
+
+	// Aggregate (struct/tuple) operations
+	extractvalue // Extract element from struct/tuple: extractvalue %tuple, index
+	insertvalue  // Insert element into struct/tuple: insertvalue %tuple, %val, index
 }
 
 pub enum AtomicOrdering {
@@ -86,4 +100,12 @@ pub:
 
 	pos        token.Pos
 	atomic_ord AtomicOrdering
+	inline     InlineHint // Inline hint for call instructions
+}
+
+pub enum InlineHint {
+	none   // No hint, let optimizer decide
+	always // Always inline (e.g., V's [inline] attribute)
+	never  // Never inline (e.g., V's [noinline] attribute)
+	hint   // Suggest inlining (optimizer may ignore)
 }
