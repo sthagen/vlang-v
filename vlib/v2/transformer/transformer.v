@@ -29,9 +29,9 @@ mut:
 
 // SmartcastContext holds info about a single smartcast
 struct SmartcastContext {
-	expr     string // The expression being smart-cast (e.g., "w.valera")
-	variant  string // The variant type name (e.g., "int", "string", "Kek")
-	sumtype  string // The sum type name (e.g., "Valera")
+	expr    string // The expression being smart-cast (e.g., "w.valera")
+	variant string // The variant type name (e.g., "int", "string", "Kek")
+	sumtype string // The sum type name (e.g., "Valera")
 }
 
 pub fn Transformer.new(files []ast.File, env &types.Environment) &Transformer {
@@ -464,7 +464,8 @@ fn (t &Transformer) v_type_name_to_c_name(v_name string) string {
 // e.g., "File" in ast module becomes "ast__File"
 fn (t &Transformer) qualify_type_name(type_name string) string {
 	// Don't qualify if already qualified (contains __) or is a primitive
-	if type_name.contains('__') || type_name in ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64', 'bool', 'string', 'rune', 'char', 'voidptr', 'charptr', 'byteptr', 'void'] {
+	if type_name.contains('__')
+		|| type_name in ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64', 'bool', 'string', 'rune', 'char', 'voidptr', 'charptr', 'byteptr', 'void'] {
 		return type_name
 	}
 	// Don't qualify Array_ or Map_ types
@@ -497,7 +498,6 @@ fn (t &Transformer) is_var_enum(name string) ?string {
 	}
 	return none
 }
-
 
 // transform_files transforms all files and returns transformed copies
 pub fn (mut t Transformer) transform_files(files []ast.File) []ast.File {
@@ -997,7 +997,10 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 		// Handle Result/Option if-guard
 		// Generate: { _tmp := call(); if (!_tmp.is_error) { attr := extractValue(_tmp); body } else { else } }
 		temp_name := t.gen_temp_name()
-		temp_ident := ast.Ident{name: temp_name, pos: synth_pos}
+		temp_ident := ast.Ident{
+			name: temp_name
+			pos:  synth_pos
+		}
 
 		mut stmts := []ast.Stmt{}
 
@@ -1012,10 +1015,12 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 		// 2. Build condition: !_tmp.is_error (for Result) or _tmp.state == 0 (for Option)
 		success_cond := if is_result {
 			ast.Expr(ast.PrefixExpr{
-				op: .not
+				op:   .not
 				expr: ast.SelectorExpr{
 					lhs: temp_ident
-					rhs: ast.Ident{name: 'is_error'}
+					rhs: ast.Ident{
+						name: 'is_error'
+					}
 				}
 			})
 		} else {
@@ -1023,9 +1028,14 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 				op:  .eq
 				lhs: ast.SelectorExpr{
 					lhs: temp_ident
-					rhs: ast.Ident{name: 'state'}
+					rhs: ast.Ident{
+						name: 'state'
+					}
 				}
-				rhs: ast.BasicLiteral{kind: .number, value: '0'}
+				rhs: ast.BasicLiteral{
+					kind:  .number
+					value: '0'
+				}
 			})
 		}
 
@@ -1034,7 +1044,9 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 		mut if_stmts := []ast.Stmt{}
 		data_access := ast.SelectorExpr{
 			lhs: temp_ident
-			rhs: ast.Ident{name: 'data'}
+			rhs: ast.Ident{
+				name: 'data'
+			}
 		}
 		if_stmts << ast.AssignStmt{
 			op:  .decl_assign
@@ -1053,7 +1065,9 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 			else_expr: t.transform_expr(if_expr.else_expr)
 			pos:       synth_pos
 		}
-		stmts << ast.ExprStmt{expr: modified_if}
+		stmts << ast.ExprStmt{
+			expr: modified_if
+		}
 
 		return stmts
 	}
@@ -1066,11 +1080,16 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 		if map_type_str := t.get_map_type_for_expr(rhs.lhs) {
 			// This is a map lookup - use _get_check pattern
 			temp_name := t.gen_temp_name()
-			temp_ident := ast.Ident{name: temp_name, pos: synth_pos}
+			temp_ident := ast.Ident{
+				name: temp_name
+				pos:  synth_pos
+			}
 
 			// 1. Generate: _tmp := __Map_K_V_get_check(&map, key)
 			get_check_call := ast.CallExpr{
-				lhs: ast.Ident{name: '__${map_type_str}_get_check'}
+				lhs:  ast.Ident{
+					name: '__${map_type_str}_get_check'
+				}
 				args: [
 					ast.Expr(ast.PrefixExpr{
 						op:   .amp
@@ -1106,7 +1125,9 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 			null_check := ast.InfixExpr{
 				op:  .ne
 				lhs: temp_ident
-				rhs: ast.Ident{name: 'nil'}
+				rhs: ast.Ident{
+					name: 'nil'
+				}
 			}
 
 			// 4. Build the if expression
@@ -1119,7 +1140,9 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 
 			return [
 				ast.Stmt(temp_assign),
-				ast.Stmt(ast.ExprStmt{expr: modified_if}),
+				ast.Stmt(ast.ExprStmt{
+					expr: modified_if
+				}),
 			]
 		}
 	}
@@ -1168,7 +1191,12 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 			// Put assignment before the if, then use arr.data as condition
 			// When blank, use temp variable instead of _
 			temp_lhs := if is_blank {
-				[ast.Expr(ast.Ident{name: guard_var_name, pos: synth_pos})]
+				[
+					ast.Expr(ast.Ident{
+						name: guard_var_name
+						pos:  synth_pos
+					}),
+				]
 			} else {
 				guard.stmt.lhs
 			}
@@ -1185,8 +1213,13 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 			}
 			// Use arr.data as condition
 			cond_expr = ast.SelectorExpr{
-				lhs: ast.Ident{name: guard_var_name, pos: synth_pos}
-				rhs: ast.Ident{name: 'data'}
+				lhs: ast.Ident{
+					name: guard_var_name
+					pos:  synth_pos
+				}
+				rhs: ast.Ident{
+					name: 'data'
+				}
 			}
 			modified_if := ast.IfExpr{
 				cond:      cond_expr
@@ -1196,7 +1229,9 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 			}
 			return [
 				ast.Stmt(temp_assign),
-				ast.Stmt(ast.ExprStmt{expr: modified_if}),
+				ast.Stmt(ast.ExprStmt{
+					expr: modified_if
+				}),
 			]
 		}
 	}
@@ -1208,7 +1243,9 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 		pos:       synth_pos
 	}
 
-	return [ast.Stmt(ast.ExprStmt{expr: modified_if})]
+	return [ast.Stmt(ast.ExprStmt{
+		expr: modified_if
+	})]
 }
 
 // expand_direct_or_expr_assign handles the simple case where RHS is directly an OrExpr
@@ -1825,42 +1862,57 @@ fn (mut t Transformer) try_expand_for_in_map(stmt ast.ForStmt) ?[]ast.Stmt {
 	len_name := t.gen_map_iter_temp_name('len')
 	delta_name := t.gen_map_iter_temp_name('delta')
 
-	idx_ident := ast.Ident{name: idx_name}
-	len_ident := ast.Ident{name: len_name}
-	delta_ident := ast.Ident{name: delta_name}
+	idx_ident := ast.Ident{
+		name: idx_name
+	}
+	len_ident := ast.Ident{
+		name: len_name
+	}
+	delta_ident := ast.Ident{
+		name: delta_name
+	}
 
 	// Transform the map expression and store in temp variable to avoid multiple evaluations
 	map_expr := t.transform_expr(for_in.expr)
 
 	// Generate temp name for the map to avoid re-evaluating the map expression multiple times
 	map_tmp_name := t.gen_map_iter_temp_name('map')
-	map_tmp_ident := ast.Ident{name: map_tmp_name}
+	map_tmp_ident := ast.Ident{
+		name: map_tmp_name
+	}
 
 	// key_values selector: _map_tmp.key_values
 	key_values_expr := ast.SelectorExpr{
 		lhs: map_tmp_ident
-		rhs: ast.Ident{name: 'key_values'}
+		rhs: ast.Ident{
+			name: 'key_values'
+		}
 	}
 
 	// key_values.len selector: map_expr.key_values.len
 	key_values_len_expr := ast.SelectorExpr{
 		lhs: key_values_expr
-		rhs: ast.Ident{name: 'len'}
+		rhs: ast.Ident{
+			name: 'len'
+		}
 	}
 
 	mut stmts := []ast.Stmt{}
 
 	// 0. _map_tmp := map_expr (store map in temp variable to avoid re-evaluation)
 	stmts << ast.AssignStmt{
-		op: .decl_assign
+		op:  .decl_assign
 		lhs: [ast.Expr(map_tmp_ident)]
 		rhs: [ast.Expr(map_expr)]
 	}
 
 	// 1. mut _map_len := _map_tmp.key_values.len
 	stmts << ast.AssignStmt{
-		op: .decl_assign
-		lhs: [ast.Expr(ast.ModifierExpr{kind: .key_mut, expr: len_ident})]
+		op:  .decl_assign
+		lhs: [ast.Expr(ast.ModifierExpr{
+			kind: .key_mut
+			expr: len_ident
+		})]
 		rhs: [ast.Expr(key_values_len_expr)]
 	}
 
@@ -1869,18 +1921,20 @@ fn (mut t Transformer) try_expand_for_in_map(stmt ast.ForStmt) ?[]ast.Stmt {
 
 	// _map_delta := map_expr.key_values.len - _map_len
 	loop_body << ast.AssignStmt{
-		op: .decl_assign
+		op:  .decl_assign
 		lhs: [ast.Expr(delta_ident)]
-		rhs: [ast.Expr(ast.InfixExpr{
-			op: .minus
-			lhs: key_values_len_expr
-			rhs: len_ident
-		})]
+		rhs: [
+			ast.Expr(ast.InfixExpr{
+				op:  .minus
+				lhs: key_values_len_expr
+				rhs: len_ident
+			}),
+		]
 	}
 
 	// _map_len = map_expr.key_values.len
 	loop_body << ast.AssignStmt{
-		op: .assign
+		op:  .assign
 		lhs: [ast.Expr(len_ident)]
 		rhs: [ast.Expr(key_values_len_expr)]
 	}
@@ -1888,34 +1942,57 @@ fn (mut t Transformer) try_expand_for_in_map(stmt ast.ForStmt) ?[]ast.Stmt {
 	// if _map_delta < 0 { _map_idx = -1; continue }
 	loop_body << ast.ExprStmt{
 		expr: ast.IfExpr{
-			cond: ast.InfixExpr{
-				op: .lt
+			cond:  ast.InfixExpr{
+				op:  .lt
 				lhs: delta_ident
-				rhs: ast.BasicLiteral{kind: .number, value: '0'}
+				rhs: ast.BasicLiteral{
+					kind:  .number
+					value: '0'
+				}
 			}
 			stmts: [
 				ast.AssignStmt{
-					op: .assign
+					op:  .assign
 					lhs: [ast.Expr(idx_ident)]
-					rhs: [ast.Expr(ast.PrefixExpr{op: .minus, expr: ast.BasicLiteral{kind: .number, value: '1'}})]
+					rhs: [
+						ast.Expr(ast.PrefixExpr{
+							op:   .minus
+							expr: ast.BasicLiteral{
+								kind:  .number
+								value: '1'
+							}
+						}),
+					]
 				},
-				ast.FlowControlStmt{op: .key_continue},
+				ast.FlowControlStmt{
+					op: .key_continue
+				},
 			]
 		}
 	}
 
 	// if !DenseArray__has_index(&map_expr.key_values, _map_idx) { continue }
 	has_index_call := ast.CallExpr{
-		lhs: ast.Ident{name: 'DenseArray__has_index'}
+		lhs:  ast.Ident{
+			name: 'DenseArray__has_index'
+		}
 		args: [
-			ast.Expr(ast.PrefixExpr{op: .amp, expr: key_values_expr}),
+			ast.Expr(ast.PrefixExpr{
+				op:   .amp
+				expr: key_values_expr
+			}),
 			ast.Expr(idx_ident),
 		]
 	}
 	loop_body << ast.ExprStmt{
 		expr: ast.IfExpr{
-			cond: ast.PrefixExpr{op: .not, expr: has_index_call}
-			stmts: [ast.Stmt(ast.FlowControlStmt{op: .key_continue})]
+			cond:  ast.PrefixExpr{
+				op:   .not
+				expr: has_index_call
+			}
+			stmts: [ast.Stmt(ast.FlowControlStmt{
+				op: .key_continue
+			})]
 		}
 	}
 
@@ -1923,21 +2000,33 @@ fn (mut t Transformer) try_expand_for_in_map(stmt ast.ForStmt) ?[]ast.Stmt {
 	// This is represented as a cast expression wrapping the call
 	if !key_is_blank && key_name != '' {
 		key_call := ast.CallExpr{
-			lhs: ast.Ident{name: 'DenseArray__key'}
+			lhs:  ast.Ident{
+				name: 'DenseArray__key'
+			}
 			args: [
-				ast.Expr(ast.PrefixExpr{op: .amp, expr: key_values_expr}),
+				ast.Expr(ast.PrefixExpr{
+					op:   .amp
+					expr: key_values_expr
+				}),
 				ast.Expr(idx_ident),
 			]
 		}
 		// Cast to KeyType* then dereference: *(KeyType*)call
 		key_cast := ast.CastExpr{
-			typ: ast.Ident{name: '${key_type_name}*'}
+			typ:  ast.Ident{
+				name: '${key_type_name}*'
+			}
 			expr: key_call
 		}
-		key_deref := ast.PrefixExpr{op: .mul, expr: key_cast}
+		key_deref := ast.PrefixExpr{
+			op:   .mul
+			expr: key_cast
+		}
 		loop_body << ast.AssignStmt{
-			op: .decl_assign
-			lhs: [ast.Expr(ast.Ident{name: key_name})]
+			op:  .decl_assign
+			lhs: [ast.Expr(ast.Ident{
+				name: key_name
+			})]
 			rhs: [ast.Expr(key_deref)]
 		}
 		// Register key variable type in scope for later string detection
@@ -1947,21 +2036,33 @@ fn (mut t Transformer) try_expand_for_in_map(stmt ast.ForStmt) ?[]ast.Stmt {
 	// v := *(ValueType*)DenseArray__value(&map_expr.key_values, _map_idx)
 	if value_name != '' && value_name != '_' {
 		value_call := ast.CallExpr{
-			lhs: ast.Ident{name: 'DenseArray__value'}
+			lhs:  ast.Ident{
+				name: 'DenseArray__value'
+			}
 			args: [
-				ast.Expr(ast.PrefixExpr{op: .amp, expr: key_values_expr}),
+				ast.Expr(ast.PrefixExpr{
+					op:   .amp
+					expr: key_values_expr
+				}),
 				ast.Expr(idx_ident),
 			]
 		}
 		// Cast to ValueType* then dereference: *(ValueType*)call
 		value_cast := ast.CastExpr{
-			typ: ast.Ident{name: '${value_type_name}*'}
+			typ:  ast.Ident{
+				name: '${value_type_name}*'
+			}
 			expr: value_call
 		}
-		value_deref := ast.PrefixExpr{op: .mul, expr: value_cast}
+		value_deref := ast.PrefixExpr{
+			op:   .mul
+			expr: value_cast
+		}
 		loop_body << ast.AssignStmt{
-			op: .decl_assign
-			lhs: [ast.Expr(ast.Ident{name: value_name})]
+			op:  .decl_assign
+			lhs: [ast.Expr(ast.Ident{
+				name: value_name
+			})]
 			rhs: [ast.Expr(value_deref)]
 		}
 		// Register value variable type in scope for later type detection
@@ -1976,20 +2077,32 @@ fn (mut t Transformer) try_expand_for_in_map(stmt ast.ForStmt) ?[]ast.Stmt {
 	// 2. Build the for loop:
 	// for _map_idx := 0; _map_idx < _map_len; _map_idx++ { ... }
 	for_stmt := ast.ForStmt{
-		init: ast.AssignStmt{
-			op: .decl_assign
+		init:  ast.AssignStmt{
+			op:  .decl_assign
 			lhs: [ast.Expr(idx_ident)]
-			rhs: [ast.Expr(ast.BasicLiteral{kind: .number, value: '0'})]
+			rhs: [ast.Expr(ast.BasicLiteral{
+				kind:  .number
+				value: '0'
+			})]
 		}
-		cond: ast.InfixExpr{
-			op: .lt
+		cond:  ast.InfixExpr{
+			op:  .lt
 			lhs: idx_ident
 			rhs: len_ident
 		}
-		post: ast.AssignStmt{
-			op: .assign
+		post:  ast.AssignStmt{
+			op:  .assign
 			lhs: [ast.Expr(idx_ident)]
-			rhs: [ast.Expr(ast.InfixExpr{op: .plus, lhs: idx_ident, rhs: ast.BasicLiteral{kind: .number, value: '1'}})]
+			rhs: [
+				ast.Expr(ast.InfixExpr{
+					op:  .plus
+					lhs: idx_ident
+					rhs: ast.BasicLiteral{
+						kind:  .number
+						value: '1'
+					}
+				}),
+			]
 		}
 		stmts: loop_body
 	}
@@ -2499,7 +2612,7 @@ fn (mut t Transformer) try_expand_map_index_or(or_expr ast.OrExpr, mut prefix_st
 	// 1. Generate: _t1 := __Map_K_V_get_check(&m, key)
 	// This returns a pointer to the value, or null if not found
 	get_check_call := ast.CallExpr{
-		lhs: ast.Ident{
+		lhs:  ast.Ident{
 			name: '__${map_type_str}_get_check'
 		}
 		args: [
@@ -2559,7 +2672,7 @@ fn (mut t Transformer) try_expand_map_index_or(or_expr ast.OrExpr, mut prefix_st
 		// If ptr != nil, overwrite with actual value
 		prefix_stmts << ast.ExprStmt{
 			expr: ast.IfExpr{
-				cond: ast.InfixExpr{
+				cond:  ast.InfixExpr{
 					op:  .ne
 					lhs: temp_ident
 					rhs: ast.Ident{
@@ -2618,7 +2731,7 @@ fn (mut t Transformer) try_expand_map_index_or_assign(stmt ast.AssignStmt, or_ex
 
 	// 1. Generate: _t1 := __Map_K_V_get_check(&m, key)
 	get_check_call := ast.CallExpr{
-		lhs: ast.Ident{
+		lhs:  ast.Ident{
 			name: '__${map_type_str}_get_check'
 		}
 		args: [
@@ -2699,7 +2812,9 @@ fn (mut t Transformer) try_expand_map_index_or_assign(stmt ast.AssignStmt, or_ex
 								lhs: stmt.lhs
 								rhs: [ast.Expr(inner_or)]
 							}
-							if inner_stmts := t.try_expand_map_index_or_assign(inner_assign, inner_or) {
+							if inner_stmts := t.try_expand_map_index_or_assign(inner_assign,
+								inner_or)
+							{
 								expanded_or_stmts << inner_stmts
 								continue
 							}
@@ -2718,7 +2833,7 @@ fn (mut t Transformer) try_expand_map_index_or_assign(stmt ast.AssignStmt, or_ex
 			// 3. If outer lookup succeeded, assign deref
 			stmts << ast.ExprStmt{
 				expr: ast.IfExpr{
-					cond: ast.InfixExpr{
+					cond:  ast.InfixExpr{
 						op:  .ne
 						lhs: temp_ident
 						rhs: ast.Ident{
@@ -2778,7 +2893,7 @@ fn (mut t Transformer) try_expand_map_index_or_assign(stmt ast.AssignStmt, or_ex
 		// 3b. if _t1 != nil { lhs = *_t1 }
 		stmts << ast.ExprStmt{
 			expr: ast.IfExpr{
-				cond: ast.InfixExpr{
+				cond:  ast.InfixExpr{
 					op:  .ne
 					lhs: temp_ident
 					rhs: ast.Ident{
@@ -2997,20 +3112,28 @@ fn (mut t Transformer) transform_for_stmt(stmt ast.ForStmt) ast.ForStmt {
 
 	// Check if this is a for-in loop (init is ForInStmt)
 	if stmt.init is ast.ForInStmt {
-		// Infer the element type from the iterable expression and register loop variables
-		if elem_type := t.get_expr_type(stmt.init.expr) {
-			value_type := elem_type.value_type()
+		for_in := stmt.init as ast.ForInStmt
+		// Check if iterating over a fixed array - transform to indexed for loop
+		if iter_type := t.get_expr_type(for_in.expr) {
+			if iter_type is types.ArrayFixed {
+				result := t.transform_fixed_array_for_in(stmt, for_in, iter_type)
+				t.close_scope()
+				return result
+			}
+			// Also check for ArrayInitExpr with fixed array type
+			// Infer the element type from the iterable expression and register loop variables
+			value_type := iter_type.value_type()
 			// Register value variable if it has a name
-			if stmt.init.value is ast.Ident {
-				value_name := (stmt.init.value as ast.Ident).name
+			if for_in.value is ast.Ident {
+				value_name := (for_in.value as ast.Ident).name
 				if value_name != '' && value_name != '_' {
 					t.scope.insert(value_name, value_type)
 				}
 			}
 			// Register key variable if present
-			key_type := elem_type.key_type()
-			if stmt.init.key is ast.Ident {
-				key_name := (stmt.init.key as ast.Ident).name
+			key_type := iter_type.key_type()
+			if for_in.key is ast.Ident {
+				key_name := (for_in.key as ast.Ident).name
 				if key_name != '' && key_name != '_' {
 					t.scope.insert(key_name, key_type)
 				}
@@ -3026,6 +3149,105 @@ fn (mut t Transformer) transform_for_stmt(stmt ast.ForStmt) ast.ForStmt {
 	}
 	t.close_scope()
 	return result
+}
+
+// transform_fixed_array_for_in transforms `for elem in fixed_arr` to indexed for loop
+// for i := 0; i < SIZE; i++ { elem := fixed_arr[i]; ... }
+fn (mut t Transformer) transform_fixed_array_for_in(stmt ast.ForStmt, for_in ast.ForInStmt, arr_type types.ArrayFixed) ast.ForStmt {
+	// Get value variable name
+	mut value_name := '_elem'
+	if for_in.value is ast.Ident {
+		value_name = for_in.value.name
+	} else if for_in.value is ast.ModifierExpr {
+		if for_in.value.expr is ast.Ident {
+			value_name = for_in.value.expr.name
+		}
+	}
+
+	// Get key variable name (index)
+	mut key_name := '_idx'
+	mut has_explicit_key := false
+	if for_in.key is ast.Ident {
+		key_name = for_in.key.name
+		has_explicit_key = true
+	} else if for_in.key is ast.ModifierExpr {
+		if for_in.key.expr is ast.Ident {
+			key_name = for_in.key.expr.name
+			has_explicit_key = true
+		}
+	}
+
+	// Use unique hidden index if no key specified
+	if !has_explicit_key {
+		key_name = '_idx_${value_name}'
+	}
+
+	// Register loop variables in scope
+	key_type := types.Type(arr_type).key_type()
+	value_type := types.Type(arr_type).value_type()
+	t.scope.insert(key_name, key_type)
+	t.scope.insert(value_name, value_type)
+
+	// Transform the iterable expression
+	transformed_expr := t.transform_expr(for_in.expr)
+
+	// Build: elem := fixed_arr[i]
+	value_assign := ast.AssignStmt{
+		op:  .decl_assign
+		lhs: [ast.Expr(ast.Ident{
+			name: value_name
+		})]
+		rhs: [
+			ast.Expr(ast.IndexExpr{
+				lhs:  transformed_expr
+				expr: ast.Ident{
+					name: key_name
+				}
+			}),
+		]
+	}
+
+	// Prepend value assignment to loop body
+	mut new_stmts := []ast.Stmt{cap: stmt.stmts.len + 1}
+	new_stmts << value_assign
+	for s in stmt.stmts {
+		new_stmts << t.transform_stmt(s)
+	}
+
+	// Build: for i := 0; i < SIZE; i++ { ... }
+	return ast.ForStmt{
+		init:  ast.AssignStmt{
+			op:  .decl_assign
+			lhs: [ast.Expr(ast.Ident{
+				name: key_name
+			})]
+			rhs: [ast.Expr(ast.BasicLiteral{
+				value: '0'
+				kind:  .number
+			})]
+		}
+		cond:  ast.InfixExpr{
+			op:  .lt
+			lhs: ast.Ident{
+				name: key_name
+			}
+			rhs: ast.BasicLiteral{
+				value: '${arr_type.len}'
+				kind:  .number
+			}
+		}
+		post:  ast.AssignStmt{
+			op:  .plus_assign
+			lhs: [ast.Expr(ast.Ident{
+				name: key_name
+			})]
+			rhs: [ast.Expr(ast.BasicLiteral{
+				value: '1'
+				kind:  .number
+			})]
+		}
+		stmts: new_stmts
+	}
 }
 
 fn (mut t Transformer) transform_for_in_stmt(stmt ast.ForInStmt) ast.ForInStmt {
@@ -3247,14 +3469,18 @@ fn (mut t Transformer) apply_smartcast_direct_ctx(original_expr ast.Expr, ctx Sm
 	}
 
 	// For primitives, cast from pointer space back to value type
-	if variant_simple in ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64',
-		'f32', 'f64', 'bool', 'rune', 'byte', 'usize', 'isize'] {
+	if variant_simple in ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64',
+		'bool', 'rune', 'byte', 'usize', 'isize'] {
 		// Create: ((variant)(intptr_t)variant_access)
 		return ast.ParenExpr{
 			expr: ast.CastExpr{
-				typ:  ast.Ident{name: variant_simple}
+				typ:  ast.Ident{
+					name: variant_simple
+				}
 				expr: ast.CastExpr{
-					typ:  ast.Ident{name: 'intptr_t'}
+					typ:  ast.Ident{
+						name: 'intptr_t'
+					}
 					expr: variant_access
 				}
 			}
@@ -3735,32 +3961,32 @@ fn (mut t Transformer) transform_map_init_expr(expr ast.MapInitExpr) ast.Expr {
 			name: 'builtin__new_map_init_noscan_value'
 		}
 		args: [
-			// &builtin__map_hash_<key_type>
+			// &map_hash_<key_type>
 			ast.Expr(ast.PrefixExpr{
 				op:   .amp
 				expr: ast.Ident{
-					name: 'builtin__map_hash_${key_type_name}'
+					name: 'map_hash_${key_type_name}'
 				}
 			}),
-			// &builtin__map_eq_<key_type>
+			// &map_eq_<key_type>
 			ast.Expr(ast.PrefixExpr{
 				op:   .amp
 				expr: ast.Ident{
-					name: 'builtin__map_eq_${key_type_name}'
+					name: 'map_eq_${key_type_name}'
 				}
 			}),
-			// &builtin__map_clone_<key_type>
+			// &map_clone_<key_type>
 			ast.Expr(ast.PrefixExpr{
 				op:   .amp
 				expr: ast.Ident{
-					name: 'builtin__map_clone_${key_type_name}'
+					name: 'map_clone_${key_type_name}'
 				}
 			}),
-			// &builtin__map_free_<key_type>
+			// &map_free_<key_type>
 			ast.Expr(ast.PrefixExpr{
 				op:   .amp
 				expr: ast.Ident{
-					name: 'builtin__map_free_${key_type_name}'
+					name: 'map_free_${key_type_name}'
 				}
 			}),
 			// n (number of elements)
@@ -4144,26 +4370,135 @@ fn (mut t Transformer) transform_if_expr(expr ast.IfExpr) ast.Expr {
 				lhs_infix := cond.lhs as ast.InfixExpr
 				if lhs_infix.op == .key_is {
 					// Transform: if x is Type && rest { body } else { else_body }
-					// To: if x is Type { if rest { body } else { else_body } } else { else_body }
-					// The else_expr goes on both outer and inner ifs to preserve semantics:
-					// - If outer is-check fails -> else
-					// - If inner condition fails -> else
+					// Handle directly to ensure else_body is transformed WITHOUT smartcast
+					// Get variant info from lhs_infix (the is-check)
+					mut variant_name := ''
+					mut variant_module := ''
+					if lhs_infix.rhs is ast.Ident {
+						variant_name = (lhs_infix.rhs as ast.Ident).name
+					} else if lhs_infix.rhs is ast.SelectorExpr {
+						sel := lhs_infix.rhs as ast.SelectorExpr
+						variant_name = sel.rhs.name
+						if sel.lhs is ast.Ident {
+							variant_module = (sel.lhs as ast.Ident).name
+						}
+					}
+					if variant_name != '' {
+						mut sumtype_name := t.get_sumtype_name_for_expr(lhs_infix.lhs)
+						if sumtype_name == '' {
+							sumtype_name = t.find_sumtype_for_variant(variant_name)
+						}
+						if sumtype_name != '' {
+							variants := t.get_sum_type_variants(sumtype_name)
+							mut tag_value := -1
+							for i, v in variants {
+								v_short := if v.contains('__') {
+									v.all_after_last('__')
+								} else {
+									v
+								}
+								if v == variant_name || v_short == variant_name {
+									tag_value = i
+									break
+								}
+							}
+							if tag_value >= 0 {
+								smartcast_expr := t.expr_to_string(lhs_infix.lhs)
+								qualified_variant := if variant_module != '' {
+									'${variant_module}__${variant_name}'
+								} else {
+									variant_name
+								}
+								// Transform LHS with outer smartcasts (for nested is-checks)
+								transformed_lhs := t.transform_expr(lhs_infix.lhs)
+								// Push smartcast for body and inner condition
+								t.push_smartcast(smartcast_expr, qualified_variant, sumtype_name)
+								// Transform inner condition (rest) with smartcast
+								transformed_rest := t.transform_expr(cond.rhs)
+								// Transform body with smartcast
+								transformed_body := t.transform_stmts(expr.stmts)
+								// Pop smartcast BEFORE transforming else
+								t.pop_smartcast()
+								// Transform else WITHOUT smartcast
+								transformed_else := t.transform_expr(expr.else_expr)
+								// Build tag check
+								tag_check := ast.InfixExpr{
+									op:  token.Token.eq
+									lhs: ast.SelectorExpr{
+										lhs: transformed_lhs
+										rhs: ast.Ident{
+											name: '_tag'
+										}
+									}
+									rhs: ast.BasicLiteral{
+										kind:  token.Token.number
+										value: '${tag_value}'
+									}
+									pos: lhs_infix.pos
+								}
+								// Build inner if (with already-transformed components)
+								inner_if := ast.IfExpr{
+									cond:      transformed_rest
+									stmts:     transformed_body
+									else_expr: transformed_else
+									pos:       expr.pos
+								}
+								// Build outer if
+								return ast.IfExpr{
+									cond:      tag_check
+									stmts:     [
+										ast.Stmt(ast.ExprStmt{
+											expr: inner_if
+										}),
+									]
+									else_expr: transformed_else
+									pos:       expr.pos
+								}
+							}
+						}
+					}
+					// Fallback: Even without tag info, we need to handle smartcast correctly.
+					// The outer condition (lhs_infix) is an is-check that should push smartcast.
+					// Transform else_expr FIRST without smartcast, use pre-transformed version.
+					transformed_else_fallback := t.transform_expr(expr.else_expr)
+					// For the outer condition, transform LHS (for nested smartcasts)
+					transformed_outer_lhs := t.transform_expr(lhs_infix.lhs)
+					// We can't generate tag check without knowing the tag, so just keep the is-check
+					// (cleanc will handle it), but we need smartcast for body/inner condition
+					smartcast_expr := t.expr_to_string(lhs_infix.lhs)
+					// Get variant name for smartcast context
+					mut fallback_variant := variant_name
+					if variant_module != '' {
+						fallback_variant = '${variant_module}__${variant_name}'
+					}
+					// Use empty sumtype name since we couldn't find it
+					t.push_smartcast(smartcast_expr, fallback_variant, '')
+					// Transform inner condition and body with smartcast
+					transformed_rest_fallback := t.transform_expr(cond.rhs)
+					transformed_body_fallback := t.transform_stmts(expr.stmts)
+					// Pop smartcast before using pre-transformed else
+					t.pop_smartcast()
 					inner_if := ast.IfExpr{
-						cond:      cond.rhs
-						stmts:     expr.stmts
-						else_expr: expr.else_expr
+						cond:      transformed_rest_fallback
+						stmts:     transformed_body_fallback
+						else_expr: transformed_else_fallback
 						pos:       expr.pos
 					}
+					// Keep original is-check condition (let cleanc handle it)
 					outer_if := ast.IfExpr{
-						cond:      cond.lhs
+						cond:      ast.InfixExpr{
+							op:  lhs_infix.op
+							lhs: transformed_outer_lhs
+							rhs: lhs_infix.rhs
+							pos: lhs_infix.pos
+						}
 						stmts:     [ast.Stmt(ast.ExprStmt{
 							expr: inner_if
 						})]
-						else_expr: expr.else_expr // else also on outer if
+						else_expr: transformed_else_fallback
 						pos:       expr.pos
 					}
-					// Recursively transform - outer will handle smartcast
-					return t.transform_if_expr(outer_if)
+					return outer_if
 				}
 			}
 			// Check if RHS is an is-check: if cond && x is Type { ... }
@@ -4249,25 +4584,12 @@ fn (mut t Transformer) transform_if_expr(expr ast.IfExpr) ast.Expr {
 							variant_name
 						}
 
-						// Transform cond.lhs BEFORE pushing the inner smartcast context
-						// IMPORTANT: Remove ALL smartcast contexts for this expression
-						// to prevent incorrect casting. The is-check's LHS should access
-						// the sum type's _tag, not the smartcast result.
-						mut removed_contexts := []SmartcastContext{}
-						for {
-							existing_ctx := t.remove_smartcast_for_expr(smartcast_expr)
-							if existing_ctx != none {
-								removed_contexts << existing_ctx
-							} else {
-								break
-							}
-						}
+						// Transform cond.lhs WITH active smartcast contexts.
+						// For nested smartcasts (e.g., match x { Number { if x is Point } }),
+						// we need the outer smartcast (x -> Number) to be applied so that
+						// the tag check accesses the inner sum type's tag, not the outer's.
+						// e.g., (*((Number*)(x._data._Number)))._tag == 1, not x._tag == 1
 						transformed_lhs := t.transform_expr(cond.lhs)
-						// Re-add the contexts in reverse order (to preserve original order)
-						for i := removed_contexts.len - 1; i >= 0; i-- {
-							ctx := removed_contexts[i]
-							t.push_smartcast(ctx.expr, ctx.variant, ctx.sumtype)
-						}
 
 						// Push smart cast context for transforming body (supports nested smartcasts)
 						t.push_smartcast(smartcast_expr, qualified_variant, sumtype_name)
@@ -4344,9 +4666,14 @@ fn (mut t Transformer) transform_if_expr(expr ast.IfExpr) ast.Expr {
 					op:  .eq
 					lhs: ast.SelectorExpr{
 						lhs: t.transform_expr(rhs)
-						rhs: ast.Ident{name: 'state'}
+						rhs: ast.Ident{
+							name: 'state'
+						}
 					}
-					rhs: ast.BasicLiteral{kind: .number, value: '0'}
+					rhs: ast.BasicLiteral{
+						kind:  .number
+						value: '0'
+					}
 				}
 
 				mut body_stmts := []ast.Stmt{}
@@ -4354,7 +4681,9 @@ fn (mut t Transformer) transform_if_expr(expr ast.IfExpr) ast.Expr {
 					// var := call().data - note: calls RHS again
 					data_access := ast.SelectorExpr{
 						lhs: t.transform_expr(rhs)
-						rhs: ast.Ident{name: 'data'}
+						rhs: ast.Ident{
+							name: 'data'
+						}
 					}
 					body_stmts << ast.AssignStmt{
 						op:  .decl_assign
@@ -4394,8 +4723,8 @@ fn (mut t Transformer) transform_if_expr(expr ast.IfExpr) ast.Expr {
 					// This is a map access - generate "key in map" check
 					cond_expr = ast.InfixExpr{
 						op:  .key_in
-						lhs: rhs.expr  // the key expression
-						rhs: rhs.lhs   // the map expression
+						lhs: rhs.expr // the key expression
+						rhs: rhs.lhs  // the map expression
 						pos: rhs.pos
 					}
 				}
@@ -4560,16 +4889,22 @@ fn (mut t Transformer) wrap_sumtype_value(value ast.Expr, sumtype_name string) ?
 		'f32', 'f64', 'bool', 'rune', 'byte', 'usize', 'isize'] {
 		// Primitive - use (void*)(intptr_t) cast to store value in pointer space
 		ast.Expr(ast.CastExpr{
-			typ:  ast.Ident{name: 'voidptr'}
+			typ:  ast.Ident{
+				name: 'voidptr'
+			}
 			expr: ast.CastExpr{
-				typ:  ast.Ident{name: 'intptr_t'}
+				typ:  ast.Ident{
+					name: 'intptr_t'
+				}
 				expr: transformed_value
 			}
 		})
 	} else {
 		// Struct or string - take address and cast to void*
 		ast.Expr(ast.CastExpr{
-			typ:  ast.Ident{name: 'voidptr'}
+			typ:  ast.Ident{
+				name: 'voidptr'
+			}
 			expr: ast.PrefixExpr{
 				op:   token.Token.amp
 				expr: transformed_value
@@ -4586,7 +4921,9 @@ fn (mut t Transformer) wrap_sumtype_value(value ast.Expr, sumtype_name string) ?
 		variant_name
 	}
 	return ast.InitExpr{
-		typ: ast.Ident{name: sumtype_name}
+		typ:    ast.Ident{
+			name: sumtype_name
+		}
 		fields: [
 			ast.FieldInit{
 				name:  '_tag'
@@ -4724,18 +5061,13 @@ fn (mut t Transformer) transform_infix_expr(expr ast.InfixExpr) ast.Expr {
 		}
 
 		// Also check for string InfixExpr (chained concatenation like s1 + s2 + s3)
-		lhs_is_str_infix := expr.lhs is ast.InfixExpr && (expr.lhs as ast.InfixExpr).op == .plus
-			&& lhs_is_str
-		rhs_is_str_infix := expr.rhs is ast.InfixExpr && (expr.rhs as ast.InfixExpr).op == .plus
-			&& rhs_is_str
+		lhs_is_str_infix := expr.lhs is ast.InfixExpr
+			&& (expr.lhs as ast.InfixExpr).op == .plus && lhs_is_str
+		rhs_is_str_infix := expr.rhs is ast.InfixExpr
+			&& (expr.rhs as ast.InfixExpr).op == .plus && rhs_is_str
 		// Determine if this is a string concatenation using multiple signals
-		should_transform := (lhs_is_str && rhs_is_str)
-			|| (lhs_is_str_literal && (rhs_is_str || expr.rhs is ast.Ident || rhs_is_str_call))
-			|| (rhs_is_str_literal && (lhs_is_str || expr.lhs is ast.Ident || lhs_is_str_call))
-			|| (lhs_is_str_call && (rhs_is_str || expr.rhs is ast.Ident))
-			|| (rhs_is_str_call && (lhs_is_str || expr.lhs is ast.Ident))
-			|| (lhs_is_str_infix && expr.rhs is ast.Ident) // Chained: (s1 + s2) + ident
-			|| (rhs_is_str_infix && expr.lhs is ast.Ident) // Chained: ident + (s1 + s2)
+		should_transform := (lhs_is_str && rhs_is_str) || (lhs_is_str_literal && (rhs_is_str || expr.rhs is ast.Ident || rhs_is_str_call)) || (rhs_is_str_literal && (lhs_is_str || expr.lhs is ast.Ident || lhs_is_str_call)) || (lhs_is_str_call && (rhs_is_str || expr.rhs is ast.Ident)) || (rhs_is_str_call && (lhs_is_str || expr.lhs is ast.Ident)) || (lhs_is_str_infix && expr.rhs is ast.Ident) // Chained: (s1 + s2) + ident
+		 || (rhs_is_str_infix && expr.lhs is ast.Ident) // Chained: ident + (s1 + s2)
 
 		// Check for chained concatenation: (s1 + s2) + s3 -> string__plus_two(s1, s2, s3)
 		if expr.lhs is ast.InfixExpr && should_transform {
@@ -5059,10 +5391,13 @@ fn (mut t Transformer) transform_infix_expr(expr ast.InfixExpr) ast.Expr {
 		// the other is identified as string OR is an ident (could be loop variable)
 		// Also transform if both are Ident and at least one is known to be string
 		// (the other is likely also string in a comparison context)
+		// Also transform if one side is a SelectorExpr and the other is a string literal
+		// (field access compared with string literal is almost always string comparison)
 		both_are_ident := expr.lhs is ast.Ident && expr.rhs is ast.Ident
-		should_transform := (lhs_is_str && rhs_is_str)
-			|| (lhs_is_str_literal && (rhs_is_str || expr.rhs is ast.Ident))
-			|| (rhs_is_str_literal && (lhs_is_str || expr.lhs is ast.Ident))
+		should_transform := (lhs_is_str && rhs_is_str) || (lhs_is_str_literal && (rhs_is_str
+			|| expr.rhs is ast.Ident || expr.rhs is ast.SelectorExpr))
+			|| (rhs_is_str_literal && (lhs_is_str || expr.lhs is ast.Ident
+			|| expr.lhs is ast.SelectorExpr))
 			|| (both_are_ident && (lhs_is_str || rhs_is_str))
 		if should_transform {
 			// Transform string comparisons to function calls
@@ -5235,7 +5570,7 @@ fn (mut t Transformer) transform_call_expr(expr ast.CallExpr) ast.Expr {
 					args << t.transform_expr(arg)
 				}
 				return ast.CallExpr{
-					lhs: ast.SelectorExpr{
+					lhs:  ast.SelectorExpr{
 						lhs: casted_receiver
 						rhs: sel.rhs
 						pos: sel.pos
@@ -5329,7 +5664,7 @@ fn (mut t Transformer) transform_call_or_cast_expr(expr ast.CallOrCastExpr) ast.
 				// Transform receiver with smart cast and keep the method call structure
 				casted_receiver := t.apply_smartcast_receiver_ctx(sel.lhs, ctx)
 				return ast.CallOrCastExpr{
-					lhs: ast.SelectorExpr{
+					lhs:  ast.SelectorExpr{
 						lhs: casted_receiver
 						rhs: sel.rhs
 						pos: sel.pos
@@ -5344,7 +5679,7 @@ fn (mut t Transformer) transform_call_or_cast_expr(expr ast.CallOrCastExpr) ast.
 		if t.is_interface_receiver(sel.lhs) {
 			// Transform interface method call to vtable dispatch
 			return ast.CallExpr{
-				lhs: expr.lhs // Keep the selector: iface.method
+				lhs:  expr.lhs // Keep the selector: iface.method
 				args: [
 					ast.Expr(ast.SelectorExpr{
 						lhs: sel.lhs
@@ -5354,7 +5689,7 @@ fn (mut t Transformer) transform_call_or_cast_expr(expr ast.CallOrCastExpr) ast.
 					}),
 					t.transform_expr(expr.expr),
 				]
-				pos: expr.pos
+				pos:  expr.pos
 			}
 		}
 	}
@@ -5846,12 +6181,21 @@ fn (t &Transformer) get_expr_type(expr ast.Expr) ?types.Type {
 			if obj := scope.lookup_parent('string', 0) {
 				obj.typ()
 			} else {
-				types.Type(types.Primitive{size: 64, props: .integer})
+				types.Type(types.Primitive{
+					size:  64
+					props: .integer
+				})
 			}
 		} else {
-			types.Type(types.Primitive{size: 64, props: .integer})
+			types.Type(types.Primitive{
+				size:  64
+				props: .integer
+			})
 		}
-		int_type := types.Type(types.Primitive{size: 64, props: .integer})
+		int_type := types.Type(types.Primitive{
+			size:  64
+			props: .integer
+		})
 
 		// Check if map has explicit type
 		match expr.typ {
@@ -6701,7 +7045,8 @@ fn (t &Transformer) type_to_c_name_resolve_alias(typ types.Type) string {
 		base := typ.base_type
 		// If base is a primitive int type, use that
 		base_name := t.type_to_c_name(base)
-		if base_name in ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'bool', 'f32', 'f64', 'rune'] {
+		if base_name in ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'bool', 'f32',
+			'f64', 'rune'] {
 			return base_name
 		}
 		// Otherwise keep the alias name
@@ -7930,7 +8275,7 @@ fn (t &Transformer) generate_array_str_fn(fn_name string, elem_type string) ast.
 	// if i > 0 { strings__Builder__write_string(&sb, ", ") }
 	for_body << ast.ExprStmt{
 		expr: ast.IfExpr{
-			cond: ast.InfixExpr{
+			cond:  ast.InfixExpr{
 				op:  .gt
 				lhs: ast.Ident{
 					name: 'i'

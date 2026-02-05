@@ -707,6 +707,73 @@ fn (h &TypeHolder) lookup_enum(name string) ?EnumType {
 	return none
 }
 
+// Sum type for testing else-if chain smartcast
+type InnerExpr = int | string | Point
+
+struct OuterExpr {
+	lhs InnerExpr
+}
+
+struct CallWrapper {
+	expr OuterExpr
+}
+
+// Test: else-if chain with nested smartcast
+// This tests the fix for: when we have if x is A && cond1 { } else if x is A && cond2 { } else if x is B { }
+// The smartcast for x -> A should NOT leak into the else if x is B branch
+fn test_elseif_chain_smartcast(wrapper CallWrapper) int {
+	outer := wrapper.expr
+	// This pattern matches cleanc.v:2013-2042
+	// The issue was that smartcast from earlier branches leaked into later else-if branches
+	if outer.lhs is int && outer.lhs == 10 {
+		// Smartcast: outer.lhs -> int
+		return outer.lhs + 1
+	} else if outer.lhs is int && outer.lhs == 20 {
+		// Smartcast: outer.lhs -> int (different branch)
+		return outer.lhs + 2
+	} else if outer.lhs is string {
+		// Smartcast: outer.lhs -> string
+		// This was failing because outer.lhs was incorrectly treated as int
+		return outer.lhs.len
+	} else if outer.lhs is Point {
+		// Smartcast: outer.lhs -> Point
+		return outer.lhs.x + outer.lhs.y
+	}
+	return 0
+}
+
+// Test: DFS with mut map parameter - tests map access with pointer type (Map_int_bool*)
+fn dfs_mark_visited(mut visited map[int]bool, node int, succs []int) int {
+	visited[node] = true
+	mut count := 1
+	for s in succs {
+		if !visited[s] {
+			count = count + dfs_mark_visited(mut visited, s, succs)
+		}
+	}
+	return count
+}
+
+// Test: If-guard expression type inference - tests that if-expression result type is correctly inferred as string
+fn resolve_type_alias(type_alias_bases map[string]string, struct_type_name string) string {
+	mangled_type := if base_type := type_alias_bases[struct_type_name] {
+		base_type
+	} else {
+		struct_type_name
+	}
+	return mangled_type
+}
+
+// Test 80: String match return - converts operator symbols to names
+fn operator_to_name(op string) string {
+	return match op {
+		'+' { '__plus' }
+		'-' { '__minus' }
+		'*' { '__mul' }
+		'/' { '__div' }
+		else { op }
+	}
+}
 
 // ===================== MAIN TEST FUNCTION =====================
 
@@ -2524,6 +2591,26 @@ fn main() {
 	fixed_inner := [1, 2, 3]
 	print_int(fixed_outer[0] + fixed_inner[2]) // 103
 
+	// 41.6 Fixed array with ! literal syntax (explicit fixed size)
+	fixed_literal := [1, 2, 3, 4, 5]!
+	print_int(fixed_literal[0]) // 1
+	print_int(fixed_literal[4]) // 5
+
+	// 41.7 Fixed array .len access
+	print_int(fixed_literal.len) // 5
+
+	// 41.8 Fixed array iteration with ! syntax
+	mut fixed_literal_sum := 0
+	for elem in fixed_literal {
+		fixed_literal_sum += elem
+	}
+	print_int(fixed_literal_sum) // 15
+
+	// 41.9 Fixed array of u8 with ! syntax
+	bytes := [u8(65), 66, 67]!
+	print_int(bytes[0]) // 65 (ASCII 'A')
+	print_int(bytes.len) // 3
+
 	// ==================== 42. INTERFACE IMPLEMENTATION ====================
 	print_str('--- 42. Interface Implementation ---')
 
@@ -3128,6 +3215,21 @@ fn main() {
 	print_int(hm5['d']) // 4
 	print_int(hm5.len) // 4
 
+	// 54.7 Map clone
+	print_str('map clone:')
+	mut hm6 := {
+		'x': 100
+		'y': 200
+	}
+	hm7 := hm6.clone()
+	print_int(hm7['x']) // 100
+	print_int(hm7['y']) // 200
+	print_int(hm7.len) // 2
+	// Verify clone is independent
+	hm6['x'] = 999
+	print_int(hm6['x']) // 999 (modified original)
+	print_int(hm7['x']) // 100 (clone unchanged)
+
 	// ==================== 55. MULTI-RETURN ====================
 	print_str('--- 55. Multi-return ---')
 
@@ -3274,12 +3376,12 @@ fn main() {
 	// Clone via nested selector (wrapper.holder.data.clone())
 	mut cloned_arr := wrap.holder.data.clone()
 	print_int(cloned_arr.len) // 3
-	print_int(cloned_arr[0])  // 10
-	print_int(cloned_arr[2])  // 30
+	print_int(cloned_arr[0]) // 10
+	print_int(cloned_arr[2]) // 30
 
 	// Verify clone is independent - modify cloned array
 	cloned_arr[0] = 99
-	print_int(cloned_arr[0])       // 99 (modified)
+	print_int(cloned_arr[0]) // 99 (modified)
 	print_int(wrap.holder.data[0]) // 10 (original unchanged)
 
 	// 60. Map indexing with push (map[key] << value)
@@ -3291,11 +3393,11 @@ fn main() {
 	pl.labels[5] << 100 // First push to key 5 - creates new array
 	pl.labels[5] << 200 // Second push to same key
 	pl.labels[10] << 50 // Push to different key
-	print_int(pl.labels[5].len)  // 2
-	print_int(pl.labels[5][0])   // 100
-	print_int(pl.labels[5][1])   // 200
+	print_int(pl.labels[5].len) // 2
+	print_int(pl.labels[5][0]) // 100
+	print_int(pl.labels[5][1]) // 200
 	print_int(pl.labels[10].len) // 1
-	print_int(pl.labels[10][0])  // 50
+	print_int(pl.labels[10][0]) // 50
 
 	// ==================== 61. MUTABLE SLICE ARGUMENTS ====================
 	print_str('--- 61. Mutable slice arguments ---')
@@ -3371,7 +3473,10 @@ fn main() {
 	// if obj := container.method() { ... } - method returning optional
 
 	// 63.1 Method returning optional - found case
-	dc := DataContainer{value: 42, name: 'test'}
+	dc := DataContainer{
+		value: 42
+		name:  'test'
+	}
 	if val := dc.lookup('test') {
 		print_int(val) // 42
 	}
@@ -3384,7 +3489,10 @@ fn main() {
 	}
 
 	// 63.3 Nested method call with if-guard
-	dc2 := DataContainer{value: 777, name: 'found'}
+	dc2 := DataContainer{
+		value: 777
+		name:  'found'
+	}
 	mut result63 := 0
 	if v := dc2.lookup('found') {
 		result63 = v
@@ -3399,8 +3507,14 @@ fn main() {
 
 	// 64.1 Setup type_holder with struct and enum types
 	type_holder := TypeHolder{
-		struct_type: StructType{name: 'Point', fields: 2}
-		enum_type:   EnumType{name: 'Color', variants: 3}
+		struct_type: StructType{
+			name:   'Point'
+			fields: 2
+		}
+		enum_type:   EnumType{
+			name:     'Color'
+			variants: 3
+		}
 	}
 
 	// 64.2 lookup_struct - found case (asking for 'struct' returns the struct type)
@@ -3447,9 +3561,18 @@ fn main() {
 
 	// 65.1 Create map with pointer values
 	mut intervals := map[int]&Point{}
-	intervals[1] = &Point{x: 10, y: 100}
-	intervals[2] = &Point{x: 20, y: 200}
-	intervals[3] = &Point{x: 30, y: 300}
+	intervals[1] = &Point{
+		x: 10
+		y: 100
+	}
+	intervals[2] = &Point{
+		x: 20
+		y: 200
+	}
+	intervals[3] = &Point{
+		x: 30
+		y: 300
+	}
 
 	// 65.2 Iterate over map and collect pointer values
 	mut sum_x := 0
@@ -3539,7 +3662,10 @@ fn main() {
 	}
 
 	// 68.2 Basic is-check with Point variant
-	num2 := Number(Point{x: 10, y: 20})
+	num2 := Number(Point{
+		x: 10
+		y: 20
+	})
 	if num2 is Point {
 		print_int(num2.x) // 10 (smartcasted to Point, access field)
 		print_int(num2.y) // 20
@@ -3556,7 +3682,10 @@ fn main() {
 	}
 
 	// 68.4 Negative is-check - Point is not int
-	num4 := Number(Point{x: 5, y: 6})
+	num4 := Number(Point{
+		x: 5
+		y: 6
+	})
 	if num4 is int {
 		print_int(num4)
 	} else {
@@ -3564,7 +3693,10 @@ fn main() {
 	}
 
 	// 68.5 Smartcast with computation
-	num5 := Number(Point{x: 3, y: 4})
+	num5 := Number(Point{
+		x: 3
+		y: 4
+	})
 	if num5 is Point {
 		sum := num5.x + num5.y
 		print_int(sum) // 7
@@ -3573,7 +3705,10 @@ fn main() {
 	// 68.6 Compound is-check with && and field access
 	// Tests: if x is Type && x.field == value { ... }
 	// This requires smartcast to be applied in compound conditions
-	num6 := Number(Point{x: 42, y: 100})
+	num6 := Number(Point{
+		x: 42
+		y: 100
+	})
 	if num6 is Point && num6.x == 42 {
 		print_int(num6.y) // 100 (smartcast applied in compound &&)
 	} else {
@@ -3581,7 +3716,10 @@ fn main() {
 	}
 
 	// 68.7 Compound is-check that fails the field check
-	num7 := Number(Point{x: 10, y: 20})
+	num7 := Number(Point{
+		x: 10
+		y: 20
+	})
 	if num7 is Point && num7.x == 999 {
 		print_int(-1) // Should not reach here
 	} else {
@@ -3651,7 +3789,10 @@ fn main() {
 	}
 
 	// 70.2 Match on Point variant with field access
-	num70b := Number(Point{x: 7, y: 8})
+	num70b := Number(Point{
+		x: 7
+		y: 8
+	})
 	match num70b {
 		int {
 			print_int(-1)
@@ -3663,7 +3804,10 @@ fn main() {
 	}
 
 	// 70.3 Match with computation on Point variant
-	num70c := Number(Point{x: 5, y: 5})
+	num70c := Number(Point{
+		x: 5
+		y: 5
+	})
 	match num70c {
 		int {
 			print_int(num70c + 1)
@@ -3687,7 +3831,10 @@ fn main() {
 	print_int(result70) // 198
 
 	// 70.5 Match on Point with result assignment
-	num70e := Number(Point{x: 3, y: 4})
+	num70e := Number(Point{
+		x: 3
+		y: 4
+	})
 	result70e := match num70e {
 		int {
 			-1
@@ -3723,7 +3870,10 @@ fn main() {
 	}
 
 	// 71.2 Nested smartcast: match outer, if-is inner (Point variant)
-	nested2 := NestedOuter(Number(Point{x: 7, y: 8}))
+	nested2 := NestedOuter(Number(Point{
+		x: 7
+		y: 8
+	}))
 	match nested2 {
 		Number {
 			// nested2 is smartcasted to Number
@@ -3755,7 +3905,10 @@ fn main() {
 	}
 
 	// 71.4 Nested smartcast with computation
-	nested4 := NestedOuter(Number(Point{x: 5, y: 6}))
+	nested4 := NestedOuter(Number(Point{
+		x: 5
+		y: 6
+	}))
 	match nested4 {
 		Number {
 			if nested4 is Point {
@@ -3883,7 +4036,10 @@ fn main() {
 	users76[3] = true
 	for user_id, _ in users76 {
 		if user_id > 1 {
-			errors76 << Error76{msg: 'user', val_id: user_id}
+			errors76 << Error76{
+				msg:    'user'
+				val_id: user_id
+			}
 		}
 	}
 	print_int(errors76.len) // 2 - two errors added
@@ -3915,7 +4071,10 @@ fn main() {
 		else {}
 	}
 
-	num77b := Number(Point{x: 10, y: 20})
+	num77b := Number(Point{
+		x: 10
+		y: 20
+	})
 	match num77b {
 		Point {
 			// num77b is smartcast to Point here, but process_number expects Number
@@ -3932,6 +4091,77 @@ fn main() {
 		result77c := process_number(num77c)
 		print_int(result77c) // 100
 	}
+
+	// ==================== 78. MAP ACCESS WITH MUT PARAMETER ====================
+	print_str('--- 78. Map access with mut parameter ---')
+
+	// Test map access where map is passed as mut parameter (pointer type Map_int_bool*)
+	// This tests the fix for: !visited[s] where visited is mut map[int]bool
+	mut visited78 := map[int]bool{}
+	succs78 := [1, 2]
+	count78 := dfs_mark_visited(mut visited78, 0, succs78)
+	print_int(count78) // 3 - visited nodes 0, 1, 2
+
+	// Test that the map was actually modified
+	if visited78[0] {
+		print_int(1) // 1 - node 0 was marked
+	} else {
+		print_int(0)
+	}
+
+	// Test if-guard expression type inference
+	// This tests the fix for: mangled_type := if base_type := map[key] { base_type } else { default }
+	// where mangled_type should be inferred as string, not int
+	mut aliases78 := map[string]string{}
+	aliases78['Foo'] = 'Bar'
+
+	result78a := resolve_type_alias(aliases78, 'Foo')
+	print_str(result78a) // Bar (found in map)
+
+	result78b := resolve_type_alias(aliases78, 'Baz')
+	print_str(result78b) // Baz (not found, returns default)
+
+	// Test 79: else-if chain smartcast
+	// Tests that smartcast from earlier branches doesn't leak into later else-if branches
+	print_str('Test 79: else-if chain smartcast')
+	wrapper79a := CallWrapper{
+		expr: OuterExpr{
+			lhs: InnerExpr(10)
+		}
+	}
+	print_int(test_elseif_chain_smartcast(wrapper79a)) // 11 (10 + 1)
+
+	wrapper79b := CallWrapper{
+		expr: OuterExpr{
+			lhs: InnerExpr(20)
+		}
+	}
+	print_int(test_elseif_chain_smartcast(wrapper79b)) // 22 (20 + 2)
+
+	wrapper79c := CallWrapper{
+		expr: OuterExpr{
+			lhs: InnerExpr('hello')
+		}
+	}
+	print_int(test_elseif_chain_smartcast(wrapper79c)) // 5 (len of 'hello')
+
+	wrapper79d := CallWrapper{
+		expr: OuterExpr{
+			lhs: InnerExpr(Point{
+				x: 3
+				y: 4
+			})
+		}
+	}
+	print_int(test_elseif_chain_smartcast(wrapper79d)) // 7 (3 + 4)
+
+	// ==================== 80. STRING MATCH RETURN ====================
+	// Tests match expression with string conditions that returns a value
+	print_str('--- Test 80: String match return ---')
+	print_str(operator_to_name('+')) // __plus
+	print_str(operator_to_name('-')) // __minus
+	print_str(operator_to_name('*')) // __mul
+	print_str(operator_to_name('?')) // ? (unknown operator)
 
 	print_str('=== All tests completed ===')
 }

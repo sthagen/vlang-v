@@ -81,13 +81,13 @@ mut:
 	cur_sumtype_match_type         string                // Sum type name (e.g., "ast__Expr")
 	cur_sumtype_match_selector_lhs string                // For SelectorExpr: LHS ident (e.g., "se" for se.lhs)
 	cur_sumtype_match_selector_rhs string                // For SelectorExpr: RHS field (e.g., "lhs" for se.lhs)
-	cur_lambda_elem_type           string                      // Element type for lambda `it` variable in filter/map/any
+	cur_lambda_elem_type           string                // Element type for lambda `it` variable in filter/map/any
 	// For -printfn support
-	last_fn_c_name              string                      // Current function's C name for -printfn
-	fn_start_pos                int                         // Start position of current function in output buffer
-	collected_map_types         map[string]MapTypeInfo      // Collected map types from AST traversal
-	collected_array_types       map[string]bool             // Collected array types from AST traversal (e.g., "Array_int")
-	collected_fixed_array_types map[string]FixedArrayInfo   // Fixed array types with element type and size
+	last_fn_c_name              string                    // Current function's C name for -printfn
+	fn_start_pos                int                       // Start position of current function in output buffer
+	collected_map_types         map[string]MapTypeInfo    // Collected map types from AST traversal
+	collected_array_types       map[string]bool           // Collected array types from AST traversal (e.g., "Array_int")
+	collected_fixed_array_types map[string]FixedArrayInfo // Fixed array types with element type and size
 }
 
 pub fn Gen.new(files []ast.File) &Gen {
@@ -100,35 +100,35 @@ pub fn Gen.new_with_env(files []ast.File, env &types.Environment) &Gen {
 
 pub fn Gen.new_with_env_and_pref(files []ast.File, env &types.Environment, p &pref.Preferences) &Gen {
 	mut g := &Gen{
-		files:                 files
-		env:                   unsafe { env }
-		pref:                  unsafe { p }
-		sb:                    strings.new_builder(4096)
-		fn_types:              map[string]string{}
-		fn_ret_counts:         map[string]int{}
-		var_types:             map[string]string{}
-		mut_receivers:         map[string]bool{}
-		ref_receivers:         map[string]bool{}
-		enum_names:            map[string]bool{}
-		flag_enum_names:       map[string]bool{}
-		interface_names:       map[string]bool{}
-		interface_meths:       map[string][]string{}
-		interface_meth_params: map[string]map[string][]string{}
-		type_methods:          map[string][]string{}
-		struct_fields:         map[string]map[string]string{}
-		file_modules:          map[string]string{}
-		module_names:          map[string]bool{}
-		import_aliases:        map[string]string{}
-		module_types:          map[string]map[string]bool{}
-		params_structs:        map[string]bool{}
-		fn_params:             map[string][]string{}
-		fn_ptr_typedefs:       map[string]ast.FnType{}
-		fn_ptr_modules:        map[string]string{}
-		type_aliases:          map[string]string{}
-		type_ids:              map[string]int{}
-		next_type_id:          1 // Start from 1, 0 means "no type" or error
-		sum_type_names:        map[string]bool{}
-		sum_type_variants:     map[string][]string{}
+		files:                       files
+		env:                         unsafe { env }
+		pref:                        unsafe { p }
+		sb:                          strings.new_builder(4096)
+		fn_types:                    map[string]string{}
+		fn_ret_counts:               map[string]int{}
+		var_types:                   map[string]string{}
+		mut_receivers:               map[string]bool{}
+		ref_receivers:               map[string]bool{}
+		enum_names:                  map[string]bool{}
+		flag_enum_names:             map[string]bool{}
+		interface_names:             map[string]bool{}
+		interface_meths:             map[string][]string{}
+		interface_meth_params:       map[string]map[string][]string{}
+		type_methods:                map[string][]string{}
+		struct_fields:               map[string]map[string]string{}
+		file_modules:                map[string]string{}
+		module_names:                map[string]bool{}
+		import_aliases:              map[string]string{}
+		module_types:                map[string]map[string]bool{}
+		params_structs:              map[string]bool{}
+		fn_params:                   map[string][]string{}
+		fn_ptr_typedefs:             map[string]ast.FnType{}
+		fn_ptr_modules:              map[string]string{}
+		type_aliases:                map[string]string{}
+		type_ids:                    map[string]int{}
+		next_type_id:                1 // Start from 1, 0 means "no type" or error
+		sum_type_names:              map[string]bool{}
+		sum_type_variants:           map[string][]string{}
 		collected_map_types:         map[string]MapTypeInfo{}
 		collected_array_types:       map[string]bool{}
 		collected_fixed_array_types: map[string]FixedArrayInfo{}
@@ -908,8 +908,11 @@ pub fn (mut g Gen) gen() string {
 	}
 	g.sb.writeln('')
 
-	// Fixed array type aliases (e.g., typedef u8 Array_fixed_u8_2 [2];)
-	g.sb.writeln('// Fixed array type aliases')
+	// Fixed array type aliases - primitive types only (e.g., typedef u8 Array_fixed_u8_2 [2];)
+	// Non-primitive types (string, custom types) are deferred until after struct/type definitions
+	primitive_c_types := ['u8', 'i8', 'u16', 'i16', 'u32', 'i32', 'u64', 'i64', 'int', 'f32', 'f64',
+		'bool', 'char', 'voidptr', 'byte']
+	g.sb.writeln('// Fixed array type aliases (primitive types)')
 	for fixed_array_name, info in g.collected_fixed_array_types {
 		// Map V types to C types
 		c_elem_type := match info.elem_type {
@@ -925,10 +928,14 @@ pub fn (mut g Gen) gen() string {
 			'f32' { 'f32' }
 			'f64' { 'f64' }
 			'bool' { 'bool' }
-			'string' { 'string' }
+			'char' { 'char' }
+			'voidptr' { 'voidptr' }
 			else { info.elem_type }
 		}
-		g.sb.writeln('typedef ${c_elem_type} ${fixed_array_name} [${info.size}];')
+		// Only emit primitive types here - non-primitive types need full definitions first
+		if c_elem_type in primitive_c_types {
+			g.sb.writeln('typedef ${c_elem_type} ${fixed_array_name} [${info.size}];')
+		}
 	}
 	g.sb.writeln('')
 
@@ -1236,6 +1243,33 @@ pub fn (mut g Gen) gen() string {
 		}
 	}
 
+	// Fixed array type aliases for non-primitive types (now that structs and type aliases are defined)
+	g.sb.writeln('// Fixed array type aliases (non-primitive types)')
+	for fixed_array_name, info in g.collected_fixed_array_types {
+		c_elem_type := match info.elem_type {
+			'u8', 'byte' { 'u8' }
+			'i8' { 'i8' }
+			'u16' { 'u16' }
+			'i16' { 'i16' }
+			'u32' { 'u32' }
+			'i32' { 'i32' }
+			'u64' { 'u64' }
+			'i64' { 'i64' }
+			'int' { 'int' }
+			'f32' { 'f32' }
+			'f64' { 'f64' }
+			'bool' { 'bool' }
+			'char' { 'char' }
+			'voidptr' { 'voidptr' }
+			else { info.elem_type }
+		}
+		// Only emit non-primitive types here (primitive ones were emitted earlier)
+		if c_elem_type !in primitive_c_types {
+			g.sb.writeln('typedef ${c_elem_type} ${fixed_array_name} [${info.size}];')
+		}
+	}
+	g.sb.writeln('')
+
 	// 3. Globals
 	for file in g.files {
 		for stmt in file.stmts {
@@ -1415,6 +1449,7 @@ pub fn (mut g Gen) gen() string {
 	g.sb.writeln('void* map__get_check(map* m, void* key);')
 	g.sb.writeln('void map__delete(map* m, void* key);')
 	g.sb.writeln('void map__clear(map* m);')
+	g.sb.writeln('map map__clone(map* m);')
 	// builtin__map_get_and_set - get value from map, setting default if not present
 	g.sb.writeln('static inline void* builtin__map_get_and_set(map* m, void* key, void* zero) { return map__get_and_set(m, key, zero); }')
 	g.sb.writeln('static inline void* builtin__map_get_check(map* m, void* key) { return map__get_check(m, key); }')
@@ -1458,9 +1493,23 @@ pub fn (mut g Gen) gen() string {
 		// Generate actual wrappers that call V runtime
 		default_val := g.get_c_default_value(info.value_c_type)
 		g.sb.writeln('static inline ${map_type_name} __new_${map_type_name}() { return new_map(sizeof(${info.key_c_type}), sizeof(${info.value_c_type}), ${hash_fn}, ${eq_fn}, ${clone_fn}, ${free_fn}); }')
-		g.sb.writeln('static inline ${info.value_c_type} __${map_type_name}_get(${map_type_name}* m, ${info.key_c_type} key) { ${info.value_c_type} _zero = ${default_val}; return *(${info.value_c_type}*)map__get((map*)m, &key, &_zero); }')
+		// Skip by-value get function for fixed arrays - C functions can't return arrays by value
+		// Use get_check (returns pointer) instead for fixed array value types
+		if !info.value_c_type.starts_with('Array_fixed_') {
+			g.sb.writeln('static inline ${info.value_c_type} __${map_type_name}_get(${map_type_name}* m, ${info.key_c_type} key) { ${info.value_c_type} _zero = ${default_val}; return *(${info.value_c_type}*)map__get((map*)m, &key, &_zero); }')
+		}
 		g.sb.writeln('static inline ${info.value_c_type}* __${map_type_name}_get_check(${map_type_name}* m, ${info.key_c_type} key) { return (${info.value_c_type}*)map__get_check((map*)m, &key); }')
-		g.sb.writeln('static inline void __${map_type_name}_set(${map_type_name}* m, ${info.key_c_type} key, ${info.value_c_type} val) { map__set((map*)m, &key, &val); }')
+		// For fixed arrays, use a pointer parameter since C can't pass arrays by value
+		if info.value_c_type.starts_with('Array_fixed_') {
+			// Parse fixed array size from type name: Array_fixed_int_2 -> 2
+			parts := info.value_c_type.split('_')
+			arr_size := if parts.len >= 4 { parts[parts.len - 1] } else { '1' }
+			elem_type := if parts.len >= 4 { parts[2] } else { 'int' }
+			// Generate: void __Map_K_V_set(Map* m, K key, const V val) { V* ptr = map__get_or_insert(m, &key); memcpy(ptr, val, sizeof(V)); }
+			g.sb.writeln('static inline void __${map_type_name}_set(${map_type_name}* m, ${info.key_c_type} key, const ${elem_type} val[${arr_size}]) { ${elem_type}* ptr = (${elem_type}*)map__get_and_set((map*)m, &key, &(${elem_type}[${arr_size}]){0}); memcpy(ptr, val, sizeof(${elem_type}) * ${arr_size}); }')
+		} else {
+			g.sb.writeln('static inline void __${map_type_name}_set(${map_type_name}* m, ${info.key_c_type} key, ${info.value_c_type} val) { map__set((map*)m, &key, &val); }')
+		}
 	}
 	// bits module tables - as V array structs for .data access
 	g.sb.writeln('static u8 _bits__ntz_8_tab_data[] = {0,1,2,0,3,0,0,0,4,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8};')
@@ -1698,7 +1747,7 @@ fn (mut g Gen) expr_type_to_c(e ast.Expr) string {
 			if name.starts_with('[]') {
 				elem_type := name[2..]
 				// Recursively convert the element type
-				elem_c := g.expr_type_to_c(ast.Ident{name: elem_type})
+				elem_c := g.expr_type_to_c(ast.Ident{ name: elem_type })
 				return 'Array_${sanitize_type_for_mangling(elem_c)}'
 			}
 			// Return the actual V type aliases (they are defined in the C preamble)
@@ -1842,10 +1891,18 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 		}
 		return 'int'
 	}
-	// For IfExpr, use environment type
+	// For IfExpr, use environment type or infer from branches
 	if node is ast.IfExpr {
 		if t := g.get_expr_type_from_env(node) {
 			return t
+		}
+		// Fallback: infer type from the last statement in branches
+		// This handles if-guard expressions like: x := if val := map[key] { val } else { default }
+		if node.stmts.len > 0 {
+			last_stmt := node.stmts[node.stmts.len - 1]
+			if last_stmt is ast.ExprStmt {
+				return g.infer_type(last_stmt.expr)
+			}
 		}
 		return 'int'
 	}
@@ -1892,6 +1949,19 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 				// node.typ is ArrayType{elem_type: T} for []T{} syntax
 				// Use get_field_type_for_inference which handles ArrayType properly
 				return g.get_field_type_for_inference(node.typ)
+			}
+			// Check for [a, b, c]! fixed array syntax
+			if node.len is ast.PostfixExpr {
+				postfix := node.len as ast.PostfixExpr
+				if postfix.op == .not && postfix.expr is ast.EmptyExpr {
+					// Fixed array - infer element type from first expression
+					// Include size in type for .len access: FixedArray_u8_29
+					if node.exprs.len > 0 {
+						elem_type := sanitize_type_for_mangling(g.infer_type(node.exprs[0]))
+						return 'FixedArray_${elem_type}_${node.exprs.len}'
+					}
+					return 'FixedArray_u8_0'
+				}
 			}
 			if node.exprs.len > 0 {
 				elem_type := sanitize_type_for_mangling(g.infer_type(node.exprs[0]))
@@ -1999,6 +2069,10 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 					if clean_type == 'array' && name in ['clone', 'reverse', 'sorted'] {
 						return 'array'
 					}
+					// Map methods that return the same map type
+					if clean_type.starts_with('Map_') && name == 'clone' {
+						return clean_type
+					}
 				} else {
 					// Check if this is a static method call on a local type: Type.method()
 					if node.lhs.lhs is ast.Ident {
@@ -2074,6 +2148,10 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 					if clean_type == 'array' && name in ['clone', 'reverse', 'sorted'] {
 						return 'array'
 					}
+					// Map methods that return the same map type
+					if clean_type.starts_with('Map_') && name == 'clone' {
+						return clean_type
+					}
 				}
 			}
 
@@ -2094,7 +2172,8 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 				if map_type.starts_with('Map_') {
 					rest := map_type['Map_'.len..] // K_V
 					// Use known key types to find the split point
-					key_types := ['int_', 'string_', 'i64_', 'u64_', 'bool_', 'u8_', 'i8_', 'i16_', 'u16_', 'i32_', 'u32_', 'rune_']
+					key_types := ['int_', 'string_', 'i64_', 'u64_', 'bool_', 'u8_', 'i8_', 'i16_',
+						'u16_', 'i32_', 'u32_', 'rune_']
 					for key_prefix in key_types {
 						if rest.starts_with(key_prefix) {
 							value_type := rest[key_prefix.len..] // e.g., types__Scopeptr
@@ -2294,6 +2373,10 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 					if clean_type == 'array' && name in ['clone', 'reverse', 'sorted'] {
 						return 'array'
 					}
+					// Map methods that return the same map type
+					if clean_type.starts_with('Map_') && name == 'clone' {
+						return clean_type
+					}
 				}
 				// For C functions/types, look up with C__ prefix
 				if is_c_fn {
@@ -2365,7 +2448,8 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 		}
 		ast.InfixExpr {
 			// Comparison, containment, and type-check operators return bool
-			if node.op in [.eq, .ne, .lt, .gt, .le, .ge, .key_in, .not_in, .and, .logical_or, .key_is, .not_is] {
+			if node.op in [.eq, .ne, .lt, .gt, .le, .ge, .key_in, .not_in, .and, .logical_or, .key_is,
+				.not_is] {
 				return 'bool'
 			}
 			return g.infer_type(node.lhs)
@@ -2402,7 +2486,8 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 					// Check both the temp __match_val and the original variable name (e.g., 'stmt')
 					if g.cur_sumtype_match_var != '__selector__'
 						&& (node.lhs.name == g.cur_sumtype_match_var
-						|| (g.cur_sumtype_match_orig != '' && node.lhs.name == g.cur_sumtype_match_orig)) {
+						|| (g.cur_sumtype_match_orig != ''
+						&& node.lhs.name == g.cur_sumtype_match_orig)) {
 						is_match = true
 					}
 					// Selector expression match (e.g., se.lhs in `if se.lhs is Type`)
@@ -2555,9 +2640,29 @@ fn (mut g Gen) infer_type(node ast.Expr) string {
 				return unsanitize_type_for_c(elem_type)
 			}
 			if base_type.starts_with('FixedArray_') {
-				// Old format FixedArray_string -> return string (for backwards compat)
-				// Unsanitize pointer types (e.g., Intervalptr -> Interval*)
-				return unsanitize_type_for_c(base_type['FixedArray_'.len..])
+				// Format: FixedArray_<elem_type>_<size> -> return elem_type
+				// e.g., FixedArray_string_11 -> string, FixedArray_u8_29 -> u8
+				rest := base_type['FixedArray_'.len..]
+				// Find the last underscore followed by a number (the size)
+				mut last_underscore := -1
+				for i := rest.len - 1; i >= 0; i-- {
+					if rest[i] == `_` {
+						suffix := rest[i + 1..]
+						mut all_digits := suffix.len > 0
+						for c in suffix {
+							if c < `0` || c > `9` {
+								all_digits = false
+								break
+							}
+						}
+						if all_digits {
+							last_underscore = i
+							break
+						}
+					}
+				}
+				elem_type := if last_underscore > 0 { rest[..last_underscore] } else { rest }
+				return unsanitize_type_for_c(elem_type)
 			}
 			if base_type.starts_with('Array_') {
 				// Unsanitize pointer types (e.g., Intervalptr -> Interval*)
@@ -2699,7 +2804,8 @@ fn operator_to_name(op string) string {
 fn (mut g Gen) get_fn_name(node ast.FnDecl) string {
 	// Skip C stdlib functions that would conflict (but only for standalone functions in builtin, not methods)
 	// Note: strconv.atoi is fine - it becomes strconv__atoi which doesn't conflict with C's atoi
-	if !node.is_method && node.name in c_stdlib_fns && (g.cur_module == '' || g.cur_module == 'main' || g.cur_module == 'builtin') {
+	if !node.is_method && node.name in c_stdlib_fns
+		&& (g.cur_module == '' || g.cur_module == 'main' || g.cur_module == 'builtin') {
 		return ''
 	}
 	// Convert operator names to valid C identifiers
@@ -2901,6 +3007,28 @@ fn (mut g Gen) get_fixed_array_info(typ ast.Expr) ?FixedArrayInfo {
 			}
 		}
 		else {}
+	}
+	return none
+}
+
+// get_fixed_array_info_from_init extracts fixed array info from an ArrayInitExpr
+// This handles both explicit [n]T{} syntax and [a,b,c]! literal syntax
+fn (mut g Gen) get_fixed_array_info_from_init(arr ast.ArrayInitExpr) ?FixedArrayInfo {
+	// First check if typ is explicitly set as ArrayFixedType
+	if info := g.get_fixed_array_info(arr.typ) {
+		return info
+	}
+	// Check for [a, b, c]! syntax - parser marks this with len: PostfixExpr{op: .not}
+	if arr.len is ast.PostfixExpr {
+		postfix := arr.len as ast.PostfixExpr
+		if postfix.op == .not && postfix.expr is ast.EmptyExpr {
+			// Infer element type from first expression
+			mut elem_type := 'u8' // default
+			if arr.exprs.len > 0 {
+				elem_type = g.infer_type(arr.exprs[0])
+			}
+			return FixedArrayInfo{elem_type, '${arr.exprs.len}'}
+		}
 	}
 	return none
 }
@@ -3318,14 +3446,16 @@ fn (g Gen) mangle_type_if_needed(type_name string) string {
 }
 
 // get_field_type_for_inference returns a type string suitable for type inference
-// For fixed-size arrays, returns FixedArray_<elem_type> so indexing can return elem_type
+// For fixed-size arrays, returns FixedArray_<elem_type>_<size> so indexing can return elem_type
+// and .len can return the compile-time size
 // For dynamic arrays, returns Array_<elem_type>
 fn (mut g Gen) get_field_type_for_inference(typ ast.Expr) string {
 	match typ {
 		ast.Type {
 			if typ is ast.ArrayFixedType {
 				elem_type := sanitize_type_for_mangling(g.expr_type_to_c(typ.elem_type))
-				return 'FixedArray_${elem_type}'
+				size_str := g.get_array_size_str(typ.len)
+				return 'FixedArray_${elem_type}_${size_str}'
 			}
 			if typ is ast.ArrayType {
 				elem_type := sanitize_type_for_mangling(g.expr_type_to_c(typ.elem_type))
@@ -3395,6 +3525,29 @@ fn (mut g Gen) gen_const_decl(node ast.ConstDecl, file_module string) {
 			g.sb.writeln('${t} ${mangled_name}; // runtime-initialized array constant')
 			g.global_var_types[mangled_name] = t
 			continue
+		}
+		// FixedArray_<elem>_<size> constants need proper C array declaration
+		if t.starts_with('FixedArray_') {
+			// Parse: FixedArray_<elem_type>_<size> -> elem_type name[size]
+			rest := t['FixedArray_'.len..]
+			parts := rest.split('_')
+			if parts.len >= 2 {
+				size := parts[parts.len - 1]
+				elem_type := parts[..parts.len - 1].join('_')
+				if mangled_name in hardcoded_arrays {
+					// Hardcoded arrays are declared as dynamic array structs in cleanc
+					// so we need to use Array_* type for proper indexing via .data
+					array_type := 'Array_${elem_type}'
+					g.global_var_types[mangled_name] = array_type
+					// Also update const_types to use the dynamic array type
+					g.const_types[mangled_name] = array_type
+					g.const_types[field.name] = array_type
+					continue
+				}
+				g.sb.writeln('${elem_type} ${mangled_name}[${size}]; // runtime-initialized constant')
+				g.global_var_types[mangled_name] = t
+				continue
+			}
 		}
 		// Track integer constant values for fixed-size arrays
 		if val := g.try_eval_int_const(field.value) {
@@ -3521,7 +3674,8 @@ fn (g Gen) is_simple_literal(e ast.Expr) bool {
 			// Allow arithmetic on literals/consts: degree - 1, 2 * degree - 1, 1 << n
 			if e.op in [.plus, .minus, .mul, .div, .mod, .left_shift, .right_shift, .amp, .pipe,
 				.xor] {
-				return g.is_simple_literal_or_const_ref(e.lhs) && g.is_simple_literal_or_const_ref(e.rhs)
+				return g.is_simple_literal_or_const_ref(e.lhs)
+					&& g.is_simple_literal_or_const_ref(e.rhs)
 			}
 			return false
 		}
@@ -4017,8 +4171,8 @@ fn (mut g Gen) gen_sumtype_wrap(sumtype_name string, variant_type string, expr a
 	short_variant := variant_type.all_after_last('__')
 	variant_field := '_${short_variant}'
 	g.sb.write_string('(${sumtype_name}){._tag = ${tag_value}, ._data.${variant_field} = ')
-	if variant_type in ['int', 'i64', 'i32', 'i16', 'i8', 'u64', 'u32', 'u16', 'u8',
-		'byte', 'rune', 'bool', 'f32', 'f64', 'usize', 'isize'] {
+	if variant_type in ['int', 'i64', 'i32', 'i16', 'i8', 'u64', 'u32', 'u16', 'u8', 'byte', 'rune',
+		'bool', 'f32', 'f64', 'usize', 'isize'] {
 		// Primitives: store value in pointer space via intptr_t cast
 		g.sb.write_string('(void*)(intptr_t)(')
 		g.gen_expr(expr)
@@ -4209,7 +4363,7 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl) {
 	// which require both match smartcast and nested if smartcast to work together.
 	// The transformer currently only handles one level of smartcast context.
 	// Exception: new, new_with_env can be generated correctly (new_with_env is just a wrapper)
-	if g.cur_module in ['cleanc', 'v', 'x64', 'transformer', 'types', 'parser', 'binary', 'sha256', 'term']
+	if g.cur_module in ['v', 'cleanc', 'x64', 'transformer', 'types', 'parser', 'binary', 'sha256', 'term']
 		&& node.name !in ['new', 'new_with_env'] {
 		g.gen_fn_head(node)
 		g.sb.writeln(' {')
@@ -4435,7 +4589,7 @@ fn (mut g Gen) gen_stmt(node ast.Stmt) {
 				g.var_types[name] = typ
 				// Handle fixed-size array declarations specially
 				if rhs is ast.ArrayInitExpr {
-					if arr_info := g.get_fixed_array_info(rhs.typ) {
+					if arr_info := g.get_fixed_array_info_from_init(rhs) {
 						// Generate C array declaration: int name[6] = {0}
 						g.sb.write_string('${arr_info.elem_type} ${name}[${arr_info.size}] = ')
 						g.gen_expr(rhs)
@@ -5328,7 +5482,8 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 					// Find the key type (common patterns: string_, int_, i64_, u64_, bool_)
 					mut key_type := ''
 					mut val_type := ''
-					key_patterns := ['string_', 'int_', 'i64_', 'u64_', 'bool_', 'u8_', 'i8_', 'i16_', 'u16_', 'i32_', 'u32_', 'rune_']
+					key_patterns := ['string_', 'int_', 'i64_', 'u64_', 'bool_', 'u8_', 'i8_',
+						'i16_', 'u16_', 'i32_', 'u32_', 'rune_']
 					for kp in key_patterns {
 						if rest.starts_with(kp) {
 							key_type = kp[..kp.len - 1] // Remove trailing _
@@ -5345,7 +5500,8 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 							'(${val_type}){0}'
 						} else if val_type == 'string' {
 							'(string){"", 0}'
-						} else if val_type in ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'bool', 'rune'] {
+						} else if val_type in ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32',
+							'u64', 'bool', 'rune'] {
 							'0'
 						} else {
 							'(${val_type}){0}'
@@ -5357,6 +5513,15 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 						g.sb.write_string('}, &(${val_type}[]){${default_val}}))')
 						return
 					}
+				}
+			}
+			// Handle &ident where ident is a mut parameter (already a pointer)
+			// In this case, skip the & since the parameter is already a pointer
+			if node.op == .amp && node.expr is ast.Ident {
+				if node.expr.name in g.mut_params {
+					// mut parameter is already a pointer, don't take its address
+					g.gen_expr(node.expr)
+					return
 				}
 			}
 			op := match node.op {
@@ -5901,16 +6066,20 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 					// Check if RHS is a map type
 					rhs_type := g.infer_type(node.rhs)
 					if rhs_type.starts_with('Map_') || rhs_type == 'map' {
-						// x in map => map__exists(&map, &key)
-						// x !in map => !map__exists(&map, &key)
+						// x in map => map__exists(&map, ADDR(key_type, key))
+						// x !in map => !map__exists(&map, ADDR(key_type, key))
 						if node.op == .not_in {
 							g.sb.write_string('!')
 						}
 						g.sb.write_string('map__exists(&')
 						g.gen_expr(node.rhs)
-						g.sb.write_string(', &')
+						g.sb.write_string(', ')
+						// Use ADDR macro for key to handle literals (can't take address of rvalue)
+						// Extra parens around expr needed for compound literals with commas
+						key_type := g.infer_type(node.lhs)
+						g.sb.write_string('ADDR(${key_type}, (')
 						g.gen_expr(node.lhs)
-						g.sb.write_string(')')
+						g.sb.write_string(')))')
 					} else if rhs_type.starts_with('Array_') {
 						// x in arr => array__contains_T(arr, x) (for arrays)
 						// x !in arr => !array__contains_T(arr, x)
@@ -6448,6 +6617,18 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 						g.sb.write_string(')')
 						return
 					}
+					if name == 'clone' {
+						// map.clone() -> map__clone(&m)
+						g.sb.write_string('map__clone(')
+						if receiver_is_ptr {
+							g.gen_expr(receiver_expr)
+						} else {
+							g.sb.write_string('&')
+							g.gen_expr(receiver_expr)
+						}
+						g.sb.write_string(')')
+						return
+					}
 				}
 
 				// Handle .type_name() method on sum types
@@ -6845,6 +7026,9 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 						// Only add & if the inner expression is not already a pointer (&expr)
 						if arg.expr is ast.PrefixExpr && arg.expr.op == .amp {
 							// Already has &, don't add another
+							g.gen_expr(arg.expr)
+						} else if arg.expr is ast.Ident && arg.expr.name in g.mut_params {
+							// Inner expression is a mut parameter (already a pointer), don't add &
 							g.gen_expr(arg.expr)
 						} else if arg.expr is ast.IndexExpr
 							&& (arg.expr as ast.IndexExpr).expr is ast.RangeExpr {
@@ -8022,6 +8206,17 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 				g.sb.write_string('.len')
 				return
 			}
+			// Handle fixed array .len access - return compile-time size constant
+			// Type format: FixedArray_<elem_type>_<size>
+			if lhs_type.starts_with('FixedArray_') && node.rhs.name == 'len' {
+				// Extract size from type name (e.g., FixedArray_u8_29 -> 29)
+				parts := lhs_type.split('_')
+				if parts.len >= 3 {
+					size := parts[parts.len - 1]
+					g.sb.write_string(size)
+					return
+				}
+			}
 			// Note: Sum type field access smartcasting is handled by the transformer.
 			// The transformer produces AST like: ((Type*)(t._data._Variant))->field
 			// We skip cleanc's smartcast handling to avoid double-smartcasting.
@@ -8059,25 +8254,33 @@ fn (mut g Gen) gen_expr(node ast.Expr) {
 			}
 			// Check if this is an array access (Array struct type)
 			lhs_type := g.infer_type(node.lhs)
-			if lhs_type.starts_with('Map_') {
+			// Handle pointer types (e.g., Map_int_bool* from mut parameters)
+			map_is_ptr := lhs_type.ends_with('*')
+			map_base_type := if map_is_ptr { lhs_type[..lhs_type.len - 1] } else { lhs_type }
+			if map_base_type.starts_with('Map_') {
 				// Map access: __<map_type>_get(&m, key)
 				// For nested map access (lhs is itself a map index), we need to use
 				// ADDR(map, inner_get) pattern because we can't take address of rvalue
 				is_nested_map := if node.lhs is ast.IndexExpr {
 					inner_lhs_type := g.infer_type(node.lhs.lhs)
+
 					inner_lhs_type.starts_with('Map_')
+						|| inner_lhs_type.trim_right('*').starts_with('Map_')
 				} else {
 					false
 				}
 				if is_nested_map {
 					// Generate: __Map_X_get(&((map[]){__Map_Y_get(&m, key)}[0]), inner_key)
-					g.sb.write_string('__${lhs_type}_get(&((map[]){')
+					g.sb.write_string('__${map_base_type}_get(&((map[]){')
 					g.gen_expr(node.lhs) // This generates __Map_Y_get(...)
 					g.sb.write_string('}[0]), ')
 					g.gen_expr(node.expr)
 					g.sb.write_string(')')
 				} else {
-					g.sb.write_string('__${lhs_type}_get(&')
+					g.sb.write_string('__${map_base_type}_get(')
+					if !map_is_ptr {
+						g.sb.write_string('&')
+					}
 					g.gen_expr(node.lhs)
 					g.sb.write_string(', ')
 					g.gen_expr(node.expr)
@@ -9911,11 +10114,20 @@ fn (mut g Gen) gen_return_match_expr(node ast.MatchExpr) {
 					if ci > 0 {
 						g.sb.write_string(' || ')
 					}
-					g.sb.write_string('(')
-					g.gen_expr(node.expr)
-					g.sb.write_string(' == ')
-					g.gen_expr(c)
-					g.sb.write_string(')')
+					if match_type == 'string' {
+						// String comparison: use string__eq function
+						g.sb.write_string('string__eq(')
+						g.gen_expr(node.expr)
+						g.sb.write_string(', ')
+						g.gen_expr(c)
+						g.sb.write_string(')')
+					} else {
+						g.sb.write_string('(')
+						g.gen_expr(node.expr)
+						g.sb.write_string(' == ')
+						g.gen_expr(c)
+						g.sb.write_string(')')
+					}
 				}
 				g.cur_match_type = saved_match_type
 			}
