@@ -545,6 +545,37 @@ fn flag_enum_check_int_args() int {
 	return simple_two_arg(3, 4) // Expected: 304
 }
 
+fn test_flag_enum_set_clear() {
+	mut p := Permissions.read
+	// .set() adds a flag
+	p.set(.write)
+	assert p.has(.read)
+	assert p.has(.write)
+	assert !p.has(.execute)
+	print_int(int(p)) // 3 (read=1 | write=2)
+
+	// .set() another flag
+	p.set(.execute)
+	assert p.has(.execute)
+	assert p.all(Permissions.read | Permissions.write | Permissions.execute)
+	print_int(int(p)) // 7 (1|2|4)
+
+	// .clear() removes a flag
+	p.clear(.write)
+	assert p.has(.read)
+	assert !p.has(.write)
+	assert p.has(.execute)
+	print_int(int(p)) // 5 (read=1 | execute=4)
+
+	// .clear() then .set() same flag
+	p.clear(.read)
+	p.set(.write)
+	assert !p.has(.read)
+	assert p.has(.write)
+	assert p.has(.execute)
+	print_int(int(p)) // 6 (write=2 | execute=4)
+}
+
 // ===================== IF-GUARD HELPERS =====================
 
 // Returns the value if positive, none otherwise
@@ -1266,6 +1297,326 @@ fn test_map_or_array_value() {
 	// giving Array_types__Fn** instead of Array_types__Fnptr*
 
 	print_str('map or-block array value type: ok')
+}
+
+fn test_interface_fn_pointer_dispatch() {
+	// Interface method calls are lowered by the transformer into fn-pointer
+	// field calls: iface.method(iface._object, args...).
+	// cleanc handles these through the generic fn-pointer call path.
+
+	// 93.1 Drawable interface - zero-arg method
+	pt1 := Point{
+		x: 8
+		y: 2
+	}
+	d1 := Drawable(pt1)
+	print_int(d1.draw()) // 8*1000 + 2 = 8002
+
+	// 93.2 Calculator interface - multi-arg method
+	pt2 := Point{
+		x: 10
+		y: 5
+	}
+	calc := Calculator(pt2)
+	print_int(calc.add(3, 7)) // 10 + 5 + 3 + 7 = 25
+	print_int(calc.multiply(4)) // (10 + 5) * 4 = 60
+
+	// 93.3 Shape interface - multiple methods
+	rect := Rectangle{
+		width:  6
+		height: 4
+		origin: Point{
+			x: 0
+			y: 0
+		}
+	}
+	shape := Shape(rect)
+	print_int(shape.area()) // 6 * 4 = 24
+	print_int(shape.perimeter()) // 2 * (6 + 4) = 20
+
+	// 93.4 Sum of interface method results
+	pt3 := Point{
+		x: 3
+		y: 7
+	}
+	d2 := Drawable(pt3)
+	pt4 := Point{
+		x: 1
+		y: 9
+	}
+	d3 := Drawable(pt4)
+	print_int(d2.draw() + d3.draw()) // 3007 + 1009 = 4016
+}
+
+fn test_sumtype_type_name() {
+	// Test .type_name() on sumtype with struct variants
+	s1 := Stmt89(AssignStmt89{
+		value: 42
+	})
+	assert s1.type_name() == 'AssignStmt89'
+
+	s2 := Stmt89(ExprStmt89{
+		value: 7
+	})
+	assert s2.type_name() == 'ExprStmt89'
+
+	s3 := Stmt89(BlockStmt89{
+		stmts: []
+	})
+	assert s3.type_name() == 'BlockStmt89'
+
+	// Test .type_name() on sumtype with primitive variants
+	v1 := InnerSumType(123)
+	assert v1.type_name() == 'int'
+
+	v2 := InnerSumType('hello')
+	assert v2.type_name() == 'string'
+
+	// Test .type_name() on nested sumtype
+	v3 := OuterSumType(true)
+	assert v3.type_name() == 'bool'
+
+	print_str('sumtype type_name: ok')
+}
+
+// ==== Test 95: Method call resolution ====
+// Tests that the transformer correctly resolves receiver.method(args) -> Type__method(receiver, args)
+
+struct Counter95 {
+mut:
+	value int
+}
+
+fn (c &Counter95) get() int {
+	return c.value
+}
+
+fn (mut c Counter95) add(n int) {
+	c.value += n
+}
+
+fn (c &Counter95) sum_with(other &Counter95) int {
+	return c.value + other.value
+}
+
+fn test_method_call_resolution() {
+	// 95.1 Struct method call (immutable receiver)
+	c1 := Counter95{
+		value: 42
+	}
+	assert c1.get() == 42
+
+	// 95.2 Struct method call (mutable receiver)
+	mut c2 := Counter95{
+		value: 10
+	}
+	c2.add(5)
+	assert c2.get() == 15
+
+	// 95.3 Method call with struct argument
+	c3 := Counter95{
+		value: 20
+	}
+	assert c2.sum_with(c3) == 35
+
+	// 95.4 Array method (push + len chain)
+	mut arr := []int{}
+	arr << 1
+	arr << 2
+	arr << 3
+	assert arr.len == 3
+
+	// 95.5 String method call
+	s := 'hello world'
+	assert s.contains('world')
+	assert s.replace('world', 'v') == 'hello v'
+
+	// 95.6 Chained method calls
+	s2 := 'Hello World'
+	result := s2.replace('World', 'V').replace('Hello', 'Hi')
+	assert result == 'Hi V'
+
+	print_str('method call resolution: ok')
+}
+
+// ==================== Test 96: Sumtype variant inference ====================
+// Exercises the variant inference logic for various expression kinds when
+// wrapping values into sum types. Covers: int/f64 literals, string literals,
+// struct init, function return types, and variable references.
+
+type Val96 = f64 | int | string | Pair96
+
+struct Pair96 {
+	a int
+	b int
+}
+
+fn make_pair96(a int, b int) Pair96 {
+	return Pair96{
+		a: a
+		b: b
+	}
+}
+
+fn make_int96() int {
+	return 99
+}
+
+fn wrap_int_literal96() Val96 {
+	return 42
+}
+
+fn wrap_float_literal96() Val96 {
+	return 3.14
+}
+
+fn wrap_string_literal96() Val96 {
+	return 'hello'
+}
+
+fn wrap_struct_init96() Val96 {
+	return Pair96{
+		a: 1
+		b: 2
+	}
+}
+
+fn wrap_fn_call96() Val96 {
+	return make_pair96(10, 20)
+}
+
+fn wrap_fn_call_int96() Val96 {
+	return make_int96()
+}
+
+fn wrap_variable96(v Val96) Val96 {
+	return v
+}
+
+fn test_sumtype_variant_inference() {
+	// 96.1 int literal wrapped in sum type
+	v1 := wrap_int_literal96()
+	if v1 is int {
+		assert v1 == 42
+		print_str('sumtype variant inference (int literal): ok')
+	} else {
+		print_str('sumtype variant inference (int literal): FAIL')
+	}
+
+	// 96.2 float literal wrapped in sum type
+	v2 := wrap_float_literal96()
+	if v2 is f64 {
+		print_str('sumtype variant inference (f64 literal): ok')
+	} else {
+		print_str('sumtype variant inference (f64 literal): FAIL')
+	}
+
+	// 96.3 string literal wrapped in sum type
+	v3 := wrap_string_literal96()
+	if v3 is string {
+		assert v3 == 'hello'
+		print_str('sumtype variant inference (string literal): ok')
+	} else {
+		print_str('sumtype variant inference (string literal): FAIL')
+	}
+
+	// 96.4 struct init wrapped in sum type
+	v4 := wrap_struct_init96()
+	if v4 is Pair96 {
+		assert v4.a == 1
+		assert v4.b == 2
+		print_str('sumtype variant inference (struct init): ok')
+	} else {
+		print_str('sumtype variant inference (struct init): FAIL')
+	}
+
+	// 96.5 function call returning struct wrapped in sum type
+	v5 := wrap_fn_call96()
+	if v5 is Pair96 {
+		assert v5.a == 10
+		assert v5.b == 20
+		print_str('sumtype variant inference (fn call struct): ok')
+	} else {
+		print_str('sumtype variant inference (fn call struct): FAIL')
+	}
+
+	// 96.6 function call returning int wrapped in sum type
+	v6 := wrap_fn_call_int96()
+	if v6 is int {
+		assert v6 == 99
+		print_str('sumtype variant inference (fn call int): ok')
+	} else {
+		print_str('sumtype variant inference (fn call int): FAIL')
+	}
+
+	// 96.7 variable of sum type passed through (identity)
+	v7_inner := Val96(7)
+	v7 := wrap_variable96(v7_inner)
+	if v7 is int {
+		assert v7 == 7
+		print_str('sumtype variant inference (variable): ok')
+	} else {
+		print_str('sumtype variant inference (variable): FAIL')
+	}
+}
+
+// ==================== Test 97: Array type resolution ====================
+// Tests that array operations work correctly when type info comes from the checker
+// (get_expr_type) rather than expression-structure inference.
+
+fn get_test_arr97() []int {
+	return [10, 20, 30]
+}
+
+fn sum_arr97(arr []int) int {
+	mut s := 0
+	for v in arr {
+		s += v
+	}
+	return s
+}
+
+fn test_array_type_resolution() {
+	// 97.1 Array comparison (== uses array__eq)
+	a1 := [1, 2, 3]
+	a2 := [1, 2, 3]
+	a3 := [4, 5, 6]
+	assert a1 == a2
+	assert a1 != a3
+	print_str('array type resolution (comparison): ok')
+
+	// 97.2 Array from function return, then filter
+	arr := get_test_arr97()
+	filtered := arr.filter(it > 15)
+	assert filtered.len == 2
+	assert filtered[0] == 20
+	assert filtered[1] == 30
+	print_str('array type resolution (filter): ok')
+
+	// 97.3 Array map
+	doubled := arr.map(it * 2)
+	assert doubled.len == 3
+	assert doubled[0] == 20
+	assert doubled[1] == 40
+	assert doubled[2] == 60
+	print_str('array type resolution (map): ok')
+
+	// 97.4 Array contains
+	assert arr.contains(20)
+	assert !arr.contains(99)
+	print_str('array type resolution (contains): ok')
+
+	// 97.5 Array slice
+	sliced := arr[1..]
+	assert sliced.len == 2
+	assert sliced[0] == 20
+	assert sliced[1] == 30
+	print_str('array type resolution (slice): ok')
+
+	// 97.6 Array passed to function
+	total := sum_arr97(arr)
+	assert total == 60
+	print_str('array type resolution (fn arg): ok')
 }
 
 // ===================== MAIN TEST FUNCTION =====================
@@ -3804,6 +4155,18 @@ fn main() {
 	small_nums := filter_arr.filter(it <= 6)
 	print_int(small_nums.len) // 6
 
+	// 56.5 Filter as function argument (non-assignment context)
+	print_int(filter_arr.filter(it > 3).len) // 3
+
+	// 56.6 Map in assignment context
+	mapped := filter_arr.map(it * 2)
+	print_int(mapped.len) // 6
+	print_int(mapped[0]) // 2
+	print_int(mapped[5]) // 12
+
+	// 56.7 Map as function argument (non-assignment context)
+	print_int(filter_arr.map(it + 10).len) // 6
+
 	// ==================== 57. ARRAY STR (auto-generated) ====================
 	print_str('--- 57. Array str ---')
 
@@ -4790,6 +5153,36 @@ fn main() {
 	// Test map or-block with array value type (fixes array** vs array* cleanc issue)
 	print_str('--- Test 91: Map or-block with array value ---')
 	test_map_or_array_value()
+
+	// ==================== 92. FLAG ENUM SET/CLEAR ====================
+	// Tests flag enum .set() and .clear() methods (transformer lowering to |= and &=~)
+	print_str('--- Test 92: Flag enum set/clear ---')
+	test_flag_enum_set_clear()
+
+	print_str('--- Test 93: Interface method dispatch via fn-pointer ---')
+	test_interface_fn_pointer_dispatch()
+
+	print_str('--- Test 94: Sumtype .type_name() ---')
+	test_sumtype_type_name()
+
+	// ==================== 95. METHOD CALL RESOLUTION ====================
+	// Tests transformer-based method resolution: receiver.method(args) -> Type__method(receiver, args)
+	// Exercises struct methods, array methods, and chained calls.
+	print_str('--- Test 95: Method call resolution ---')
+	test_method_call_resolution()
+
+	// ==================== 96. SUMTYPE VARIANT INFERENCE ====================
+	// Tests that sum type wrapping works for various expression kinds:
+	// literals, struct init, function calls, and variables.
+	// This exercises the inlined variant inference logic in wrap_sumtype_value_transformed.
+	print_str('--- Test 96: Sumtype variant inference ---')
+	test_sumtype_variant_inference()
+
+	// ==================== 97. ARRAY TYPE RESOLUTION ====================
+	// Tests that array operations are correctly resolved using checker type info:
+	// array comparisons, filter/map, string interpolation of arrays, and slicing.
+	print_str('--- Test 97: Array type resolution ---')
+	test_array_type_resolution()
 
 	print_str('=== All tests completed ===')
 }

@@ -1,7 +1,6 @@
 // Copyright (c) 2026 Alexander Medvednikov. All rights reserved.
 // Use of this source code is governed by an MIT license
 // that can be found in the LICENSE file.
-// vtest build: false
 module transformer
 
 import v2.ast
@@ -35,11 +34,9 @@ fn create_transformer_with_vars(vars map[string]types.Type) &Transformer {
 	}
 }
 
-// Create a string-like type that returns 'string' from name()
+// string_type returns the builtin v2 string type.
 fn string_type() types.Type {
-	return types.Alias{
-		name: 'string'
-	}
+	return types.string_
 }
 
 // Create a rune-like type that returns 'rune' from name()
@@ -49,8 +46,32 @@ fn rune_type() types.Type {
 	}
 }
 
+fn test_transform_ident_vmodroot_to_string_literal() {
+	mut t := create_test_transformer()
+	t.comptime_vmodroot = '/tmp/v'
+	result := t.transform_expr(ast.Ident{
+		name: '@VMODROOT'
+	})
+	assert result is ast.StringLiteral, 'expected StringLiteral, got ${result.type_name()}'
+	lit := result as ast.StringLiteral
+	assert lit.kind == .v
+	assert lit.value == "'/tmp/v'"
+}
+
+fn test_transform_ident_vmodroot_empty_root() {
+	mut t := create_test_transformer()
+	t.comptime_vmodroot = ''
+	result := t.transform_expr(ast.Ident{
+		name: '@VMODROOT'
+	})
+	assert result is ast.StringLiteral, 'expected StringLiteral, got ${result.type_name()}'
+	lit := result as ast.StringLiteral
+	assert lit.kind == .v
+	assert lit.value == "''"
+}
+
 fn test_array_comparison_eq() {
-	// Set up variable types so infer_array_type can detect them
+	// Set up variable types so get_array_type_str can detect them
 	mut t := create_transformer_with_vars({
 		'arr1': types.Type(types.Array{ elem_type: types.int_ })
 		'arr2': types.Type(types.Array{
@@ -133,52 +154,6 @@ fn test_array_comparison_non_array_passthrough() {
 
 	// Should remain as InfixExpr (not transformed)
 	assert result is ast.InfixExpr, 'expected InfixExpr for non-array comparison'
-}
-
-fn test_infer_array_type_from_var() {
-	mut t := create_transformer_with_vars({
-		'my_arr': types.Type(types.Array{ elem_type: string_type() })
-	})
-
-	expr := ast.Ident{
-		name: 'my_arr'
-	}
-
-	result := t.infer_array_type(expr) or {
-		assert false, 'expected array type to be inferred'
-		return
-	}
-	assert result == 'Array_string', 'expected Array_string, got ${result}'
-}
-
-fn test_infer_array_type_from_slice() {
-	mut t := create_transformer_with_vars({
-		'arr': types.Type(types.Array{ elem_type: rune_type() })
-	})
-
-	// Create: arr[0..5] (slice expression)
-	expr := ast.IndexExpr{
-		lhs:  ast.Ident{
-			name: 'arr'
-		}
-		expr: ast.RangeExpr{
-			op:    .dotdot
-			start: ast.BasicLiteral{
-				value: '0'
-				kind:  .number
-			}
-			end:   ast.BasicLiteral{
-				value: '5'
-				kind:  .number
-			}
-		}
-	}
-
-	result := t.infer_array_type(expr) or {
-		assert false, 'expected array type to be inferred for slice'
-		return
-	}
-	assert result == 'Array_rune', 'expected Array_rune, got ${result}'
 }
 
 fn test_transform_index_expr_string_slice_lowered() {
@@ -342,6 +317,93 @@ fn test_transform_map_init_expr_non_empty_lowers_to_runtime_ctor() {
 	assert call.args.len == 9, 'expected 9 args for map constructor, got ${call.args.len}'
 	assert call.args[7] is ast.ArrayInitExpr, 'expected key array arg'
 	assert call.args[8] is ast.ArrayInitExpr, 'expected value array arg'
+}
+
+fn test_transform_map_init_expr_empty_lowers_to_new_map() {
+	mut t := create_test_transformer()
+
+	expr := ast.MapInitExpr{
+		typ: ast.Expr(ast.Type(ast.MapType{
+			key_type:   ast.Ident{
+				name: 'string'
+			}
+			value_type: ast.Ident{
+				name: 'int'
+			}
+		}))
+	}
+
+	result := t.transform_map_init_expr(expr)
+	assert result is ast.CallExpr, 'expected CallExpr, got ${result.type_name()}'
+	call := result as ast.CallExpr
+	assert call.lhs is ast.Ident
+	assert (call.lhs as ast.Ident).name == 'new_map'
+	assert call.args.len == 6
+	assert call.args[2] is ast.PrefixExpr
+	assert (call.args[2] as ast.PrefixExpr).op == .amp
+	assert (call.args[2] as ast.PrefixExpr).expr is ast.Ident
+	assert ((call.args[2] as ast.PrefixExpr).expr as ast.Ident).name == 'map_hash_string'
+}
+
+fn test_transform_index_expr_map_read_lowers_to_map_get() {
+	mut t := create_transformer_with_vars({
+		'm': types.Type(types.Map{
+			key_type:   string_type()
+			value_type: types.int_
+		})
+	})
+
+	expr := ast.IndexExpr{
+		lhs:  ast.Ident{
+			name: 'm'
+		}
+		expr: ast.StringLiteral{
+			kind:  .v
+			value: "'foo'"
+		}
+	}
+
+	result := t.transform_index_expr(expr)
+	assert result is ast.UnsafeExpr, 'expected UnsafeExpr, got ${result.type_name()}'
+	unsafe_expr := result as ast.UnsafeExpr
+	assert unsafe_expr.stmts.len > 0
+	last := unsafe_expr.stmts[unsafe_expr.stmts.len - 1]
+	assert last is ast.ExprStmt
+	last_expr := (last as ast.ExprStmt).expr
+	assert last_expr is ast.ParenExpr
+	paren := last_expr as ast.ParenExpr
+	assert paren.expr is ast.PrefixExpr
+	pref := paren.expr as ast.PrefixExpr
+	assert pref.op == .mul
+	assert pref.expr is ast.CastExpr
+	cast := pref.expr as ast.CastExpr
+	assert cast.expr is ast.CallExpr
+	call := cast.expr as ast.CallExpr
+	assert call.lhs is ast.Ident
+	assert (call.lhs as ast.Ident).name == 'map__get'
+	assert call.args.len == 3
+}
+
+fn test_transform_init_expr_empty_typed_map_lowers_to_new_map() {
+	mut t := create_test_transformer()
+
+	expr := ast.InitExpr{
+		typ: ast.Expr(ast.Type(ast.MapType{
+			key_type:   ast.Ident{
+				name: 'string'
+			}
+			value_type: ast.Ident{
+				name: 'int'
+			}
+		}))
+	}
+
+	result := t.transform_init_expr(expr)
+	assert result is ast.CallExpr, 'expected CallExpr, got ${result.type_name()}'
+	call := result as ast.CallExpr
+	assert call.lhs is ast.Ident
+	assert (call.lhs as ast.Ident).name == 'new_map'
+	assert call.args.len == 6
 }
 
 fn test_is_string_expr_string_literal() {
@@ -739,4 +801,19 @@ fn test_transform_if_expr_preserves_else() {
 	} else {
 		assert false, 'expected IfExpr or UnsafeExpr, got ${result.type_name()}'
 	}
+}
+
+fn test_transform_for_in_stmt_lowers_to_for_stmt() {
+	mut t := create_test_transformer()
+	result := t.transform_for_in_stmt(ast.ForInStmt{
+		value: ast.Ident{
+			name: 'v'
+		}
+		expr:  ast.Ident{
+			name: 'items'
+		}
+	})
+
+	// NOTE: transform_for_in_stmt returns `ast.ForStmt` directly.
+	assert result.init is ast.AssignStmt, 'expected lowered init AssignStmt, got ${result.init.type_name()}'
 }

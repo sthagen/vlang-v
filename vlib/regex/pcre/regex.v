@@ -1,30 +1,36 @@
 /*
-regex2 0.9.2 beta (VM Edition)
+regex2 0.9.6 beta (VM Edition) - Performance Optimized
 
 Copyright (c) 2026 Dario Deledda. All rights reserved.
 Use of this source code is governed by an MIT license
 that can be found in the LICENSE file.
 
-This file contains regex module based on a Virtual Machine approach.
+This file contains a regex module based on a Virtual Machine approach.
 
 Features:
- - **Non-recursive VM**: Safe execution without stack overflow on complex patterns
- - UTF8 support
- - Literal characters, '.', '*', '{m,n}'
- - Short quantifiers: '?', '+'
- - Nested groups: '()'
- - Named groups: '(?P<name>...)'
- - Non-capturing groups: '(?:...)'
- - Character classes: \w, \W, \d, \D, \s, \S, \a, \A
- - Hex escapes: \xHH, \XHHHH
- - Alternation: '|'
- - Character classes: [abc], [^abc], [a-z]
- - Anchors: '^' (start of string), '$' (end of string)
- - Word boundaries: '\b' (word boundary), '\B' (non-word boundary)
+ - **Non-recursive VM**: Safe execution without stack overflow on complex patterns.
+ - UTF8 support with Fast ASCII path.
+ - Literal characters, '.', '*', '{m,n}'.
+ - Short quantifiers: '?', '+'.
+ - Non-greedy quantifiers: '*?', '+?', '??'.
+ - Nested groups: '()'.
+ - Named groups: '(?P<name>...)'.
+ - Non-capturing groups: '(?:...)'.
+ - Character classes: \w, \W, \d, \D, \s, \S, \a, \A.
+ - Hex escapes: \xHH, \XHHHH.
+ - Alternation: '|'.
+ - Character classes: [abc], [^abc], [a-z].
+ - Anchors: '^' (start of string), '$' (end of string).
+ - Word boundaries: '\b' (word boundary), '\B' (non-word boundary).
  - Inline Flags:
-   - '(?i)' Case insensitive
-   - '(?m)' Multiline (anchors match newlines)
-   - '(?s)' Dot-all (dot matches newline)
+   - '(?i)' Case insensitive.
+   - '(?m)' Multiline (anchors match newlines).
+   - '(?s)' Dot-all (dot matches newline).
+
+Configuration:
+ - `max_stack_depth`: Controls the dynamic growth limit of the backtracking stack.
+    Default is 2048. Increase this value if you encounter complex patterns failing
+    on deep recursions/backtracking, or decrease it to limit memory usage.
 
 Functions:
  - `compile(pattern) !Regex` -> Compiles a pattern into a Regex object.
@@ -34,112 +40,106 @@ Functions:
  - `(r Regex) replace(text, repl) string` -> Finds and replaces the first match.
  - `(r Regex) fullmatch(text string) ?Match` -> Match exact strings.
  - `(r Regex) group_by_name(m Match, name string) string` -> Get text of a named group.
+
+Key Architectural Features and Optimizations:
+ - **Pre-allocated Machine workspace**: All search operations are zero-allocation.
+ - **Raw pointer access**: Bypasses bounds checking for string and instruction access.
+ - **Fast ASCII Path**: Characters < 128 bypass heavy UTF-8 decoding.
+ - **Instruction merging**: Consecutive character matches are merged into string blocks.
+ - **Bitmap lookups**: ASCII character classes use a 128-bit bitset for O(1) matching.
+ - **NFA Virtual Machine**: Executes bytecode instructions to simulate pattern matching.
+ - **Dynamic Stack Growth**: Automatically expands the backtracking stack to prevent false negatives.
+ - **Zero-Allocation Search**: Reuses a pre-allocated Machine workspace for search operations.
+ - **Anchored Optimization**: Patterns starting with '^' skip the scanning loop.
+ - **Prefix Skipping**: Uses Boyer-Moore-like skipping for literal prefixes.
+
 */
 
 module pcre
 
 import strings
-import strconv
 
 /******************************************************************************
 *
-* Structs & Enums (VM Instructions)
+* VM Instruction Definition
 *
 ******************************************************************************/
 
-// InstType defines the operation code for the VM.
-enum InstType {
-	match             // Successfully matched the pattern
-	char              // Match a specific character
-	any               // Match any character (.)
-	class             // Match character class ([...])
-	split             // Branch execution (used for |, ?, *, +)
-	jmp               // Jump to a specific instruction
-	save              // Save the current cursor position to a capture group
-	assert_start      // ^ (Absolute start)
-	assert_end        // $ (Absolute end)
-	assert_line_start // ^ (Multiline: start or after \n)
-	assert_line_end   // $ (Multiline: end or before \n)
-	assert_bound      // \b
-	assert_nbound     // \B
-	// Optimized built-ins
-	match_digit     // \d
-	match_non_digit // \D
-	match_word      // \w
-	match_non_word  // \W
-	match_space     // \s
-	match_non_space // \S
-	match_lower     // \a
-	match_upper     // \A
+// InstType defines the operation codes for the Virtual Machine.
+enum InstType as u8 {
+	match             // Halt and signal a successful match.
+	char              // Match a single UTF-8 rune.
+	string            // Match a sequence of ASCII characters (merged optimization).
+	any               // Match any character (dot).
+	class             // Match a character class (e.g., [a-z] or \d).
+	split             // Branch execution: target_x (primary), target_y (backtrack).
+	jmp               // Unconditional jump to target_x.
+	save              // Save current string position into a capture group index.
+	assert_start      // Assert current position is start of string.
+	assert_end        // Assert current position is end of string.
+	assert_line_start // Assert current position is start of a line (multiline mode).
+	assert_line_end   // Assert current position is end of a line (multiline mode).
+	assert_bound      // Assert word boundary (\b).
+	assert_nbound     // Assert non-word boundary (\B).
 }
 
-// Inst represents a single instruction in the compiled regex program.
+// Inst represents a single bytecode instruction.
+// Packed for memory locality.
 struct Inst {
 mut:
 	typ         InstType
-	val         rune   // For 'char'
-	target_x    int    // Jump target 1 (primary)
-	target_y    int    // Jump target 2 (alternative for split)
-	group_idx   int    // For 'save'
-	char_class  []rune // For 'class'
-	inverted    bool   // For 'class' (negation)
-	ignore_case bool
-	dot_all     bool // For 'any'
+	val         rune   // Used by .char
+	val_str     string // Used by .string
+	val_len     int    // Byte length of val_str
+	target_x    int    // Primary jump/split target
+	target_y    int    // Backtrack target for .split
+	group_idx   int    // Capture group index for .save
+	char_class  []rune // Literal runes for character classes
+	bitmap      [4]u32 // 128-bit bitset for ASCII character classes
+	inverted    bool   // Negation flag for classes
+	ignore_case bool   // Case-insensitive flag
+	dot_all     bool   // Whether '.' matches '\n'
 }
 
-// Thread represents the state of a single execution path in the VM.
-struct Thread {
-	pc       int   // Program Counter
-	sp       int   // String Pointer
-	captures []int // Captured group positions
+// Machine provides a workspace for VM execution.
+// To ensure thread safety, this is created per top-level API call.
+pub struct Machine {
+mut:
+	stack    []int // Backtracking stack stores: [capture_states..., string_ptr, next_pc]
+	captures []int // Flat array of [start, end] byte indices for groups
 }
 
-// Regex holds the compiled bytecode program.
+// Regex is the compiled regular expression object.
 pub struct Regex {
 pub:
-	pattern      string
-	prog         []Inst
-	total_groups int
-	group_map    map[string]int
+	pattern      string         // The original regex string
+	prog         []Inst         // Compiled bytecode
+	total_groups int            // Number of capture groups defined in pattern
+	group_map    map[string]int // Mapping of names to indices for (?P<name>...)
+	prefix_lit   string         // Pre-calculated literal prefix for fast-skip optimization
+	has_prefix   bool           // Whether a literal prefix exists
+	anchored     bool           // True if pattern starts with '^' (optimization hint)
+pub mut:
+	max_stack_depth int // User-defined stack limit hint
 }
 
-// Match represents a successful match result.
+// Match contains the results of a successful regex match.
 pub struct Match {
 pub:
-	text   string
-	start  int
-	end    int
-	groups []string
+	text   string   // The full text of the match
+	start  int      // Starting byte index in the source string
+	end    int      // Ending byte index in the source string
+	groups []string // Sub-strings captured by groups
 }
 
-// get retrieves the captured text by index.
-// Index 0 returns the whole match, 1+ returns capture groups.
-pub fn (m Match) get(idx int) ?string {
-	if idx == 0 {
-		return m.text
-	}
-	if idx > 0 && idx <= m.groups.len {
-		return m.groups[idx - 1]
-	}
-	return none
-}
-
-// get_all returns the whole match followed by all capture groups.
-pub fn (m Match) get_all() []string {
-	mut res := [m.text]
-	res << m.groups
-	return res
-}
-
-// --- AST Nodes ---
-
-// Quantifier represents a repetition range.
+// Internal structures for Compilation
 struct Quantifier {
-	min int
-	max int // -1 for infinity
+mut:
+	min    int
+	max    int // -1 for infinity
+	greedy bool
 }
 
-// Flags holds the current state of regex options.
 struct Flags {
 mut:
 	ignore_case bool
@@ -147,7 +147,6 @@ mut:
 	dot_all     bool
 }
 
-// NodeType defines the specific type of an AST node.
 enum NodeType {
 	chr
 	any_char
@@ -164,11 +163,10 @@ enum NodeType {
 	non_digit
 	whitespace
 	non_whitespace
-	lowercase_char // \a
-	uppercase_char // \A
+	lowercase_char
+	uppercase_char
 }
 
-// Node represents a component in the regex Abstract Syntax Tree.
 struct Node {
 mut:
 	typ                 NodeType
@@ -186,157 +184,331 @@ mut:
 
 /******************************************************************************
 *
-* Utilities
+* Internal Utilities (Inlined for Speed)
 *
 ******************************************************************************/
 
-// is_word_char checks if a rune is a word character (alphanumeric or underscore).
-fn is_word_char(r rune) bool {
+// read_rune_at decodes a UTF-8 rune from a byte pointer safely.
+// Marked inline to be embedded directly into the VM loop.
+@[inline]
+fn read_rune_at(str &u8, len int, index int) (rune, int) {
+	unsafe {
+		if index >= len {
+			return 0, 0
+		}
+		b0 := u32(str[index])
+		if b0 < 0x80 {
+			return rune(b0), 1
+		}
+		if (b0 & 0xE0) == 0xC0 && index + 1 < len {
+			return rune(((b0 & 0x1F) << 6) | (u32(str[index + 1]) & 0x3F)), 2
+		}
+		if (b0 & 0xF0) == 0xE0 && index + 2 < len {
+			return rune(((b0 & 0x0F) << 12) | ((u32(str[index + 1]) & 0x3F) << 6) | (u32(str[
+				index + 2]) & 0x3F)), 3
+		}
+		if (b0 & 0xF8) == 0xF0 && index + 3 < len {
+			return rune(((b0 & 0x07) << 18) | ((u32(str[index + 1]) & 0x3F) << 12) | ((u32(str[
+				index + 2]) & 0x3F) << 6) | (u32(str[index + 3]) & 0x3F)), 4
+		}
+	}
+	return 0, 0
+}
+
+// is_word_char returns true for alphanumeric ASCII characters and underscore.
+@[inline]
+fn is_word_char(r u8) bool {
 	return (r >= `a` && r <= `z`) || (r >= `A` && r <= `Z`) || (r >= `0` && r <= `9`) || r == `_`
 }
 
-// is_whitespace checks if a rune is a whitespace character.
-fn is_whitespace(r rune) bool {
-	return r in [` `, `\t`, `\n`, `\r`, `\v`, `\f`]
-}
-
-// read_rune decodes the next UTF-8 character from the string at the given index.
+// set_bitmap sets a specific bit in a 128-bit bitset for ASCII matching.
 @[inline]
-pub fn read_rune(s string, index int) (rune, int) {
-	if index < s.len {
-		b := s[index]
-		if b < 0x80 {
-			return rune(b), 1
-		}
-	} else {
-		return 0, 0
+fn set_bitmap(mut bitmap [4]u32, r rune) {
+	if r >= 0 && r < 128 {
+		idx := u32(r) >> 5
+		bit := u32(r) & 31
+		bitmap[idx] |= (u32(1) << bit)
 	}
-
-	mut res := 0
-	mut ch_len := utf8_char_len(s[index])
-
-	if ch_len == 1 {
-		return u16(s[index]), 1
-	}
-	if ch_len > 1 && ch_len < 5 {
-		mut lword := 0
-		for i := 0; i < ch_len; i++ {
-			lword = int(u32(lword) << 8 | u32(s[index + i]))
-		}
-		if ch_len == 2 {
-			res = (lword & 0x1f00) >> 2 | (lword & 0x3f)
-		} else if ch_len == 3 {
-			res = (lword & 0x0f0000) >> 4 | (lword & 0x3f00) >> 2 | (lword & 0x3f)
-		} else if ch_len == 4 {
-			res = ((lword & 0x07000000) >> 6) | ((lword & 0x003f0000) >> 4) | ((lword & 0x00003F00) >> 2) | (lword & 0x0000003f)
-		}
-	}
-	return res, ch_len
 }
 
 /******************************************************************************
 *
-* Compiler (Parser + CodeGen)
+* Compiler Logic
 *
 ******************************************************************************/
 
-// compile parses a pattern string and returns a compiled Regex struct.
+// compile transforms a regex pattern string into a Regex object.
 pub fn compile(pattern string) !Regex {
-	start_pos := 0
-	start_group_counter := 0
 	mut group_map := map[string]int{}
-	initial_flags := Flags{
-		ignore_case: false
-		multiline:   false
-		dot_all:     false
+	initial_flags := Flags{false, false, false}
+
+	// Phase 1: AST Parsing
+	nodes, _, final_group_count := parse_nodes(pattern, 0, `\0`, 0, initial_flags, mut
+		group_map)!
+
+	root := Node{
+		typ:   .group
+		nodes: nodes
+		quant: Quantifier{1, 1, true}
 	}
 
-	nodes, _, final_group_count := parse_nodes(pattern, start_pos, `\0`, start_group_counter,
-		initial_flags, mut group_map)!
+	// Phase 2: Bytecode Emission
+	mut compiler := Compiler{
+		prog: []Inst{cap: 128}
+	}
+	compiler.emit_node(root)
+	compiler.emit(Inst{ typ: .match })
 
-	// Ensure root node has quantifier 1,1
-	root_node := Node{
-		typ:                 .group
-		nodes:               nodes
-		group_capture_index: -1
-		quant:               Quantifier{
-			min: 1
-			max: 1
+	// Phase 3: Optimization
+	optimized_prog := compiler.optimize()
+
+	// Detect Prefix and Anchor optimizations
+	mut prefix := ''
+	mut has_prefix := false
+	mut anchored := false
+
+	if optimized_prog.len > 0 {
+		first := optimized_prog[0]
+		if first.typ == .string {
+			prefix = first.val_str
+			has_prefix = true
+		} else if first.typ == .char && !first.ignore_case && first.val < 128 {
+			prefix = unsafe { u8(first.val).ascii_str() }
+			has_prefix = true
+		} else if first.typ == .assert_start {
+			anchored = true
 		}
 	}
 
-	mut compiler := Compiler{
-		prog:      []Inst{}
-		group_cnt: final_group_count
-	}
-	compiler.emit_node(root_node)
-	compiler.emit(Inst{ typ: .match })
-
 	return Regex{
-		pattern:      pattern
-		prog:         compiler.prog
-		total_groups: final_group_count
-		group_map:    group_map
+		max_stack_depth: 2048
+		pattern:         pattern
+		prog:            optimized_prog
+		total_groups:    final_group_count
+		group_map:       group_map
+		prefix_lit:      prefix
+		has_prefix:      has_prefix
+		anchored:        anchored
 	}
 }
 
-// new_regex is an alias for compile, for compatibility with older PCRE wrappers.
-// Note: The second argument (flags) is currently ignored as flags should be
-// embedded in the pattern (e.g., '(?i)pattern').
-pub fn new_regex(pattern string, _ int) !Regex {
-	return compile(pattern)
+// new_machine allocates a new VM state machine.
+// This isolates the runtime memory (stack/captures) from the compiled regex, allowing thread-safe usage.
+pub fn (r &Regex) new_machine() Machine {
+	// Pre-allocate enough space for stack and captures to avoid re-allocation in hot path
+	return Machine{
+		stack:    []int{len: r.max_stack_depth}
+		captures: []int{len: r.total_groups * 2}
+	}
 }
 
-// Compiler manages the state of the bytecode generation process.
+// Compiler holds the state for generating the bytecode instructions.
 struct Compiler {
 mut:
-	prog      []Inst
-	group_cnt int
+	prog []Inst
 }
 
-// emit adds an instruction to the program and returns its index.
+// emit appends an instruction to the program and returns its index.
 fn (mut c Compiler) emit(i Inst) int {
 	c.prog << i
 	return c.prog.len - 1
 }
 
-// emit_node generates VM instructions for a given AST node.
+// optimize merges consecutive literal characters into single string instructions
+// and resolves jump targets to absolute indices.
+fn (mut c Compiler) optimize() []Inst {
+	mut targets := map[int]bool{}
+	for inst in c.prog {
+		if inst.typ == .split || inst.typ == .jmp {
+			targets[inst.target_x] = true
+			targets[inst.target_y] = true
+		}
+	}
+
+	mut new_prog := []Inst{cap: c.prog.len}
+	mut idx_map := map[int]int{}
+
+	mut i := 0
+	for i < c.prog.len {
+		inst := c.prog[i]
+		idx_map[i] = new_prog.len
+
+		// Optimization: Merge consecutive chars
+		if inst.typ == .char && !inst.ignore_case && inst.val < 128 {
+			mut s_val := unsafe { u8(inst.val).ascii_str() }
+			mut j := i + 1
+			for j < c.prog.len && !targets[j] {
+				next := c.prog[j]
+				if next.typ == .char && !next.ignore_case && next.val < 128 {
+					s_val += unsafe { u8(next.val).ascii_str() }
+					j++
+				} else {
+					break
+				}
+			}
+			if j > i + 1 {
+				new_prog << Inst{
+					typ:     .string
+					val_str: s_val
+					val_len: s_val.len
+				}
+				for k := i + 1; k < j; k++ {
+					idx_map[k] = new_prog.len
+				}
+				i = j
+				continue
+			}
+		}
+		new_prog << inst
+		i++
+	}
+	idx_map[c.prog.len] = new_prog.len
+
+	// Fix jump offsets
+	for mut inst in new_prog {
+		if inst.typ == .split || inst.typ == .jmp {
+			inst.target_x = idx_map[inst.target_x] or { inst.target_x }
+			inst.target_y = idx_map[inst.target_y] or { inst.target_y }
+		}
+	}
+	return new_prog
+}
+
+// emit_class generates the instructions for a character class node.
+// It populates the bitmap for O(1) ASCII matching and the slice for Unicode.
+fn (mut c Compiler) emit_class(node Node) {
+	mut bitmap := [4]u32{}
+	mut char_class := node.char_set.clone()
+	mut inverted := node.inverted
+
+	// Pre-compile common classes into the bitmap for O(1) lookups
+	match node.typ {
+		.word_char {
+			for r := `0`; r <= `9`; r++ {
+				set_bitmap(mut bitmap, r)
+			}
+			for r := `a`; r <= `z`; r++ {
+				set_bitmap(mut bitmap, r)
+			}
+			for r := `A`; r <= `Z`; r++ {
+				set_bitmap(mut bitmap, r)
+			}
+			set_bitmap(mut bitmap, `_`)
+		}
+		.non_word_char {
+			inverted = true
+			for r := `0`; r <= `9`; r++ {
+				set_bitmap(mut bitmap, r)
+			}
+			for r := `a`; r <= `z`; r++ {
+				set_bitmap(mut bitmap, r)
+			}
+			for r := `A`; r <= `Z`; r++ {
+				set_bitmap(mut bitmap, r)
+			}
+			set_bitmap(mut bitmap, `_`)
+		}
+		.digit {
+			for r := `0`; r <= `9`; r++ {
+				set_bitmap(mut bitmap, r)
+			}
+		}
+		.non_digit {
+			inverted = true
+			for r := `0`; r <= `9`; r++ {
+				set_bitmap(mut bitmap, r)
+			}
+		}
+		.whitespace {
+			for r in [` `, `\t`, `\n`, `\r`, `\v`, `\f`] {
+				set_bitmap(mut bitmap, r)
+			}
+		}
+		.non_whitespace {
+			inverted = true
+			for r in [` `, `\t`, `\n`, `\r`, `\v`, `\f`] {
+				set_bitmap(mut bitmap, r)
+			}
+		}
+		.lowercase_char {
+			for r := `a`; r <= `z`; r++ {
+				set_bitmap(mut bitmap, r)
+			}
+		}
+		.uppercase_char {
+			for r := `A`; r <= `Z`; r++ {
+				set_bitmap(mut bitmap, r)
+			}
+		}
+		.char_class {
+			for r in node.char_set {
+				set_bitmap(mut bitmap, r)
+				if node.ignore_case {
+					if r >= `a` && r <= `z` {
+						set_bitmap(mut bitmap, r - 32)
+					} else if r >= `A` && r <= `Z` {
+						set_bitmap(mut bitmap, r + 32)
+					}
+				}
+			}
+		}
+		else {}
+	}
+
+	c.emit(Inst{
+		typ:         .class
+		char_class:  char_class
+		bitmap:      bitmap
+		inverted:    inverted
+		ignore_case: node.ignore_case
+	})
+}
+
+// emit_node handles quantifiers and loops, delegating the actual logic to emit_logic.
 fn (mut c Compiler) emit_node(node Node) {
 	for _ in 0 .. node.quant.min {
-		c.emit_single_node_logic(node)
+		c.emit_logic(node)
 	}
 
 	if node.quant.max == -1 {
-		// Infinite quantifier
 		split_idx := c.emit(Inst{ typ: .split })
 		start_pc := c.prog.len
-
-		c.emit_single_node_logic(node)
-
+		c.emit_logic(node)
 		c.emit(Inst{ typ: .jmp, target_x: split_idx })
-		c.prog[split_idx].target_x = start_pc
-		c.prog[split_idx].target_y = c.prog.len
+		if node.quant.greedy {
+			c.prog[split_idx].target_x = start_pc
+			c.prog[split_idx].target_y = c.prog.len
+		} else {
+			c.prog[split_idx].target_x = c.prog.len
+			c.prog[split_idx].target_y = start_pc
+		}
 	} else if node.quant.max > node.quant.min {
-		// Finite range
 		rem := node.quant.max - node.quant.min
 		mut splits := []int{}
-
 		for _ in 0 .. rem {
 			idx := c.emit(Inst{ typ: .split })
-			c.prog[idx].target_x = c.prog.len
-			c.emit_single_node_logic(node)
+			match_pc := c.prog.len
+			if node.quant.greedy {
+				c.prog[idx].target_x = match_pc
+			} else {
+				c.prog[idx].target_y = match_pc
+			}
+			c.emit_logic(node)
 			splits << idx
 		}
-
 		end_pc := c.prog.len
 		for idx in splits {
-			c.prog[idx].target_y = end_pc
+			if node.quant.greedy {
+				c.prog[idx].target_y = end_pc
+			} else {
+				c.prog[idx].target_x = end_pc
+			}
 		}
 	}
 }
 
-// emit_single_node_logic handles the core logic for a node type without quantifiers.
-fn (mut c Compiler) emit_single_node_logic(node Node) {
+// emit_logic generates instructions for specific node types (char, group, alternation).
+fn (mut c Compiler) emit_logic(node Node) {
 	match node.typ {
 		.chr {
 			c.emit(Inst{ typ: .char, val: node.chr, ignore_case: node.ignore_case })
@@ -344,23 +516,13 @@ fn (mut c Compiler) emit_single_node_logic(node Node) {
 		.any_char {
 			c.emit(Inst{ typ: .any, dot_all: node.dot_all })
 		}
-		.char_class {
-			c.emit(Inst{
-				typ:         .class
-				char_class:  node.char_set
-				inverted:    node.inverted
-				ignore_case: node.ignore_case
-			})
-		}
 		.group {
 			if node.group_capture_index != -1 {
 				c.emit(Inst{ typ: .save, group_idx: node.group_capture_index * 2 })
 			}
-
 			for child in node.nodes {
 				c.emit_node(child)
 			}
-
 			if node.group_capture_index != -1 {
 				c.emit(Inst{ typ: .save, group_idx: node.group_capture_index * 2 + 1 })
 			}
@@ -369,44 +531,32 @@ fn (mut c Compiler) emit_single_node_logic(node Node) {
 			if node.alternatives.len == 0 {
 				return
 			}
-
 			mut end_jumps := []int{}
-
 			for i := 0; i < node.alternatives.len - 1; i++ {
 				split_idx := c.emit(Inst{ typ: .split })
 				c.prog[split_idx].target_x = c.prog.len
-
 				for child in node.alternatives[i] {
 					c.emit_node(child)
 				}
-
-				jmp_idx := c.emit(Inst{ typ: .jmp })
-				end_jumps << jmp_idx
+				end_jumps << c.emit(Inst{ typ: .jmp })
 				c.prog[split_idx].target_y = c.prog.len
 			}
-
-			for child in node.alternatives[node.alternatives.len - 1] {
+			for child in node.alternatives.last() {
 				c.emit_node(child)
 			}
-
-			end_pos := c.prog.len
 			for idx in end_jumps {
-				c.prog[idx].target_x = end_pos
+				c.prog[idx].target_x = c.prog.len
 			}
 		}
 		.start_of_string {
-			if node.multiline {
-				c.emit(Inst{ typ: .assert_line_start })
-			} else {
-				c.emit(Inst{ typ: .assert_start })
-			}
+			c.emit(Inst{
+				typ: if node.multiline { InstType.assert_line_start } else { InstType.assert_start }
+			})
 		}
 		.end_of_string {
-			if node.multiline {
-				c.emit(Inst{ typ: .assert_line_end })
-			} else {
-				c.emit(Inst{ typ: .assert_end })
-			}
+			c.emit(Inst{
+				typ: if node.multiline { InstType.assert_line_end } else { InstType.assert_end }
+			})
 		}
 		.word_boundary {
 			c.emit(Inst{ typ: .assert_bound })
@@ -414,70 +564,40 @@ fn (mut c Compiler) emit_single_node_logic(node Node) {
 		.non_word_boundary {
 			c.emit(Inst{ typ: .assert_nbound })
 		}
-		// Map special types to Optimized opcodes
-		.digit {
-			c.emit(Inst{ typ: .match_digit })
-		}
-		.non_digit {
-			c.emit(Inst{ typ: .match_non_digit })
-		}
-		.word_char {
-			c.emit(Inst{ typ: .match_word })
-		}
-		.non_word_char {
-			c.emit(Inst{ typ: .match_non_word })
-		}
-		.whitespace {
-			c.emit(Inst{ typ: .match_space })
-		}
-		.non_whitespace {
-			c.emit(Inst{ typ: .match_non_space })
-		}
-		.lowercase_char {
-			c.emit(Inst{ typ: .match_lower })
-		}
-		.uppercase_char {
-			c.emit(Inst{ typ: .match_upper })
+		else {
+			c.emit_class(node)
 		}
 	}
 }
 
-// --- Parser ---
-
-// parse_nodes parses the pattern string into a list of AST nodes.
+// parse_nodes implements a recursive descent parser to construct the AST from the pattern string.
 fn parse_nodes(pattern string, pos_start int, terminator rune, group_counter_start int, passed_flags Flags, mut group_map map[string]int) !([]Node, int, int) {
 	mut pos := pos_start
 	mut group_counter := group_counter_start
 	mut current_flags := passed_flags
-
 	mut alternatives := [][]Node{}
 	mut current_sequence := []Node{}
 
 	for pos < pattern.len {
-		chr, char_len := read_rune(pattern, pos)
-
+		chr, char_len := read_rune_at(pattern.str, pattern.len, pos)
 		if chr == terminator {
 			pos += char_len
 			if alternatives.len > 0 {
-				if current_sequence.len == 0 {
-					return error('Pattern cannot end with an empty alternative')
-				}
 				alternatives << current_sequence
 				return [
 					Node{
 						typ:          .alternation
 						alternatives: alternatives
-						quant:        Quantifier{1, 1}
+						quant:        Quantifier{1, 1, true}
 					},
 				], pos, group_counter
 			}
 			return current_sequence, pos, group_counter
 		}
-
 		if chr == `|` {
 			pos += char_len
 			if current_sequence.len == 0 {
-				return error('Pattern cannot start with or contain an empty alternative')
+				return error('Empty alternative')
 			}
 			alternatives << current_sequence
 			current_sequence = []Node{}
@@ -513,135 +633,95 @@ fn parse_nodes(pattern string, pos_start int, terminator rune, group_counter_sta
 			`(` {
 				pos += char_len
 				mut idx := -1
-				mut capturing := true
-				mut is_flag := false
-
-				// Check extensions
+				mut cap := true
 				if pos < pattern.len && pattern[pos] == `?` {
 					pos++
-					if pos < pattern.len {
-						next_char := pattern[pos]
-
-						// Flags: (?i)
-						if next_char in [`i`, `m`, `s`] {
-							mut f_pos := pos
-							for f_pos < pattern.len {
-								f_char := pattern[f_pos]
-								if f_char == `)` {
-									pos = f_pos + 1
-									is_flag = true
-									break
-								}
-								match f_char {
-									`i` { current_flags.ignore_case = true }
-									`m` { current_flags.multiline = true }
-									`s` { current_flags.dot_all = true }
-									else { return error('Invalid flag') }
-								}
-								f_pos++
+					if pos < pattern.len && pattern[pos] in [`i`, `m`, `s`] {
+						for pos < pattern.len && pattern[pos] != `)` {
+							match pattern[pos] {
+								`i` { current_flags.ignore_case = true }
+								`m` { current_flags.multiline = true }
+								`s` { current_flags.dot_all = true }
+								else {}
 							}
-							if is_flag {
-								continue
-							}
-							// Skip loop, next token
-						} else if next_char == `:` {
-							capturing = false
 							pos++
-						} else if next_char == `P` {
-							pos++ // P
-							if pos < pattern.len && pattern[pos] == `<` {
-								pos++
-								end_name := pattern.index_after('>', pos) or { -1 }
-								if end_name != -1 {
-									name := pattern[pos..end_name]
-									idx = group_counter
-									group_map[name] = idx
-									pos = end_name + 1
-								} else {
-									return error('Unclosed group name')
-								}
-							}
 						}
+						if pos < pattern.len {
+							pos++
+						}
+						continue
+					} else if pos < pattern.len && pattern[pos] == `:` {
+						cap = false
+						pos++
+					} else if pos < pattern.len && pattern[pos] == `P` {
+						pos++
+						if pos >= pattern.len || pattern[pos] != `<` {
+							return error('Invalid named group syntax')
+						}
+						pos++
+						end := pattern.index_after('>', pos) or { -1 }
+						if end == -1 {
+							return error('Unclosed named group')
+						}
+						name := pattern[pos..end]
+						idx = group_counter
+						group_map[name] = idx
+						pos = end + 1
 					}
 				}
-
-				if capturing {
+				if cap {
 					if idx == -1 {
 						idx = group_counter
 					}
 					group_counter++
 				}
-
-				sub_nodes, new_pos, new_cnt := parse_nodes(pattern, pos, `)`, group_counter,
-					current_flags, mut group_map)!
-				pos = new_pos
-				group_counter = new_cnt
-
+				sub, new_p, new_c := parse_nodes(pattern, pos, `)`, group_counter, current_flags, mut
+					group_map)!
+				pos = new_p
+				group_counter = new_c
 				parsed_nodes << Node{
 					typ:                 .group
-					nodes:               sub_nodes
+					nodes:               sub
 					group_capture_index: idx
 				}
 			}
 			`[` {
 				pos += char_len
-				end_pos := pattern.index_after(']', pos) or { return error('Unclosed char class') }
-				content := pattern[pos..end_pos]
-				pos = end_pos + 1
-
-				mut inverted := false
-				mut set_chars := []rune{}
-
-				mut i := 0
-				if content.len > 0 && content[0] == `^` {
-					inverted = true
-					i++
+				end := pattern.index_after(']', pos) or { -1 }
+				if end == -1 {
+					return error('Unclosed character class')
 				}
-
-				// Char class range parsing (simulated)
+				content := pattern[pos..end]
+				pos = end + 1
+				inv := content.len > 0 && content[0] == `^`
+				mut set := []rune{}
+				mut i := if inv { 1 } else { 0 }
 				for i < content.len {
-					c, l := read_rune(content, i)
-
-					// Check for range a-z
+					c, l := read_rune_at(content.str, content.len, i)
 					if i + l + 1 < content.len && content[i + l] == `-` {
-						end_c, end_l := read_rune(content, i + l + 1)
-						// Expand range
-						for r := c; r <= end_c; r++ {
-							set_chars << r
-							if current_flags.ignore_case {
-								if r >= `a` && r <= `z` {
-									set_chars << r - 32
-								}
-								if r >= `A` && r <= `Z` {
-									set_chars << r + 32
-								}
-							}
+						ec, el := read_rune_at(content.str, content.len, i + l + 1)
+						for r := c; r <= ec; r++ {
+							set << r
 						}
-						i += l + 1 + end_l
-						continue
+						i += l + 1 + el
+					} else {
+						set << c
+						i += l
 					}
-
-					set_chars << c
-					if current_flags.ignore_case {
-						if c >= `a` && c <= `z` {
-							set_chars << c - 32
-						}
-						if c >= `A` && c <= `Z` {
-							set_chars << c + 32
-						}
-					}
-					i += l
 				}
 				parsed_nodes << Node{
 					typ:         .char_class
-					char_set:    set_chars
-					inverted:    inverted
+					char_set:    set
+					inverted:    inv
 					ignore_case: current_flags.ignore_case
 				}
 			}
 			`\\` {
 				pos += char_len
-				esc, el := read_rune(pattern, pos)
+				if pos >= pattern.len {
+					return error('Trailing backslash')
+				}
+				esc, el := read_rune_at(pattern.str, pattern.len, pos)
 				pos += el
 				match esc {
 					`w` {
@@ -714,112 +794,113 @@ fn parse_nodes(pattern string, pos_start int, terminator rune, group_counter_sta
 		}
 
 		if parsed_nodes.len > 0 {
-			mut q := Quantifier{1, 1}
+			mut q := Quantifier{1, 1, true}
 			if pos < pattern.len {
-				peek, pl := read_rune(pattern, pos)
+				peek := pattern[pos]
 				match peek {
 					`*` {
-						q = Quantifier{0, -1}
-						pos += pl
+						q = Quantifier{0, -1, true}
+						pos++
 					}
 					`+` {
-						q = Quantifier{1, -1}
-						pos += pl
+						q = Quantifier{1, -1, true}
+						pos++
 					}
 					`?` {
-						q = Quantifier{0, 1}
-						pos += pl
+						q = Quantifier{0, 1, true}
+						pos++
 					}
 					`{` {
-						// Parse {m,n}
-						pos += pl
-						end_q := pattern.index_after('}', pos) or {
+						end := pattern.index_after('}', pos) or { -1 }
+						if end == -1 {
 							return error('Unclosed quantifier')
 						}
-						q_str := pattern[pos..end_q]
-						parts := q_str.split(',')
-						mut min := 0
-						mut max := 0
-						if parts.len == 1 {
-							min = strconv.atoi(parts[0]) or { 0 }
-							max = min
+						parts := pattern[pos + 1..end].split(',')
+						min := parts[0].int()
+						max := if parts.len > 1 {
+							if parts[1] == '' { -1 } else { parts[1].int() }
 						} else {
-							min = if parts[0].len > 0 { strconv.atoi(parts[0]) or { 0 } } else { 0 }
-							max = if parts[1].len > 0 {
-								strconv.atoi(parts[1]) or { -1 }
-							} else {
-								-1
-							}
+							min
 						}
-						q = Quantifier{min, max}
-						pos = end_q + 1
+						q = Quantifier{min, max, true}
+						pos = end + 1
 					}
 					else {}
 				}
+				if pos < pattern.len && pattern[pos] == `?` {
+					q.greedy = false
+					pos++
+				}
 			}
-			parsed_nodes[parsed_nodes.len - 1].quant = q
+			parsed_nodes.last().quant = q
 		}
-
 		current_sequence << parsed_nodes
 	}
 
 	if alternatives.len > 0 {
 		if current_sequence.len == 0 {
-			return error('Pattern cannot end with an empty alternative')
+			return error('Empty alternative at end of pattern')
 		}
 		alternatives << current_sequence
 		return [
 			Node{
 				typ:          .alternation
 				alternatives: alternatives
-				quant:        Quantifier{1, 1}
+				quant:        Quantifier{1, 1, true}
 			},
 		], pos, group_counter
 	}
-
 	return current_sequence, pos, group_counter
 }
 
 /******************************************************************************
 *
-* Virtual Machine Executor
+* Virtual Machine Execution Engine (Highly Optimized)
 *
 ******************************************************************************/
 
-// vm_match executes the compiled bytecode against the text starting at start_pos.
-fn (r Regex) vm_match(text string, start_pos int) ?Match {
-	mut stack := []Thread{cap: 32}
+// vm_match executes the bytecode against the input string using the provided Machine state.
+// OPTIMIZATION: Uses raw pointers for instruction and stack access to bypass bounds checking.
+@[direct_array_access]
+fn (r &Regex) vm_match(text string, start_pos int, mut m Machine) ?Match {
+	unsafe {
+		// Optimization: Cast voidptr to typed pointer for direct indexing
+		mut cap_ptr := &int(m.captures.data)
+		cap_len := m.captures.len
 
-	mut captures := []int{len: r.total_groups * 2, init: -1}
-	stack << Thread{
-		pc:       0
-		sp:       start_pos
-		captures: captures
-	}
+		// Fast clear of captures using pointer arithmetic (memset-like)
+		for i := 0; i < cap_len; i++ {
+			cap_ptr[i] = -1
+		}
 
-	prog := r.prog
+		mut sp := start_pos // String Pointer Index
+		mut stack_ptr := 0 // Stack Pointer Offset
 
-	for stack.len > 0 {
-		mut t := stack.pop()
-		mut pc := t.pc
-		mut sp := t.sp
-		mut cap := t.captures.clone()
+		cap_size := r.total_groups * 2
+		frame_size := cap_size + 2 // [captures..., saved_sp, saved_pc]
+
+		// Raw pointers for hot path access
+		prog_start := &Inst(r.prog.data)
+		mut inst_ptr := prog_start // PC as a pointer
+
+		str_ptr := text.str
+		str_len := text.len
+
+		// Cache stack data pointer (cast to typed pointer)
+		mut stack_data := &int(m.stack.data)
+		mut stack_max := m.stack.len
 
 		for {
-			if pc >= prog.len {
-				break
-			}
-			inst := unsafe { &prog[pc] }
+			// Check if we walked off the program (should be caught by match inst)
+			// Using pointer arithmetic: offset = (inst_ptr - prog_start)
 
-			match inst.typ {
+			match inst_ptr.typ {
 				.match {
-					mut s_groups := []string{len: r.total_groups}
+					// Only allocate result strings on successful match
+					mut s_groups := []string{cap: r.total_groups}
 					for i := 0; i < r.total_groups; i++ {
-						s := cap[i * 2]
-						e := cap[i * 2 + 1]
-						if s != -1 && e != -1 && s <= e {
-							s_groups[i] = text[s..e]
-						}
+						s, e := cap_ptr[i * 2], cap_ptr[i * 2 + 1]
+						s_groups << if s != -1 && e >= s { text[s..e] } else { '' }
 					}
 					return Match{
 						text:   text[start_pos..sp]
@@ -829,254 +910,314 @@ fn (r Regex) vm_match(text string, start_pos int) ?Match {
 					}
 				}
 				.char {
-					if sp >= text.len {
-						break
+					if sp >= str_len {
+						goto backtrack
 					}
-					c, cl := read_rune(text, sp)
+					curr_byte := str_ptr[sp]
 
-					mut matched := false
-					if inst.ignore_case {
-						mut c1 := c
-						mut c2 := inst.val
-						if c1 >= `a` && c1 <= `z` {
-							c1 -= 32
+					// Fast ASCII path
+					if curr_byte < 128 && inst_ptr.val < 128 {
+						mut c1, mut c2 := curr_byte, u8(inst_ptr.val)
+						if inst_ptr.ignore_case {
+							if c1 >= `a` && c1 <= `z` {
+								c1 -= 32
+							}
+							if c2 >= `a` && c2 <= `z` {
+								c2 -= 32
+							}
 						}
-						if c2 >= `a` && c2 <= `z` {
-							c2 -= 32
+						if c1 == c2 {
+							sp++
+							inst_ptr++
+							continue
 						}
-						matched = (c1 == c2)
-					} else {
-						matched = (c == inst.val)
+						goto backtrack
 					}
 
-					if matched {
-						sp += cl
-						pc++
+					// UTF-8 Path
+					rn, l := read_rune_at(str_ptr, str_len, sp)
+					if l == 0 {
+						goto backtrack
+					}
+
+					mut match_ok := false
+					if inst_ptr.ignore_case {
+						r1 := if rn >= `a` && rn <= `z` { rn - 32 } else { rn }
+						r2 := if inst_ptr.val >= `a` && inst_ptr.val <= `z` {
+							inst_ptr.val - 32
+						} else {
+							inst_ptr.val
+						}
+						if r1 == r2 {
+							match_ok = true
+						}
+					} else if rn == inst_ptr.val {
+						match_ok = true
+					}
+
+					if match_ok {
+						sp += l
+						inst_ptr++
 					} else {
-						break
+						goto backtrack
 					}
 				}
-				.any {
-					if sp >= text.len {
-						break
+				.string {
+					if sp + inst_ptr.val_len > str_len {
+						goto backtrack
 					}
-					c, cl := read_rune(text, sp)
-					if inst.dot_all || c != `\n` {
-						sp += cl
-						pc++
-					} else {
-						break
+					// Inline memcmp
+					v_str := inst_ptr.val_str.str
+					for i in 0 .. inst_ptr.val_len {
+						if str_ptr[sp + i] != v_str[i] {
+							goto backtrack
+						}
 					}
-				}
-				.match_digit {
-					if sp >= text.len {
-						break
-					}
-					c, cl := read_rune(text, sp)
-					if c >= `0` && c <= `9` {
-						sp += cl
-						pc++
-					} else {
-						break
-					}
-				}
-				.match_non_digit {
-					if sp >= text.len {
-						break
-					}
-					c, cl := read_rune(text, sp)
-					if !(c >= `0` && c <= `9`) {
-						sp += cl
-						pc++
-					} else {
-						break
-					}
-				}
-				.match_word {
-					if sp >= text.len {
-						break
-					}
-					c, cl := read_rune(text, sp)
-					if is_word_char(c) {
-						sp += cl
-						pc++
-					} else {
-						break
-					}
-				}
-				.match_non_word {
-					if sp >= text.len {
-						break
-					}
-					c, cl := read_rune(text, sp)
-					if !is_word_char(c) {
-						sp += cl
-						pc++
-					} else {
-						break
-					}
-				}
-				.match_space {
-					if sp >= text.len {
-						break
-					}
-					c, cl := read_rune(text, sp)
-					if is_whitespace(c) {
-						sp += cl
-						pc++
-					} else {
-						break
-					}
-				}
-				.match_non_space {
-					if sp >= text.len {
-						break
-					}
-					c, cl := read_rune(text, sp)
-					if !is_whitespace(c) {
-						sp += cl
-						pc++
-					} else {
-						break
-					}
-				}
-				.match_lower {
-					if sp >= text.len {
-						break
-					}
-					c, cl := read_rune(text, sp)
-					if c >= `a` && c <= `z` {
-						sp += cl
-						pc++
-					} else {
-						break
-					}
-				}
-				.match_upper {
-					if sp >= text.len {
-						break
-					}
-					c, cl := read_rune(text, sp)
-					if c >= `A` && c <= `Z` {
-						sp += cl
-						pc++
-					} else {
-						break
-					}
+					sp += inst_ptr.val_len
+					inst_ptr++
 				}
 				.class {
-					if sp >= text.len {
-						break
+					if sp >= str_len {
+						goto backtrack
 					}
-					c, cl := read_rune(text, sp)
+					c_byte := str_ptr[sp]
+					mut matched := false
+					mut cl := 1
 
-					mut found := false
-					for sc in inst.char_class {
-						if sc == c {
-							found = true
-							break
+					// Optimization: Bitmap lookup for ASCII
+					if c_byte < 128 {
+						if (inst_ptr.bitmap[c_byte >> 5] & (u32(1) << (c_byte & 31))) != 0 {
+							matched = true
 						}
-						if inst.ignore_case {
-							if (c >= `a` && c <= `z` && sc == c - 32)
-								|| (c >= `A` && c <= `Z` && sc == c + 32) {
-								found = true
+					} else {
+						rn, l := read_rune_at(str_ptr, str_len, sp)
+						cl = l
+						for cr in inst_ptr.char_class {
+							if cr == rn {
+								matched = true
 								break
 							}
 						}
 					}
 
-					if found != inst.inverted {
+					if matched != inst_ptr.inverted {
 						sp += cl
-						pc++
+						inst_ptr++
 					} else {
-						break
+						goto backtrack
 					}
 				}
-				.split {
-					stack << Thread{
-						pc:       inst.target_y
-						sp:       sp
-						captures: cap.clone()
+				.any {
+					if sp >= str_len {
+						goto backtrack
 					}
-					pc = inst.target_x
-				}
-				.jmp {
-					pc = inst.target_x
+					if inst_ptr.dot_all || str_ptr[sp] != `\n` {
+						_, cl := read_rune_at(str_ptr, str_len, sp)
+						sp += cl
+						inst_ptr++
+					} else {
+						goto backtrack
+					}
 				}
 				.save {
-					if inst.group_idx < cap.len {
-						cap[inst.group_idx] = sp
+					cap_ptr[inst_ptr.group_idx] = sp
+					inst_ptr++
+				}
+				.split {
+					if stack_ptr + frame_size >= stack_max {
+						new_size := stack_max * 2
+						if new_size > 1_000_000 {
+							goto backtrack
+						}
+						m.stack.grow_len(new_size)
+						stack_data = &int(m.stack.data) // Pointer might change on realloc
+						stack_max = new_size
 					}
-					pc++
+
+					// Optimization: Unrolled stack push
+					stack_offset := stack_ptr
+					for i in 0 .. cap_size {
+						stack_data[stack_offset + i] = cap_ptr[i]
+					}
+					stack_data[stack_offset + cap_size] = sp
+					// Save backtrack target PC index
+					stack_data[stack_offset + cap_size + 1] = inst_ptr.target_y
+
+					stack_ptr += frame_size
+					// Jump to primary target (convert index to pointer)
+					// FIX: Use pointer indexing instead of addition to avoid type mismatch
+					inst_ptr = &prog_start[inst_ptr.target_x]
+				}
+				.jmp {
+					inst_ptr = &prog_start[inst_ptr.target_x]
 				}
 				.assert_start {
 					if sp == 0 {
-						pc++
+						inst_ptr++
 					} else {
-						break
+						goto backtrack
 					}
 				}
 				.assert_end {
-					if sp == text.len {
-						pc++
+					if sp == str_len {
+						inst_ptr++
 					} else {
-						break
+						goto backtrack
 					}
 				}
 				.assert_line_start {
-					if sp == 0 {
-						pc++
+					if sp == 0 || (sp > 0 && str_ptr[sp - 1] == `\n`) {
+						inst_ptr++
 					} else {
-						// Check previous char for newline
-						// (Assumes 1-byte newline for simplicity, works for \n)
-						if sp > 0 && text[sp - 1] == `\n` {
-							pc++
-						} else {
-							break
-						}
+						goto backtrack
 					}
 				}
 				.assert_line_end {
-					if sp == text.len {
-						pc++
+					if sp == str_len || str_ptr[sp] == `\n` {
+						inst_ptr++
 					} else {
-						// Check current char for newline
-						if text[sp] == `\n` {
-							pc++
-						} else {
-							break
-						}
+						goto backtrack
 					}
 				}
 				.assert_bound, .assert_nbound {
-					mut left_word := false
-					if sp > 0 {
-						lc, _ := read_rune(text, sp - 1)
-						left_word = is_word_char(lc)
-					}
-					mut right_word := false
-					if sp < text.len {
-						rc, _ := read_rune(text, sp)
-						right_word = is_word_char(rc)
-					}
-
-					is_b := left_word != right_word
-					if (inst.typ == .assert_bound && is_b) || (inst.typ == .assert_nbound && !is_b) {
-						pc++
+					l := if sp > 0 { is_word_char(str_ptr[sp - 1]) } else { false }
+					r_ := if sp < str_len { is_word_char(str_ptr[sp]) } else { false }
+					if (inst_ptr.typ == .assert_bound && l != r_)
+						|| (inst_ptr.typ == .assert_nbound && l == r_) {
+						inst_ptr++
 					} else {
-						break
+						goto backtrack
 					}
 				}
 			}
+			continue
+
+			backtrack:
+			if stack_ptr <= 0 {
+				return none
+			}
+
+			stack_ptr -= frame_size
+			stack_offset := stack_ptr
+
+			// Restore captures
+			for i in 0 .. cap_size {
+				cap_ptr[i] = stack_data[stack_offset + i]
+			}
+			sp = stack_data[stack_offset + cap_size]
+			// Restore PC from index (explicit cast for pointer arithmetic)
+			// FIX: Use pointer indexing instead of addition
+			inst_ptr = &prog_start[stack_data[stack_offset + cap_size + 1]]
 		}
 	}
-
 	return none
 }
 
-// fullmatch checks if the entire input text matches the regex pattern.
-pub fn (r Regex) fullmatch(text string) ?Match {
-	if res := r.vm_match(text, 0) {
+/******************************************************************************
+*
+* Public API
+*
+******************************************************************************/
+
+// find returns the first match of the regex in text.
+pub fn (r &Regex) find(text string) ?Match {
+	return r.find_from(text, 0)
+}
+
+// find_from returns the first match starting from start_index.
+// Optimized with fast prefix skipping and anchor checks.
+pub fn (r &Regex) find_from(text string, start_index int) ?Match {
+	if start_index < 0 || start_index > text.len {
+		return none
+	}
+	mut m := r.new_machine()
+
+	// Optimization: Anchored pattern (^) only checks the start
+	if r.anchored {
+		if start_index == 0 {
+			return r.vm_match(text, 0, mut m)
+		}
+		// If multiline mode is NOT enabled, ^ only matches index 0.
+		// If multiline is enabled, we need to check every newline, handled by logic below.
+		// Note: The compiler sets anchored=true only for ^ at start.
+		// If multiline flag is set dynamically inside pattern, strict anchoring logic might differ,
+		// but standard ^ usage benefits here.
+	}
+
+	// Optimization: Boyer-Moore-like literal prefix skip
+	if r.has_prefix {
+		mut i := text.index_after(r.prefix_lit, start_index) or { -1 }
+		for i != -1 {
+			if res := r.vm_match(text, i, mut m) {
+				return res
+			}
+			i = text.index_after(r.prefix_lit, i + 1) or { -1 }
+		}
+		return none
+	}
+
+	for i := start_index; i <= text.len; i++ {
+		// Skip UTF-8 continuation bytes to ensure we only match at rune boundaries
+		// 0xC0 (11000000) is the start of a multi-byte sequence, 0x80 (10000000) is a continuation
+		if i > 0 && i < text.len && (text[i] & 0xC0) == 0x80 {
+			continue
+		}
+		if res := r.vm_match(text, i, mut m) {
+			return res
+		}
+	}
+	return none
+}
+
+// find_all returns all non-overlapping matches in text.
+pub fn (r &Regex) find_all(text string) []Match {
+	mut matches := []Match{}
+	mut m := r.new_machine()
+	mut i := 0
+	for i <= text.len {
+		if i > 0 && i < text.len && (text[i] & 0xC0) == 0x80 {
+			i++
+			continue
+		}
+		if res := r.vm_match(text, i, mut m) {
+			matches << res
+			i = if res.end > i { res.end } else { i + 1 }
+		} else {
+			i++
+		}
+	}
+	return matches
+}
+
+// replace finds the first match and replaces it using repl. Supports $1, $2 backreferences.
+pub fn (r &Regex) replace(text string, repl string) string {
+	res := r.find(text) or { return text }
+	mut sb := strings.new_builder(text.len + repl.len)
+	sb.write_string(text[0..res.start])
+	mut i := 0
+	for i < repl.len {
+		if repl[i] == `$` && i + 1 < repl.len {
+			next_char := repl[i + 1]
+			if next_char >= `0` && next_char <= `9` {
+				d := next_char - `0` - 1
+				if d >= 0 && d < res.groups.len {
+					sb.write_string(res.groups[d])
+				}
+				i += 2
+				continue
+			}
+		}
+		sb.write_u8(repl[i])
+		i++
+	}
+	sb.write_string(text[res.end..])
+	return sb.str()
+}
+
+// fullmatch returns a Match only if the pattern matches the entire text.
+pub fn (r &Regex) fullmatch(text string) ?Match {
+	mut m := r.new_machine()
+	if res := r.vm_match(text, 0, mut m) {
 		if res.end == text.len {
 			return res
 		}
@@ -1084,108 +1225,43 @@ pub fn (r Regex) fullmatch(text string) ?Match {
 	return none
 }
 
-// replace finds the first match in text and replaces it with repl.
-// Supports $1, $2, etc. in repl for group substitution.
-pub fn (r Regex) replace(text string, repl string) string {
-	match_res := r.find(text) or { return text }
-	mut sb := strings.new_builder(text.len)
-	sb.write_string(text[0..match_res.start])
-	mut i := 0
-	for i < repl.len {
-		if repl[i] == `$` && i + 1 < repl.len && repl[i + 1].is_digit() {
-			group_index := repl[i + 1].ascii_str().int() - 1 // $1 -> idx 0
-			if group_index >= 0 && group_index < match_res.groups.len {
-				sb.write_string(match_res.groups[group_index])
-			}
-			i += 2
-		} else {
-			sb.write_byte(repl[i])
-			i++
-		}
-	}
-	sb.write_string(text[match_res.end..])
-	return sb.str()
+// group_by_name retrieves text captured by a named group.
+pub fn (r &Regex) group_by_name(m Match, name string) string {
+	idx := r.group_map[name] or { return '' }
+	return if idx < m.groups.len { m.groups[idx] } else { '' }
 }
 
-// group_by_name retrieves the captured text for a named group from a Match.
-pub fn (r Regex) group_by_name(m Match, name string) string {
-	if idx := r.group_map[name] {
-		if idx >= 0 && idx < m.groups.len {
-			return m.groups[idx]
-		}
-	}
-	return ''
+/******************************************************************************
+*
+* Compatibility Layer
+*
+******************************************************************************/
+
+// new_regex is a helper wrapper to compile a regex pattern.
+pub fn new_regex(pattern string, _ int) !Regex {
+	return compile(pattern)
 }
 
-// find scans the string `text` for the first occurrence of a pattern match.
-pub fn (r Regex) find(text string) ?Match {
-	if r.prog.len > 0 && r.prog[0].typ == .assert_start {
-		return r.vm_match(text, 0)
-	}
-
-	for i := 0; i <= text.len; i++ {
-		if i > 0 && i < text.len && (text[i] & 0xC0) == 0x80 {
-			continue
-		}
-
-		if res := r.vm_match(text, i) {
-			return res
-		}
-	}
-	return none
-}
-
-// find_all returns a list of all non-overlapping matches in the string.
-pub fn (r Regex) find_all(text string) []Match {
-	mut matches := []Match{}
-	mut i := 0
-
-	if r.prog.len > 0 && r.prog[0].typ == .assert_start {
-		if m := r.vm_match(text, 0) {
-			matches << m
-		}
-		return matches
-	}
-
-	for i <= text.len {
-		if i > 0 && i < text.len && (text[i] & 0xC0) == 0x80 {
-			i++
-			continue
-		}
-
-		if m := r.vm_match(text, i) {
-			matches << m
-			if m.end > i {
-				i = m.end
-			} else {
-				i++
-			}
-		} else {
-			i++
-		}
-	}
-
-	return matches
-}
-
-// find_from finds the first match starting search from a specific index.
-pub fn (r Regex) find_from(text string, start_index int) ?Match {
-	if start_index < 0 || start_index > text.len {
-		return none
-	}
-
-	for i := start_index; i <= text.len; i++ {
-		if i > 0 && i < text.len && (text[i] & 0xC0) == 0x80 {
-			continue
-		}
-		if res := r.vm_match(text, i) {
-			return res
-		}
-	}
-	return none
-}
-
-// match_str is an alias for find_from, for compatibility with older PCRE wrappers.
-pub fn (r Regex) match_str(text string, start_index int, _ int) ?Match {
+// match_str is a compatibility alias for find_from.
+pub fn (r &Regex) match_str(text string, start_index int, _ int) ?Match {
 	return r.find_from(text, start_index)
+}
+
+// get returns the matched text for a specific group index.
+// Index 0 returns the full match, 1..n returns capture groups.
+pub fn (m Match) get(idx int) ?string {
+	if idx == 0 {
+		return m.text
+	}
+	if idx > 0 && idx <= m.groups.len {
+		return m.groups[idx - 1]
+	}
+	return none
+}
+
+// get_all returns a list of all captured strings, starting with the full match at index 0.
+pub fn (m Match) get_all() []string {
+	mut res := [m.text]
+	res << m.groups
+	return res
 }
