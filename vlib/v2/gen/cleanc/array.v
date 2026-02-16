@@ -323,6 +323,32 @@ fn (mut g Gen) infer_array_method_elem_type(expr ast.Expr) string {
 	return ''
 }
 
+fn (mut g Gen) infer_array_contains_elem_type(name string, call_args []ast.Expr) string {
+	arr_type := if call_args.len > 0 { g.get_expr_type(call_args[0]) } else { '' }
+	if arr_type.starts_with('Array_fixed_') {
+		if finfo := g.collected_fixed_array_types[arr_type] {
+			return finfo.elem_type
+		}
+	} else if arr_type.starts_with('Array_') {
+		return arr_type['Array_'.len..]
+	}
+	mut suffix := ''
+	if name.starts_with('array__contains_') {
+		suffix = name['array__contains_'.len..]
+	}
+	if suffix != '' && suffix != 'void' {
+		return suffix
+	}
+	if call_args.len > 1 {
+		rhs_type := g.get_expr_type(call_args[1])
+		if rhs_type != '' && rhs_type != 'int_literal' && rhs_type != 'float_literal'
+			&& rhs_type != 'void' {
+			return rhs_type.trim_right('*')
+		}
+	}
+	return 'int'
+}
+
 fn (mut g Gen) fixed_array_selector_elem_type(sel ast.SelectorExpr) string {
 	mut struct_name := ''
 	if raw_type := g.get_raw_type(sel.lhs) {
@@ -369,8 +395,6 @@ fn (mut g Gen) is_fixed_array_selector(sel ast.SelectorExpr) bool {
 	return false
 }
 
-// expr_contains_ident checks if an AST expression contains an identifier with the given name.
-
 fn (mut g Gen) gen_array_init_expr(node ast.ArrayInitExpr) {
 	raw_elem := g.extract_array_elem_type(node.typ)
 	// Convert C pointer syntax to mangled name for composite types:
@@ -400,7 +424,7 @@ fn (mut g Gen) gen_array_init_expr(node ast.ArrayInitExpr) {
 				if i > 0 {
 					g.sb.write_string(', ')
 				}
-				g.gen_expr(e)
+				g.expr(e)
 			}
 			g.sb.write_string('}')
 			return
@@ -411,7 +435,7 @@ fn (mut g Gen) gen_array_init_expr(node ast.ArrayInitExpr) {
 			if i > 0 {
 				g.sb.write_string(', ')
 			}
-			g.gen_expr(e)
+			g.expr(e)
 		}
 		g.sb.write_string('}')
 		return
@@ -518,7 +542,7 @@ fn (mut g Gen) try_emit_const_dynamic_array_call(name string, value ast.Expr) bo
 			if i > 0 {
 				g.sb.write_string(', ')
 			}
-			g.gen_expr(e)
+			g.expr(e)
 		}
 		g.sb.writeln('};')
 		g.sb.writeln('array ${name} = ((array){ .data = ${data_name}, .offset = 0, .len = ${len_expr}, .cap = ${cap_expr}, .flags = 0, .element_size = sizeof(${elem_type}) });')
@@ -532,7 +556,7 @@ fn (mut g Gen) gen_fixed_array_cmp_operand(expr ast.Expr, fixed_type string) {
 	// For ArrayInitExpr (fixed array literals), wrap in compound literal
 	if expr is ast.ArrayInitExpr {
 		g.sb.write_string('(${fixed_type})')
-		g.gen_expr(expr)
+		g.expr(expr)
 		return
 	}
 	// Unwrap parens to find ArrayInitExpr inside
@@ -540,9 +564,9 @@ fn (mut g Gen) gen_fixed_array_cmp_operand(expr ast.Expr, fixed_type string) {
 		inner := g.unwrap_parens(expr.expr)
 		if inner is ast.ArrayInitExpr {
 			g.sb.write_string('(${fixed_type})')
-			g.gen_expr(inner)
+			g.expr(inner)
 			return
 		}
 	}
-	g.gen_expr(expr)
+	g.expr(expr)
 }

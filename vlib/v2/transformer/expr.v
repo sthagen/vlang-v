@@ -314,6 +314,7 @@ fn (mut t Transformer) transform_index_expr(expr ast.IndexExpr) ast.Expr {
 			lhs:      t.transform_expr(expr.lhs)
 			expr:     t.transform_expr(expr.expr)
 			is_gated: expr.is_gated
+			pos:      expr.pos
 		}
 	}
 
@@ -442,6 +443,7 @@ fn (mut t Transformer) transform_index_expr(expr ast.IndexExpr) ast.Expr {
 		lhs:      t.transform_expr(expr.lhs)
 		expr:     t.transform_expr(expr.expr)
 		is_gated: expr.is_gated
+		pos:      expr.pos
 	}
 }
 
@@ -1593,12 +1595,23 @@ fn (mut t Transformer) transform_if_expr(expr ast.IfExpr) ast.Expr {
 	for _ in body_smartcasts {
 		t.pop_smartcast()
 	}
-	return ast.IfExpr{
+	transformed_if := ast.IfExpr{
 		cond:      t.transform_expr(expr.cond)
 		stmts:     transformed_stmts
 		else_expr: t.transform_expr(expr.else_expr)
 		pos:       expr.pos
 	}
+	// Lower value-position IfExpr: hoist to a temp variable assignment.
+	// This eliminates expression-valued IfExpr so backends don't need statement-expressions.
+	// A value-position if has an else branch and its body ends with an ExprStmt (producing a value).
+	// Skip lowering when:
+	// - The IfExpr is directly inside an ExprStmt (statement position, not value)
+	// - The IfExpr is already the RHS of a decl_assign (cleanc handles this efficiently)
+	if !t.skip_if_value_lowering && transformed_if.else_expr !is ast.EmptyExpr
+		&& t.if_expr_is_value(transformed_if) {
+		return t.lower_if_expr_value(transformed_if)
+	}
+	return transformed_if
 }
 
 // get_sumtype_name_for_expr returns the sum type name for an expression, or empty string if not a sum type
@@ -2015,6 +2028,35 @@ fn (mut t Transformer) transform_infix_expr(expr ast.InfixExpr) ast.Expr {
 			if rhs_is_array {
 				// RHS is an array - use array__push_many(array*, val.data, val.len)
 				rhs_transformed := t.transform_expr(expr.rhs)
+				// When RHS contains a call expression, introduce a temporary variable
+				// to avoid evaluating the call twice (once for .data, once for .len).
+				// The VarDecl is hoisted via pending_stmts before the current statement.
+				if t.contains_call_expr(expr.rhs) {
+					t.temp_counter++
+					tmp_name := '_pm_t${t.temp_counter}'
+					tmp_ident := ast.Ident{
+						name: tmp_name
+					}
+					if rhs_type := t.get_expr_type(expr.rhs) {
+						t.register_temp_var(tmp_name, rhs_type)
+					}
+					t.pending_stmts << ast.Stmt(ast.AssignStmt{
+						op:  .decl_assign
+						lhs: [ast.Expr(tmp_ident)]
+						rhs: [rhs_transformed]
+					})
+					return ast.CallExpr{
+						lhs:  ast.Ident{
+							name: 'array__push_many'
+						}
+						args: [
+							arr_ptr_expr,
+							t.synth_selector(ast.Expr(tmp_ident), 'data', types.Type(types.voidptr_)),
+							t.synth_selector(ast.Expr(tmp_ident), 'len', types.Type(types.int_)),
+						]
+						pos:  expr.pos
+					}
+				}
 				// Wrap PrefixExpr in parens to fix operator precedence (*other.data -> (*other).data)
 				rhs_for_selector := if expr.rhs is ast.PrefixExpr {
 					ast.Expr(ast.ParenExpr{
