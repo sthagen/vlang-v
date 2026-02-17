@@ -20,13 +20,15 @@ const hide_warnings = '-hide-warnings' in os.args || '-w' in os.args
 const show_progress = os.getenv('GITHUB_JOB') == '' && '-silent' !in os.args
 const non_option_args = cmdline.only_non_options(os.args[2..])
 const is_verbose = os.getenv('VERBOSE') != ''
-const vcheckfolder = os.join_path(os.vtmp_dir(), 'vcheck_${os.getuid()}')
+const vcheckfolder = os.join_path(os.vtmp_dir(), 'vcheck_${os.getpid()}')
 const should_autofix = os.getenv('VAUTOFIX') != '' || '-fix' in os.args
 const vexe = @VEXE
 
 struct CheckResult {
 pub mut:
 	files    int
+	lines    int
+	examples int
 	oks      int
 	warnings int
 	ferrors  int
@@ -36,6 +38,8 @@ pub mut:
 fn (v1 CheckResult) + (v2 CheckResult) CheckResult {
 	return CheckResult{
 		files:    v1.files + v2.files
+		lines:    v1.lines + v2.lines
+		examples: v1.examples + v2.examples
 		oks:      v1.oks + v2.oks
 		warnings: v1.warnings + v2.warnings
 		ferrors:  v1.ferrors + v2.ferrors
@@ -44,6 +48,7 @@ fn (v1 CheckResult) + (v2 CheckResult) CheckResult {
 }
 
 fn main() {
+	unbuffer_stdout()
 	if non_option_args.len == 0 || '-help' in os.args {
 		help.print_and_exit('check-md')
 	}
@@ -52,10 +57,6 @@ fn main() {
 		exit(1)
 	}
 	mut skip_line_length_check := '-skip-line-length-check' in os.args
-	if show_progress {
-		// this is intended to be replaced by the progress lines
-		println('')
-	}
 	mut files_paths := non_option_args.clone()
 	mut res := CheckResult{}
 	if term_colors {
@@ -65,6 +66,7 @@ fn main() {
 	defer {
 		os.rmdir_all(vcheckfolder) or {}
 	}
+	mut all_mdfiles := []MDFile{}
 	for i := 0; i < files_paths.len; i++ {
 		file_path := files_paths[i]
 		if os.is_dir(file_path) {
@@ -77,17 +79,26 @@ fn main() {
 			res.warnings++
 			continue
 		}
-		mut mdfile := MDFile{
+		all_mdfiles << MDFile{
 			skip_line_length_check: skip_line_length_check
 			path:                   file_path
 			lines:                  lines
 		}
+	}
+	println('> Found: ${all_mdfiles.len} .md files.')
+	if show_progress {
+		// this is intended to be replaced by the progress lines
+		println('')
+	}
+	for idx, mut mdfile in all_mdfiles {
+		mdfile.idx = idx
+		mdfile.nfiles = all_mdfiles.len
 		res += mdfile.check()
 	}
 	if res.errors == 0 && show_progress {
 		clear_previous_line()
 	}
-	println('Checked .md files: ${res.files} | OKs: ${res.oks} | Warnings: ${res.warnings} | Errors: ${res.errors} | Formatting errors: ${res.ferrors}')
+	println('Checked .md files: ${res.files} | Ex.: ${res.examples} | Lines: ${res.lines} | OKs: ${res.oks} | Warnings: ${res.warnings} | Errors: ${res.errors} | Fmt errors: ${res.ferrors}')
 	if res.ferrors > 0 && !should_autofix {
 		println('Note: you can use `VAUTOFIX=1 v check-md file.md`, or `v check-md -fix file.md`,')
 		println('      to fix the V formatting errors in the markdown code blocks, when possible.')
@@ -166,6 +177,8 @@ struct MDFile {
 	path                   string
 	skip_line_length_check bool
 mut:
+	idx      int
+	nfiles   int
 	lines    []string
 	examples []VCodeExample
 	current  VCodeExample
@@ -180,7 +193,7 @@ mut:
 fn (mut f MDFile) progress(message string) {
 	if show_progress {
 		clear_previous_line()
-		println('File: ${f.path}, ${message}')
+		println('${message} | File ${f.idx + 1:3}/${f.nfiles:-3}: ${f.path}')
 	}
 }
 
@@ -241,6 +254,8 @@ fn (mut f MDFile) check() CheckResult {
 	f.check_examples()
 	return CheckResult{
 		files:    1
+		lines:    f.lines.len
+		examples: f.examples.len
 		oks:      f.oks
 		warnings: f.warnings
 		errors:   f.errors
@@ -472,8 +487,8 @@ fn (mut f MDFile) check_examples() {
 		mut acommands := e.command.split(' ')
 		nofmt := 'nofmt' in acommands
 		for command in acommands {
-			f.progress('OK: ${f.oks:3}, W: ${f.warnings:2}, E: ${f.errors:2}, F: ${f.ferrors:2}, example ${
-				eidx + 1}/${f.examples.len}, from line ${e.sline} to line ${e.eline}, lines: ${f.lines.len:5}, command: ${command}')
+			f.progress('OK: ${f.oks:3}, W: ${f.warnings:2}, E: ${f.errors:2}, F: ${f.ferrors:2}, ex. ${
+				eidx + 1:3}/${f.examples.len:-3}, from line ${e.sline:4} to line ${e.eline:-4} of ${f.lines.len:-4}, command: ${command:12s}')
 			fmt_res := if nofmt { 0 } else { get_fmt_exit_code(vfile, vexe) }
 			f.ferrors += fmt_res
 			match command {
