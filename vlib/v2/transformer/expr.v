@@ -216,10 +216,9 @@ fn (mut t Transformer) transform_expr(expr ast.Expr) ast.Expr {
 			// IfGuardExpr should only appear as IfExpr condition, handled by transform_if_expr.
 			// If it somehow reaches here standalone, just evaluate the RHS.
 			if expr.stmt.rhs.len > 0 {
-				t.transform_expr(expr.stmt.rhs[0])
-			} else {
-				expr
+				return t.transform_expr(expr.stmt.rhs[0])
 			}
+			expr
 		}
 		ast.GenericArgs {
 			// Disambiguate `x[y]` parsed as GenericArgs: if lhs is not callable and there
@@ -294,6 +293,19 @@ fn (mut t Transformer) transform_expr(expr ast.Expr) ast.Expr {
 				expr: t.transform_expr(expr.expr)
 				pos:  expr.pos
 			})
+		}
+		ast.KeywordOperator {
+			if expr.op == .key_typeof && expr.exprs.len > 0 {
+				type_name := t.resolve_typeof_expr(expr.exprs[0])
+				if type_name != '' {
+					return ast.StringLiteral{
+						kind:  .v
+						value: quote_v_string_literal(type_name)
+						pos:   expr.pos
+					}
+				}
+			}
+			expr
 		}
 		else {
 			expr
@@ -578,6 +590,19 @@ fn (mut t Transformer) transform_slice_index_expr(lhs ast.Expr, orig_lhs ast.Exp
 
 // transform_selector_expr transforms a selector expression, applying smart cast if applicable
 fn (mut t Transformer) transform_selector_expr(expr ast.SelectorExpr) ast.Expr {
+	// typeof(x).name -> string literal with V type name
+	if expr.lhs is ast.KeywordOperator && expr.lhs.op == .key_typeof && expr.rhs.name == 'name' {
+		if expr.lhs.exprs.len > 0 {
+			type_name := t.resolve_typeof_expr(expr.lhs.exprs[0])
+			if type_name != '' {
+				return ast.StringLiteral{
+					kind:  .v
+					value: quote_v_string_literal(type_name)
+					pos:   expr.pos
+				}
+			}
+		}
+	}
 	// Check for smart cast field access: check ALL contexts in the stack
 	if t.has_active_smartcast() {
 		full_str := t.expr_to_string(expr)
@@ -596,6 +621,7 @@ fn (mut t Transformer) transform_selector_expr(expr ast.SelectorExpr) ast.Expr {
 		}
 	}
 	// Handle module-qualified enum value access: module.EnumType.value -> module__EnumType__value
+	// Also handle nested module references: rand.seed.time_seed_array -> seed__time_seed_array
 	if expr.lhs is ast.SelectorExpr {
 		lhs_sel := expr.lhs as ast.SelectorExpr
 		if lhs_sel.lhs is ast.Ident {
@@ -606,6 +632,28 @@ fn (mut t Transformer) transform_selector_expr(expr ast.SelectorExpr) ast.Expr {
 				if typ is types.Enum {
 					return ast.Ident{
 						name: '${qualified}__${expr.rhs.name}'
+						pos:  expr.pos
+					}
+				}
+			}
+			// Nested module reference: rand.seed.time_seed_array -> seed__time_seed_array
+			// Only resolve when both the outer ident is a module AND the inner name
+			// is also a sub-module (not a variable like os.args.len).
+			if t.is_module_ident(module_name) {
+				sub_mod := lhs_sel.rhs.name
+				fn_name := expr.rhs.name
+				// Check if sub_mod is actually a module scope
+				if t.get_module_scope(sub_mod) != none {
+					return ast.Ident{
+						name: '${sub_mod}__${fn_name}'
+						pos:  expr.pos
+					}
+				}
+				// Try full qualified name (module__sub_mod as scope key)
+				full_mod := '${module_name}__${sub_mod}'
+				if t.get_module_scope(full_mod) != none {
+					return ast.Ident{
+						name: '${full_mod}__${fn_name}'
 						pos:  expr.pos
 					}
 				}
@@ -849,10 +897,29 @@ fn (mut t Transformer) transform_match_expr(expr ast.MatchExpr) ast.Expr {
 	}
 
 	// Non-sum type match - simple transformation
+	// Determine if match expression is an enum type so we can resolve shorthands (.red → Color__red)
+	mut enum_type_name := ''
+	if typ := t.get_expr_type(expr.expr) {
+		c_name := t.type_to_c_name(typ)
+		if c_name != '' {
+			if resolved := t.lookup_type(c_name) {
+				if resolved is types.Enum {
+					enum_type_name = c_name
+				}
+			}
+		}
+	}
 	mut branches := []ast.MatchBranch{cap: expr.branches.len}
 	for branch in expr.branches {
+		mut conds := branch.cond.clone()
+		if enum_type_name != '' {
+			conds = []ast.Expr{cap: branch.cond.len}
+			for c in branch.cond {
+				conds << t.resolve_enum_shorthand(c, enum_type_name)
+			}
+		}
 		branches << ast.MatchBranch{
-			cond:  branch.cond
+			cond:  conds
 			stmts: t.transform_stmts(branch.stmts)
 			pos:   branch.pos
 		}
@@ -1377,9 +1444,60 @@ fn (mut t Transformer) transform_if_expr(expr ast.IfExpr) ast.Expr {
 				is_option = fn_name != '' && t.fn_returns_option(fn_name)
 			}
 			// Native backends (arm64/x64) don't use Option/Result structs -
-			// functions return raw values (0 for none). Skip struct-based
-			// expansion and fall through to simple truthiness check.
+			// functions return raw values (0 for none). Use temp variable +
+			// truthiness check to avoid double-calling the function.
 			if t.pref != unsafe { nil } && (t.pref.backend == .arm64 || t.pref.backend == .x64) {
+				if is_option || is_result {
+					temp_name := t.gen_temp_name()
+					temp_ident := ast.Ident{
+						name: temp_name
+						pos:  synth_pos
+					}
+					// 1. _tmp := call()
+					temp_assign := ast.AssignStmt{
+						op:  .decl_assign
+						lhs: [ast.Expr(temp_ident)]
+						rhs: [t.transform_expr(rhs)]
+						pos: synth_pos
+					}
+					// 2. Body: guard_var := _tmp; original_body
+					mut body_stmts := []ast.Stmt{}
+					mut is_blank := false
+					if guard.stmt.lhs.len == 1 {
+						lhs0 := guard.stmt.lhs[0]
+						if lhs0 is ast.Ident {
+							if lhs0.name == '_' {
+								is_blank = true
+							}
+						}
+					}
+					if !is_blank {
+						body_stmts << ast.AssignStmt{
+							op:  .decl_assign
+							lhs: guard.stmt.lhs
+							rhs: [ast.Expr(temp_ident)]
+							pos: guard.stmt.pos
+						}
+					}
+					for s in expr.stmts {
+						body_stmts << s
+					}
+					// 3. Condition: truthiness of _tmp (0 = none for native backends)
+					modified_if := ast.IfExpr{
+						cond:      temp_ident
+						stmts:     t.transform_stmts(body_stmts)
+						else_expr: t.transform_expr(expr.else_expr)
+						pos:       synth_pos
+					}
+					if orig_type := t.get_expr_type(ast.Expr(expr)) {
+						t.register_synth_type(synth_pos, orig_type)
+					}
+					return ast.UnsafeExpr{
+						stmts: [ast.Stmt(temp_assign), ast.ExprStmt{
+							expr: modified_if
+						}]
+					}
+				}
 				is_result = false
 				is_option = false
 			}
@@ -2163,22 +2281,12 @@ fn (mut t Transformer) transform_infix_expr(expr ast.InfixExpr) ast.Expr {
 		// Also check type environment for expression types if is_string_expr didn't find it
 		if !lhs_is_str {
 			if expr_type := t.get_expr_type(expr.lhs) {
-				if expr_type is types.String {
-					lhs_is_str = true
-				}
-				if expr_type is types.Struct && (expr_type as types.Struct).name == 'string' {
-					lhs_is_str = true
-				}
+				lhs_is_str = t.type_is_string(expr_type)
 			}
 		}
 		if !rhs_is_str {
 			if expr_type := t.get_expr_type(expr.rhs) {
-				if expr_type is types.String {
-					rhs_is_str = true
-				}
-				if expr_type is types.Struct && (expr_type as types.Struct).name == 'string' {
-					rhs_is_str = true
-				}
+				rhs_is_str = t.type_is_string(expr_type)
 			}
 		}
 		// If one side is a string literal and the other is unknown (but likely a string),
@@ -2312,6 +2420,45 @@ fn (mut t Transformer) transform_infix_expr(expr ast.InfixExpr) ast.Expr {
 			}
 			// arr1 == arr2 -> array__eq(arr1, arr2)
 			return eq_call
+		}
+		// Check for map comparisons: map1 == map2 or map1 != map2
+		// Exclude pointer-to-map types (those should be pointer comparisons)
+		if expr.op in [.eq, .ne] {
+			mut is_lhs_ptr_map := false
+			if lhs_type := t.get_expr_type(expr.lhs) {
+				if lhs_type is types.Pointer {
+					is_lhs_ptr_map = true
+				}
+			}
+			mut is_rhs_ptr_map := false
+			if rhs_type := t.get_expr_type(expr.rhs) {
+				if rhs_type is types.Pointer {
+					is_rhs_ptr_map = true
+				}
+			}
+			if !is_lhs_ptr_map && !is_rhs_ptr_map {
+				lhs_map_type := t.get_map_type_for_expr(expr.lhs)
+				rhs_map_type := t.get_map_type_for_expr(expr.rhs)
+				if lhs_map_type != none || rhs_map_type != none {
+					map_type_name := lhs_map_type or { rhs_map_type or { 'map' } }
+					eq_fn := '${map_type_name}_map_eq'
+					map_eq_call := ast.CallExpr{
+						lhs:  ast.Ident{
+							name: eq_fn
+						}
+						args: [t.transform_expr(expr.lhs), t.transform_expr(expr.rhs)]
+						pos:  expr.pos
+					}
+					if expr.op == .ne {
+						return ast.PrefixExpr{
+							op:   .not
+							expr: map_eq_call
+							pos:  expr.pos
+						}
+					}
+					return map_eq_call
+				}
+			}
 		}
 	}
 	// Check for struct operator overloading (e.g., time.Time - time.Time)

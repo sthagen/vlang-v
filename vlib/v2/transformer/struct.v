@@ -124,9 +124,18 @@ fn (mut t Transformer) apply_smartcast_field_access_ctx(sumtype_expr ast.Expr, f
 	if t.expr_is_casted_to_type(transformed_base, mangled_variant) {
 		return t.synth_selector_from_struct(transformed_base, field_name, mangled_variant)
 	}
-	// Create: transformed_base._data._variant (using simple name for accessor)
+	// Create data access.
+	// For native backends (arm64/x64): _data is a plain i64 (void pointer) in the SSA struct.
+	// No union variant sub-field exists, so just use _data directly.
+	// For C backends: _data is a union, so access _data._variant for the specific member.
+	is_native_backend := t.pref != unsafe { nil }
+		&& (t.pref.backend == .arm64 || t.pref.backend == .x64)
 	data_access := t.synth_selector(transformed_base, '_data', types.Type(types.voidptr_))
-	variant_access := t.synth_selector(data_access, '_${variant_simple}', types.Type(types.voidptr_))
+	variant_access := if is_native_backend {
+		data_access
+	} else {
+		t.synth_selector(data_access, '_${variant_simple}', types.Type(types.voidptr_))
+	}
 	// Create: (mangled_variant*)variant_access
 	cast_expr := ast.CastExpr{
 		typ:  ast.Ident{
@@ -478,9 +487,17 @@ fn (mut t Transformer) transform_array_init_expr(expr ast.ArrayInitExpr) ast.Exp
 				} else if first.lhs is ast.SelectorExpr {
 					fn_name = first.lhs.rhs.name
 				}
-				// String methods that return string
-				if fn_name in ['substr', 'substr_unsafe', 'trim', 'trim_left', 'trim_right',
+				// Dynamic array construction functions return 'array' type
+				if fn_name in ['builtin__new_array_from_c_array_noscan',
+					'builtin__new_array_from_c_array', '__new_array_with_default_noscan',
+					'new_array_from_c_array'] {
+					elem_type_name = 'array'
+					ast.Expr(ast.Ident{
+						name: 'array'
+					})
+				} else if fn_name in ['substr', 'substr_unsafe', 'trim', 'trim_left', 'trim_right',
 					'to_upper', 'to_lower', 'replace', 'reverse', 'clone', 'repeat'] {
+					// String methods that return string
 					elem_type_name = 'string'
 					ast.Expr(ast.Ident{
 						name: 'string'
@@ -1054,8 +1071,17 @@ fn (mut t Transformer) add_missing_struct_field_defaults(struct_name string, fie
 	}
 	struct_info := base_type as types.Struct
 	mut existing := map[string]bool{}
+	mut positional_idx := 0
 	for field in fields {
-		existing[field.name] = true
+		if field.name == '' {
+			// Positional field — map it to the corresponding struct field name
+			if positional_idx < struct_info.fields.len {
+				existing[struct_info.fields[positional_idx].name] = true
+			}
+			positional_idx++
+		} else {
+			existing[field.name] = true
+		}
 	}
 	mut out := []ast.FieldInit{cap: fields.len}
 	for field in fields {
@@ -1512,14 +1538,16 @@ fn (mut t Transformer) expand_array_init_with_index(len_expr ast.Expr, cap_expr 
 	//    with `index` renamed to `_v_index`
 	renamed_init := t.replace_ident_named(init_expr, 'index', '_v_index')
 	arr_data := t.synth_selector(arr_ident, 'data', types.Type(types.voidptr_))
+	// Use a simple Ident for the cast type name so cleanc renders it as
+	// ((ElemType*)data)[idx] without decomposing compound type expressions.
+	cast_type_name := t.expr_to_type_name(sizeof_expr)
 	elem_assign := ast.Stmt(ast.AssignStmt{
 		op:  .assign
 		lhs: [
 			ast.Expr(ast.IndexExpr{
 				lhs:  ast.CastExpr{
-					typ:  ast.PrefixExpr{
-						op:   .amp
-						expr: sizeof_expr
+					typ:  ast.Ident{
+						name: '${cast_type_name}*'
 					}
 					expr: arr_data
 				}

@@ -191,7 +191,10 @@ fn (mut g Gen) emit_exported_const_symbols() {
 		g.sb.writeln('#ifdef ${sym.name}')
 		g.sb.writeln('#undef ${sym.name}')
 		g.sb.writeln('#endif')
-		g.sb.writeln('const ${sym.typ} ${sym.name} = ${sym.value};')
+		// Resolve references to other constants so the initializer is a
+		// compile-time constant expression (required by TCC and strict C).
+		resolved := g.resolve_const_expr(sym.value)
+		g.sb.writeln('const ${sym.typ} ${sym.name} = ${resolved};')
 	}
 }
 
@@ -261,9 +264,19 @@ fn (mut g Gen) gen_const_decl(node ast.ConstDecl) {
 				elem_type = g.get_expr_type(array_value.exprs[0])
 			}
 			if elem_type != '' && elem_type != 'array' {
-				is_fixed_array_const = true
-				fixed_array_elem = elem_type
-				fixed_array_len = array_value.exprs.len
+				// Check that no element contains a function call (not valid in C static initializers)
+				mut has_call := false
+				for elem in array_value.exprs {
+					if g.contains_call_expr(elem) {
+						has_call = true
+						break
+					}
+				}
+				if !has_call {
+					is_fixed_array_const = true
+					fixed_array_elem = elem_type
+					fixed_array_len = array_value.exprs.len
+				}
 			}
 		}
 		if is_fixed_array_const && fixed_array_elem != '' {

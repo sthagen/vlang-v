@@ -471,6 +471,25 @@ fn (mut t Transformer) is_void_call_expr(expr ast.Expr) bool {
 }
 
 fn (mut t Transformer) transform_fn_decl(decl ast.FnDecl) ast.FnDecl {
+	// Skip uninstantiated generic functions - their bodies were never type-checked
+	// and they will never be called, so emit an empty body.
+	if decl.typ.generic_params.len > 0 {
+		has_generic_types := decl.name in t.env.generic_types
+		if !has_generic_types {
+			return ast.FnDecl{
+				attributes: decl.attributes
+				is_public:  decl.is_public
+				is_method:  decl.is_method
+				is_static:  decl.is_static
+				receiver:   decl.receiver
+				language:   decl.language
+				name:       decl.name
+				typ:        decl.typ
+				stmts:      []
+				pos:        decl.pos
+			}
+		}
+	}
 	// Check for conditional compilation attributes (e.g., @[if verbose ?])
 	// Skip functions whose conditions evaluate to false, and mark them for call elision
 	for attr in decl.attributes {
@@ -526,15 +545,33 @@ fn (mut t Transformer) transform_fn_decl(decl ast.FnDecl) ast.FnDecl {
 	}
 
 	// Set current function return type for sum type wrapping in returns
+	// and enum shorthand resolution
 	old_fn_ret_type_name := t.cur_fn_ret_type_name
 	if decl.typ.return_type is ast.Ident {
-		t.cur_fn_ret_type_name = decl.typ.return_type.name
+		ret_name := decl.typ.return_type.name
+		// Qualify with module prefix for enum shorthand resolution
+		// (e.g., Token → token__Token so resolve_enum_shorthand produces token__Token__member)
+		if t.cur_module != '' && t.cur_module != 'main' && t.cur_module != 'builtin'
+			&& !ret_name.contains('__') {
+			t.cur_fn_ret_type_name = '${t.cur_module}__${ret_name}'
+		} else {
+			t.cur_fn_ret_type_name = ret_name
+		}
+	} else if decl.typ.return_type is ast.SelectorExpr {
+		// Handle module-qualified return types like token.Token
+		sel := decl.typ.return_type as ast.SelectorExpr
+		if sel.lhs is ast.Ident {
+			t.cur_fn_ret_type_name = '${sel.lhs.name}__${sel.rhs.name}'
+		}
 	} else {
 		t.cur_fn_ret_type_name = t.extract_return_sumtype_name(decl.typ.return_type)
 	}
 
 	// Transform function body
+	old_fn_name_str := t.cur_fn_name_str
+	t.cur_fn_name_str = decl.name
 	transformed_stmts := t.transform_stmts(decl.stmts)
+	t.cur_fn_name_str = old_fn_name_str
 	t.cur_fn_ret_type_name = old_fn_ret_type_name
 
 	// Lower defer statements: collect defers, remove them from body,
@@ -651,20 +688,20 @@ fn (mut t Transformer) transform_call_expr(expr ast.CallExpr) ast.Expr {
 				value: '0'
 			})
 		}
-		// `arr.sort(a < b)` comparator lambdas are not lowered yet.
-		// Keep C generation valid by passing nil callback for now.
-		if sel.rhs.name in ['sort', 'sorted'] && expr.args.len == 1
-			&& t.is_sort_compare_lambda_expr(expr.args[0]) {
-			return ast.CallExpr{
-				lhs:  ast.SelectorExpr{
-					lhs: t.transform_expr(sel.lhs)
-					rhs: sel.rhs
-					pos: sel.pos
+		// arr.sort() or arr.sort(a < b) - generate comparator and use sort_with_compare
+		if sel.rhs.name in ['sort', 'sorted'] {
+			if expr.args.len == 0 {
+				// .sort() with no args: default ascending
+				if result := t.transform_sort_call(sel.lhs, sel.rhs.name, [], expr.pos) {
+					return result
 				}
-				args: [ast.Expr(ast.Ident{
-					name: 'nil'
-				})]
-				pos:  expr.pos
+			} else if expr.args.len == 1 && t.is_sort_compare_lambda_expr(expr.args[0]) {
+				// .sort(a < b) with lambda comparator
+				if result := t.transform_sort_call(sel.lhs, sel.rhs.name, [expr.args[0]],
+					expr.pos)
+				{
+					return result
+				}
 			}
 		}
 		method_name := sel.rhs.name
@@ -730,20 +767,28 @@ fn (mut t Transformer) transform_call_expr(expr ast.CallExpr) ast.Expr {
 		if t.has_active_smartcast() {
 			receiver_str := t.expr_to_string(sel.lhs)
 			if ctx := t.find_smartcast_for_expr(receiver_str) {
-				// Transform receiver with smart cast and keep the method call structure
-				casted_receiver := t.apply_smartcast_receiver_ctx(sel.lhs, ctx)
-				mut args := []ast.Expr{cap: expr.args.len}
-				for arg in expr.args {
-					args << t.transform_expr(arg)
-				}
-				return ast.CallExpr{
-					lhs:  ast.SelectorExpr{
-						lhs: casted_receiver
-						rhs: sel.rhs
-						pos: sel.pos
+				// Check if the method exists on the variant type. If not, the method
+				// is defined on the sum type and we should NOT apply the smartcast
+				// to the receiver. E.g. `for cur is types.Alias { cur.base_type() }`
+				// where base_type() is defined on types.Type (the sum type), not on Alias.
+				variant_has_method := t.env.lookup_method(ctx.variant, sel.rhs.name) != none
+					|| t.env.lookup_method(ctx.variant_full, sel.rhs.name) != none
+				if variant_has_method {
+					// Transform receiver with smart cast and keep the method call structure
+					casted_receiver := t.apply_smartcast_receiver_ctx(sel.lhs, ctx)
+					mut args := []ast.Expr{cap: expr.args.len}
+					for arg in expr.args {
+						args << t.transform_expr(arg)
 					}
-					args: args
-					pos:  expr.pos
+					return ast.CallExpr{
+						lhs:  ast.SelectorExpr{
+							lhs: casted_receiver
+							rhs: sel.rhs
+							pos: sel.pos
+						}
+						args: args
+						pos:  expr.pos
+					}
 				}
 			}
 		}
@@ -816,10 +861,63 @@ fn (mut t Transformer) transform_call_expr(expr ast.CallExpr) ast.Expr {
 	// Method call resolution: rewrite receiver.method(args) -> Type__method(receiver, args)
 	if expr.lhs is ast.SelectorExpr {
 		sel := expr.lhs as ast.SelectorExpr
+		// Nested module call: rand.seed.time_seed_array() -> seed__time_seed_array()
+		if sel.lhs is ast.SelectorExpr {
+			inner := sel.lhs as ast.SelectorExpr
+			if inner.lhs is ast.Ident && t.is_module_ident(inner.lhs.name) {
+				sub_mod := inner.rhs.name
+				fn_name := sel.rhs.name
+				// Check if sub_mod is actually a module scope (not a variable like os.args)
+				mut resolved_name := ''
+				if t.get_module_scope(sub_mod) != none {
+					resolved_name = '${sub_mod}__${fn_name}'
+				} else {
+					full_mod := '${inner.lhs.name}__${sub_mod}'
+					if t.get_module_scope(full_mod) != none {
+						resolved_name = '${full_mod}__${fn_name}'
+					}
+				}
+				if resolved_name != '' {
+					mut args := []ast.Expr{cap: expr.args.len}
+					for arg in expr.args {
+						args << t.transform_expr(arg)
+					}
+					return ast.CallExpr{
+						lhs:  ast.Ident{
+							name: resolved_name
+						}
+						args: args
+						pos:  expr.pos
+					}
+				}
+			}
+		}
 		is_module_call := sel.lhs is ast.Ident && t.get_module_scope(sel.lhs.name) != none
 			&& t.lookup_var_type(sel.lhs.name) == none
 		if !is_module_call {
 			if resolved := t.resolve_method_call_name(sel.lhs, sel.rhs.name) {
+				// For nested array .clone(), use clone_to_depth with the correct depth
+				// so inner arrays are deeply cloned instead of shallow-copied.
+				if resolved == 'array__clone' && expr.args.len == 0 {
+					if recv_type := t.get_expr_type(sel.lhs) {
+						depth := t.get_array_nesting_depth(recv_type)
+						if depth > 1 {
+							return ast.CallExpr{
+								lhs:  ast.Ident{
+									name: 'array__clone_to_depth'
+								}
+								args: [
+									t.transform_expr(sel.lhs),
+									ast.Expr(ast.BasicLiteral{
+										kind:  .number
+										value: '${depth - 1}'
+									}),
+								]
+								pos:  expr.pos
+							}
+						}
+					}
+				}
 				call_args := t.lower_missing_call_args(expr.lhs, expr.args)
 				is_static := t.is_static_method_call(sel.lhs)
 				mut transformed_call_args := []ast.Expr{cap: call_args.len}
@@ -846,9 +944,14 @@ fn (mut t Transformer) transform_call_expr(expr ast.CallExpr) ast.Expr {
 	// This is important for smart cast propagation through method chains
 	// e.g., stmt.name.replace() when stmt is smartcast
 	call_args := t.lower_missing_call_args(expr.lhs, expr.args)
+	// Look up function parameter types for sumtype re-wrapping
+	fn_info := t.lookup_call_fn_info(expr.lhs)
 	mut args := []ast.Expr{cap: call_args.len}
-	for arg in call_args {
-		args << t.transform_expr(arg)
+	for i, arg in call_args {
+		// When an argument has an active smartcast but the function parameter
+		// expects the original sumtype, temporarily disable the smartcast so the
+		// original sumtype value is passed through without being unwrapped.
+		args << t.transform_call_arg_with_sumtype_check(arg, fn_info, i)
 	}
 	args = t.lower_variadic_args(expr.lhs, args)
 	return ast.CallExpr{
@@ -1068,6 +1171,13 @@ fn (t &Transformer) resolve_method_call_name(receiver ast.Expr, method_name stri
 	// Verify method exists via env.lookup_method
 	for name in lookup_names {
 		if t.env.lookup_method(name, method_name) != none {
+			// For array types: if the method is NOT on generic 'array' but on
+			// a typed array (e.g., []rune.string()), use the specific C type name
+			// (e.g., Array_rune) instead of generic 'array'.
+			if c_prefix == 'array' && t.env.lookup_method('array', method_name) == none {
+				specific_name := t.type_to_c_name(base_type)
+				return '${specific_name}__${method_name}'
+			}
 			return '${c_prefix}__${method_name}'
 		}
 	}
@@ -1527,19 +1637,10 @@ fn (mut t Transformer) transform_call_or_cast_expr(expr ast.CallOrCastExpr) ast.
 				value: '0'
 			})
 		}
-		// `arr.sort(a < b)` may be parsed as CallOrCastExpr in single-arg form.
-		// Keep C generation valid by passing nil callback for now.
+		// arr.sort(a < b) may be parsed as CallOrCastExpr in single-arg form.
 		if sel.rhs.name in ['sort', 'sorted'] && t.is_sort_compare_lambda_expr(expr.expr) {
-			return ast.CallExpr{
-				lhs:  ast.SelectorExpr{
-					lhs: t.transform_expr(sel.lhs)
-					rhs: sel.rhs
-					pos: sel.pos
-				}
-				args: [ast.Expr(ast.Ident{
-					name: 'nil'
-				})]
-				pos:  expr.pos
+			if result := t.transform_sort_call(sel.lhs, sel.rhs.name, [expr.expr], expr.pos) {
+				return result
 			}
 		}
 		method_name := sel.rhs.name
@@ -1576,8 +1677,16 @@ fn (mut t Transformer) transform_call_or_cast_expr(expr ast.CallOrCastExpr) ast.
 		if t.has_active_smartcast() {
 			receiver_str := t.expr_to_string(sel.lhs)
 			if ctx := t.find_smartcast_for_expr(receiver_str) {
-				// Transform receiver with smart cast and keep the call semantics.
-				casted_receiver := t.apply_smartcast_receiver_ctx(sel.lhs, ctx)
+				// Check if the method exists on the variant type. If not, the method
+				// is defined on the sum type and we should NOT apply the smartcast
+				// to the receiver.
+				variant_has_method := t.env.lookup_method(ctx.variant, sel.rhs.name) != none
+					|| t.env.lookup_method(ctx.variant_full, sel.rhs.name) != none
+				casted_receiver := if variant_has_method {
+					t.apply_smartcast_receiver_ctx(sel.lhs, ctx)
+				} else {
+					t.transform_expr(sel.lhs)
+				}
 				mut args := []ast.Expr{cap: 1}
 				if expr.expr !is ast.EmptyExpr {
 					args << t.transform_expr(expr.expr)
@@ -1715,9 +1824,10 @@ fn (mut t Transformer) transform_call_or_cast_expr(expr ast.CallOrCastExpr) ast.
 				call_args << expr.expr
 			}
 			call_args = t.lower_missing_call_args(expr.lhs, call_args)
+			coce_fn_info := t.lookup_call_fn_info(expr.lhs)
 			mut args := []ast.Expr{cap: call_args.len}
-			for arg in call_args {
-				args << t.transform_expr(arg)
+			for i, arg in call_args {
+				args << t.transform_call_arg_with_sumtype_check(arg, coce_fn_info, i)
 			}
 			args = t.lower_variadic_args(expr.lhs, args)
 			return ast.CallExpr{
@@ -1765,6 +1875,38 @@ fn (mut t Transformer) transform_call_or_cast_expr(expr ast.CallOrCastExpr) ast.
 	transformed_lhs := t.transform_expr(expr.lhs)
 	transformed_arg := t.transform_expr(expr.expr)
 	return t.lower_call_or_cast_expr(transformed_lhs, transformed_arg, expr.pos)
+}
+
+// transform_call_arg_with_sumtype_check transforms a call argument, temporarily
+// disabling any active smartcast when the function parameter is a sumtype.
+// This prevents smartcast from unwrapping a sumtype value that should be passed as-is.
+fn (mut t Transformer) transform_call_arg_with_sumtype_check(arg ast.Expr, fn_info ?CallFnInfo, idx int) ast.Expr {
+	if info := fn_info {
+		if idx < info.param_types.len {
+			param_c_name := t.type_to_c_name(info.param_types[idx])
+			if param_c_name != '' && t.is_sum_type(param_c_name) {
+				arg_str := t.expr_to_string(arg)
+				if arg_str != '' {
+					if ctx := t.find_smartcast_for_expr(arg_str) {
+						// Only disable smartcast if parameter expects the SAME sumtype
+						// as the arg's original sumtype. This avoids incorrectly removing
+						// smartcasts when the parameter type is a DIFFERENT sumtype that
+						// happens to be the smartcast variant (e.g., ast.Expr smartcast
+						// to ast.Type, where ast.Type is itself a sumtype).
+						if ctx.sumtype == param_c_name {
+							if existing := t.remove_smartcast_for_expr(arg_str) {
+								result := t.transform_expr(arg)
+								t.push_smartcast_full(existing.expr, existing.variant,
+									existing.variant_full, existing.sumtype)
+								return result
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return t.transform_expr(arg)
 }
 
 // get_enum_type get enum type name from an expression
@@ -1838,6 +1980,12 @@ fn (t &Transformer) call_or_cast_lhs_is_type(lhs ast.Expr) bool {
 			return true
 		}
 		ast.Ident {
+			// Built-in primitive types are always casts, never function calls.
+			if lhs.name in ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32',
+				'f64', 'bool', 'byte', 'char', 'rune', 'usize', 'isize', 'string', 'byteptr',
+				'charptr', 'voidptr'] {
+				return true
+			}
 			// Prefer functions when names clash (even if uppercase).
 			if _ := t.get_fn_return_type(lhs.name) {
 				return false

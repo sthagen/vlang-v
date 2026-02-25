@@ -242,9 +242,10 @@ fn (a Struct) == (b Struct) bool {
 	return false
 }
 
-struct SumType {
+pub struct SumType {
+pub:
 	name string
-mut:
+pub mut:
 	variants []Type
 }
 
@@ -358,7 +359,7 @@ fn (t Type) typed_default() Type {
 		mut concrete_props := t.props
 		concrete_props.clear(Properties.untyped)
 		// TODO: platform dependant size - see universe
-		size := u8(if t.props.has(Properties.float) { 32 } else { 0 })
+		size := u8(if t.props.has(Properties.float) { 64 } else { 0 })
 		return Type(Primitive{
 			props: concrete_props
 			size:  size

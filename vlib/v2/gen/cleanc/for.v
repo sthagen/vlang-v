@@ -38,7 +38,13 @@ fn (mut g Gen) gen_for_stmt(node ast.ForStmt) {
 	}
 
 	g.indent++
+	// Save runtime_local_types: variables declared in the loop body
+	// (e.g. _filter_it in nested map/filter) can shadow outer variables.
+	// Without save/restore, the inner type overwrites the outer in the flat map.
+	saved_local_types := g.runtime_local_types.clone()
 	g.gen_stmts(node.stmts)
+	g.runtime_local_types = saved_local_types.clone()
+	g.not_local_var_cache = map[string]bool{}
 	g.indent--
 	g.write_indent()
 	g.sb.writeln('}')
@@ -57,12 +63,25 @@ fn (mut g Gen) gen_stmt_inline(node ast.Stmt) {
 				typ := g.get_expr_type(rhs)
 				g.sb.write_string('${typ} ${name} = ')
 				g.expr(rhs)
+				// Register the for-loop init variable so assignments inside
+				// the loop body don't re-declare it.
+				if name != '' && typ != '' {
+					g.runtime_local_types[name] = typ
+				}
 			} else {
 				g.expr(lhs)
 				op_str := match node.op {
 					.assign { '=' }
 					.plus_assign { '+=' }
 					.minus_assign { '-=' }
+					.mul_assign { '*=' }
+					.div_assign { '/=' }
+					.mod_assign { '%=' }
+					.and_assign { '&=' }
+					.or_assign { '|=' }
+					.xor_assign { '^=' }
+					.left_shift_assign { '<<=' }
+					.right_shift_assign { '>>=' }
 					else { '=' }
 				}
 				g.sb.write_string(' ${op_str} ')

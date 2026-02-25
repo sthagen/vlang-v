@@ -186,7 +186,7 @@ fn (mut g Gen) collect_fn_signatures() {
 						recv_type := normalize_signature_type_name(g.expr_type_to_c(stmt.receiver.typ),
 							'void*')
 						params << (stmt.receiver.is_mut || recv_type.ends_with('*'))
-						param_types << if stmt.receiver.is_mut {
+						param_types << if stmt.receiver.is_mut && !recv_type.ends_with('*') {
 							recv_type + '*'
 						} else {
 							recv_type
@@ -196,7 +196,7 @@ fn (mut g Gen) collect_fn_signatures() {
 						param_type := normalize_signature_type_name(g.expr_type_to_c(param.typ),
 							'int')
 						params << (param.is_mut || param_type.ends_with('*'))
-						param_types << if param.is_mut {
+						param_types << if param.is_mut && !param_type.ends_with('*') {
 							param_type + '*'
 						} else {
 							param_type
@@ -227,32 +227,11 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl) {
 	if node.language == .c && node.stmts.len == 0 {
 		return
 	}
-	// Generic functions: emit a stub that returns default value
+	// Generic functions: handled via emit_generic_fn_macro in the forward declaration pass
 	if node.typ.generic_params.len > 0 {
-		fn_name := g.get_fn_name(node)
-		if fn_name != '' {
-			// Emit a forward declaration and stub body
-			g.sb.write_string('/* generic stub */ array ${fn_name}(')
-			for i, param in node.typ.params {
-				if i > 0 {
-					g.sb.write_string(', ')
-				}
-				g.sb.write_string('array')
-				if param.is_mut {
-					g.sb.write_string('*')
-				}
-				g.sb.write_string(' ${param.name}')
-			}
-			if node.typ.params.len == 0 {
-				g.sb.write_string('void')
-			}
-			g.sb.writeln(') {')
-			g.sb.writeln('\treturn (array){0};')
-			g.sb.writeln('}')
-			g.sb.writeln('')
-		}
 		return
 	}
+
 	fn_name := g.get_fn_name(node)
 	if fn_name == '' {
 		return
@@ -330,13 +309,17 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl) {
 		if param.is_mut {
 			g.cur_fn_mut_params[param.name] = true
 		}
-		// Register parameter types for transformer-generated functions that
-		// lack type checker scopes (e.g. Array_T_contains, Array_T_index).
-		if g.cur_fn_scope == unsafe { nil } {
-			param_type := g.expr_type_to_c(param.typ)
-			if param_type != '' {
-				g.runtime_local_types[param.name] = param_type
+		// Register parameter types from the function declaration.
+		// The declaration type is authoritative and ensures correct types
+		// even when the env position lookup returns wrong results.
+		param_type := g.expr_type_to_c(param.typ)
+		if param_type != '' && param.name != '' {
+			ptype := if param.is_mut && !param_type.ends_with('*') {
+				param_type + '*'
+			} else {
+				param_type
 			}
+			g.runtime_local_types[param.name] = ptype
 		}
 	}
 
@@ -405,7 +388,12 @@ fn (mut g Gen) gen_fn_head(node ast.FnDecl) {
 		receiver_type := if sig_idx < sig_param_types.len {
 			normalize_signature_type_name(sig_param_types[sig_idx], 'void*')
 		} else if node.receiver.is_mut {
-			normalize_signature_type_name(g.expr_type_to_c(node.receiver.typ), 'void*') + '*'
+			rt := normalize_signature_type_name(g.expr_type_to_c(node.receiver.typ), 'void*')
+			if rt.ends_with('*') {
+				rt
+			} else {
+				rt + '*'
+			}
 		} else {
 			normalize_signature_type_name(g.expr_type_to_c(node.receiver.typ), 'void*')
 		}
@@ -424,7 +412,12 @@ fn (mut g Gen) gen_fn_head(node ast.FnDecl) {
 		t := if sig_idx < sig_param_types.len {
 			normalize_signature_type_name(sig_param_types[sig_idx], 'int')
 		} else if param.is_mut {
-			normalize_signature_type_name(g.expr_type_to_c(param.typ), 'int') + '*'
+			pt := normalize_signature_type_name(g.expr_type_to_c(param.typ), 'int')
+			if pt.ends_with('*') {
+				pt
+			} else {
+				pt + '*'
+			}
 		} else {
 			normalize_signature_type_name(g.expr_type_to_c(param.typ), 'int')
 		}
@@ -483,11 +476,21 @@ fn (g &Gen) contains_call_expr(e ast.Expr) bool {
 	if e is ast.CallExpr {
 		return true
 	}
+	if e is ast.CallOrCastExpr {
+		return true
+	}
 	if e is ast.CastExpr {
 		return g.contains_call_expr(e.expr)
 	}
 	if e is ast.ParenExpr {
 		return g.contains_call_expr(e.expr)
+	}
+	if e is ast.ArrayInitExpr {
+		for elem in e.exprs {
+			if g.contains_call_expr(elem) {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -731,7 +734,7 @@ fn (mut g Gen) should_auto_deref(arg ast.Expr) bool {
 	if raw_type := g.get_raw_type(arg) {
 		if raw_type is types.Pointer {
 			match raw_type.base_type {
-				types.Array, types.Map, types.Struct, types.Interface, types.Alias {
+				types.Array, types.Map, types.Struct, types.Interface, types.Alias, types.String {
 					return true
 				}
 				else {}
@@ -1050,6 +1053,14 @@ fn (mut g Gen) get_call_return_type(lhs ast.Expr, arg_count int) ?string {
 			}
 		}
 	}
+	// Prefer explicit fn_return_types registration (includes result/option wrappers)
+	// over fn_pointer_return_type (which may return the unwrapped type from the checker).
+	c_name := g.resolve_call_name(lhs, arg_count)
+	if c_name != '' {
+		if ret := g.fn_return_types[c_name] {
+			return ret
+		}
+	}
 	if lhs !is ast.Ident {
 		mut allow_fn_ptr_lookup := true
 		if lhs is ast.SelectorExpr {
@@ -1067,7 +1078,6 @@ fn (mut g Gen) get_call_return_type(lhs ast.Expr, arg_count int) ?string {
 			}
 		}
 	}
-	c_name := g.resolve_call_name(lhs, arg_count)
 	if c_name == '' {
 		if lhs is ast.Ident {
 			match lhs.name {
@@ -1077,9 +1087,6 @@ fn (mut g Gen) get_call_return_type(lhs ast.Expr, arg_count int) ?string {
 			}
 		}
 		return none
-	}
-	if ret := g.fn_return_types[c_name] {
-		return ret
 	}
 	match c_name {
 		'open', 'chdir', 'proc_pidpath' { return 'int' }
@@ -1125,11 +1132,61 @@ fn (mut g Gen) call_expr(lhs ast.Expr, args []ast.Expr) {
 		if resolved != '' && (resolved in g.fn_param_is_ptr || resolved in g.fn_return_types) {
 			should_emit_fnptr_call = false
 		}
+		// When there is a naming collision (e.g. `seed` is both a function and a
+		// sub-module in the `rand` module), `is_module_ident` returns false and
+		// `resolve_call_name` resolves to the function type.  Try treating lhs.lhs
+		// as a module name by checking if `lhs_name__rhs_name` exists as a known
+		// function.
+		if should_emit_fnptr_call && lhs.lhs is ast.Ident {
+			alt := '${lhs.lhs.name}__${sanitize_fn_ident(lhs.rhs.name)}'
+			if alt in g.fn_param_is_ptr || alt in g.fn_return_types {
+				g.sb.write_string('${alt}(')
+				for i, arg in args {
+					if i > 0 {
+						g.sb.write_string(', ')
+					}
+					g.expr(arg)
+				}
+				g.sb.write_string(')')
+				return
+			}
+		}
 		if should_emit_fnptr_call {
 			// Function pointer fields are stored as void* in C.
 			// We need to cast to the correct function pointer type before calling.
 			ret_type := g.fn_pointer_return_type(lhs)
 			c_ret := if ret_type == '' { 'void' } else { ret_type }
+			// For pointer-to-interface types, the transformer doesn't add _object
+			// (it only handles non-pointer interface vars like IError err).
+			// Check if this is a vtable method call on an interface pointer
+			// and if so, pass _object as the first argument.
+			receiver_type := g.get_expr_type(lhs.lhs)
+			base_receiver := receiver_type.trim_right('*')
+			if receiver_type.ends_with('*') && g.is_interface_type(base_receiver) {
+				method_name := lhs.rhs.name
+				if g.is_interface_vtable_method(base_receiver, method_name) {
+					mut cast_sig := '${c_ret} (*)(void*)'
+					if methods := g.interface_methods[base_receiver] {
+						for method in methods {
+							if method.name == method_name {
+								cast_sig = method.cast_signature
+								break
+							}
+						}
+					}
+					g.sb.write_string('((${cast_sig})')
+					g.expr(lhs)
+					g.sb.write_string(')(')
+					g.expr(lhs.lhs)
+					g.sb.write_string('->_object')
+					for _, arg in args {
+						g.sb.write_string(', ')
+						g.expr(arg)
+					}
+					g.sb.write_string(')')
+					return
+				}
+			}
 			g.sb.write_string('((${c_ret}(*)())')
 			g.expr(lhs)
 			g.sb.write_string(')(')
@@ -1412,11 +1469,13 @@ fn (mut g Gen) call_expr(lhs ast.Expr, args []ast.Expr) {
 		g.sb.write_string(', 3)')
 		return
 	}
-	// array__clone → array__clone_to_depth with automatic depth for deep clone
+	// array__clone → array__clone_to_depth with depth 0 (shallow memcpy clone).
+	// Depth > 0 uses element_size heuristics that misidentify non-string types
+	// of the same size (e.g. tagged unions like ast.Expr are 16 bytes == sizeof(string)).
 	if name == 'array__clone' && call_args.len == 1 {
 		g.sb.write_string('array__clone_to_depth(')
 		g.gen_call_arg(name, 0, call_args[0])
-		g.sb.write_string(', 3)')
+		g.sb.write_string(', 0)')
 		return
 	}
 	// array__insert with array arg → array__insert_many
@@ -1487,6 +1546,13 @@ fn (mut g Gen) call_expr(lhs ast.Expr, args []ast.Expr) {
 				c_name = builtin_name
 			} else if name in g.fn_param_is_ptr || name in g.fn_return_types {
 				c_name = name
+			}
+
+			// String literals and interpolation strings are always strings,
+			// regardless of what position-based type lookup returns.
+			if arg is ast.StringLiteral || arg is ast.StringInterLiteral
+				|| (arg is ast.BasicLiteral && arg.kind == .string) {
+				arg_type = 'string'
 			}
 
 			// If argument is already a str-function call, treat as string to avoid double wrapping
@@ -1651,6 +1717,7 @@ fn (mut g Gen) gen_fn_literal(node ast.FnLiteral) {
 	saved_fn_ret := g.cur_fn_ret_type
 	saved_fn_scope := g.cur_fn_scope
 	saved_fn_mut_params := g.cur_fn_mut_params.clone()
+	saved_local_types := g.runtime_local_types.clone()
 
 	// Use new builder for anon fn
 	g.sb = strings.new_builder(1024)
@@ -1658,6 +1725,7 @@ fn (mut g Gen) gen_fn_literal(node ast.FnLiteral) {
 	g.cur_fn_name = anon_name
 	g.cur_fn_ret_type = ret_type
 	g.cur_fn_mut_params = map[string]bool{}
+	g.runtime_local_types = map[string]string{}
 
 	// Generate function definition
 	g.sb.write_string('static ${ret_type} ${anon_name}(')
@@ -1670,6 +1738,13 @@ fn (mut g Gen) gen_fn_literal(node ast.FnLiteral) {
 		if param.is_mut {
 			g.cur_fn_mut_params[param.name] = true
 		}
+		// Register param type so expr_is_pointer and auto-deref work correctly
+		ptype := if param.is_mut && !param_type.ends_with('*') {
+			param_type + '*'
+		} else {
+			param_type
+		}
+		g.runtime_local_types[param.name] = ptype
 	}
 	if node.typ.params.len == 0 {
 		g.sb.write_string('void')
@@ -1691,6 +1766,7 @@ fn (mut g Gen) gen_fn_literal(node ast.FnLiteral) {
 	g.cur_fn_ret_type = saved_fn_ret
 	g.cur_fn_scope = saved_fn_scope
 	g.cur_fn_mut_params = saved_fn_mut_params.clone()
+	g.runtime_local_types = saved_local_types.clone()
 
 	// Emit function name at use site
 	g.sb.write_string(anon_name)
@@ -1719,4 +1795,93 @@ fn (g &Gen) get_str_fn_for_type(expr_type string) ?string {
 		return '${expr_type}_str'
 	}
 	return none
+}
+
+// emit_generic_fn_macro emits a C macro definition for known simple generic functions
+// (abs, min, max, clamp). For other generic functions, emits a stub.
+// Also emits a typedef for the generic type parameter T.
+fn (mut g Gen) emit_generic_fn_macro(fn_name string, node ast.FnDecl) {
+	macro_key := 'generic_macro_${fn_name}'
+	if macro_key in g.emitted_types {
+		return
+	}
+	g.emitted_types[macro_key] = true
+	if node.typ.params.len == 1 && node.name == 'abs' {
+		pname := node.typ.params[0].name
+		g.sb.writeln('#define ${fn_name}(${pname}) ((${pname}) < 0 ? -(${pname}) : (${pname}))')
+	} else if node.typ.params.len == 2 && node.name == 'min' {
+		p0 := node.typ.params[0].name
+		p1 := node.typ.params[1].name
+		g.sb.writeln('#define ${fn_name}(${p0}, ${p1}) ((${p0}) < (${p1}) ? (${p0}) : (${p1}))')
+	} else if node.typ.params.len == 2 && node.name == 'max' {
+		p0 := node.typ.params[0].name
+		p1 := node.typ.params[1].name
+		g.sb.writeln('#define ${fn_name}(${p0}, ${p1}) ((${p0}) > (${p1}) ? (${p0}) : (${p1}))')
+	} else if node.typ.params.len == 3 && node.name == 'clamp' {
+		p0 := node.typ.params[0].name
+		p1 := node.typ.params[1].name
+		p2 := node.typ.params[2].name
+		g.sb.writeln('#define ${fn_name}(${p0}, ${p1}, ${p2}) ((${p0}) < (${p1}) ? (${p1}) : ((${p0}) > (${p2}) ? (${p2}) : (${p0})))')
+	} else if node.typ.params.len == 0 && node.name in ['maxof', 'minof'] {
+		// Emit specialized macros for maxof[T]()/minof[T]() - comptime functions
+		// that return the min/max value for each numeric type.
+		prefix := if fn_name.contains('__') { fn_name.all_before_last('__') + '__' } else { '' }
+		is_max := node.name == 'maxof'
+		// max_f32/max_f64 are in the math module and emitted as math__max_f32/math__max_f64
+		type_const_pairs := if is_max {
+			[['i8', 'max_i8'], ['i16', 'max_i16'], ['i32', 'max_i32'],
+				['i64', 'max_i64'], ['int', 'max_int'], ['u8', 'max_u8'],
+				['u16', 'max_u16'], ['u32', 'max_u32'], ['u64', 'max_u64'],
+				['f32', 'math__max_f32'], ['f64', 'math__max_f64']]
+		} else {
+			[['i8', 'min_i8'], ['i16', 'min_i16'], ['i32', 'min_i32'],
+				['i64', 'min_i64'], ['int', 'min_int'], ['u8', '((u8)(0))'],
+				['u16', '((u16)(0))'], ['u32', '((u32)(0))'],
+				['u64', '((u64)(0))'], ['f32', '(-math__max_f32)'],
+				['f64', '(-math__max_f64)']]
+		}
+		for pair in type_const_pairs {
+			g.sb.writeln('#define ${prefix}${node.name}_${pair[0]}() (${pair[1]})')
+		}
+	} else {
+		// Fallback: emit a stub with array types.
+		// Only emit stub bodies for modules that should be emitted in the current
+		// cache bundle. Otherwise the same stub appears in both builtin.o and vlib.o.
+		if !g.should_emit_module(g.cur_module) {
+			return
+		}
+		g.sb.write_string('/* generic stub */ array ${fn_name}(')
+		for i, param in node.typ.params {
+			if i > 0 {
+				g.sb.write_string(', ')
+			}
+			g.sb.write_string('array')
+			if param.is_mut {
+				g.sb.write_string('*')
+			}
+			pname := if param.name == 'array' { '_v_array' } else { param.name }
+			g.sb.write_string(' ${pname}')
+		}
+		if node.typ.params.len == 0 {
+			g.sb.write_string('void')
+		}
+		g.sb.writeln(') {')
+		g.sb.writeln('\treturn (array){0};')
+		g.sb.writeln('}')
+	}
+	// Emit typedef for generic type parameter T as f64 (default numeric type)
+	for gp in node.typ.generic_params {
+		if gp is ast.Ident {
+			qualified := if fn_name.contains('__') {
+				'${fn_name.all_before_last('__')}__${gp.name}'
+			} else {
+				gp.name
+			}
+			tdef_key := 'typedef_${qualified}'
+			if tdef_key !in g.emitted_types {
+				g.emitted_types[tdef_key] = true
+				g.sb.writeln('typedef f64 ${qualified};')
+			}
+		}
+	}
 }

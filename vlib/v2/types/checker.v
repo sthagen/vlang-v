@@ -355,6 +355,8 @@ pub fn (mut c Checker) check_files(files []ast.File) {
 	}
 	c.process_pending_const_fields()
 	c.process_pending_fn_bodies()
+	c.check_struct_field_defaults(files)
+	c.check_enum_field_values(files)
 }
 
 pub fn (mut c Checker) check_file(file ast.File) {
@@ -540,6 +542,10 @@ fn (mut c Checker) decl(decl ast.Stmt) {
 			// the expr then these will need to get delayed also.
 			mut fields := []Field{}
 			for field in decl.fields {
+				// Type-check enum field value expressions
+				if field.value !is ast.EmptyExpr {
+					c.expr(field.value)
+				}
 				fields << Field{
 					name: field.name
 				}
@@ -1057,20 +1063,29 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 			if lhs_type is Enum {
 				c.expected_type = to_optional_type(Type(lhs_type))
 			}
+			mut rhs_type := Type(void_)
 			if expr.op == .and {
 				// In `a is T && a.field ...`, RHS is evaluated only when the smart-cast is true.
 				// Type-check RHS in a nested scope with casts from LHS applied.
 				c.open_scope()
 				sc_names, sc_types := c.extract_smartcasts(expr.lhs)
 				c.apply_smartcasts(sc_names, sc_types)
-				c.expr(expr.rhs)
+				rhs_type = c.expr(expr.rhs)
 				c.close_scope()
 			} else {
-				c.expr(expr.rhs)
+				rhs_type = c.expr(expr.rhs)
 			}
 			c.expected_type = expected_type
 			if expr.op.is_comparison() {
 				return bool_
+			}
+			// Promote: when LHS is an untyped number literal and RHS is a concrete
+			// float type, the result should be float (e.g. `1 - f64_expr` → f64).
+			if lhs_type.is_number_literal() && rhs_type is Primitive {
+				rhs_prim := rhs_type as Primitive
+				if rhs_prim.props.has(Properties.float) && !rhs_type.is_number_literal() {
+					return rhs_type
+				}
 			}
 			return lhs_type
 		}
@@ -1424,6 +1439,9 @@ fn (mut c Checker) stmt(stmt ast.Stmt) {
 	match stmt {
 		ast.AssertStmt {
 			c.expr(stmt.expr)
+			if stmt.extra !is ast.EmptyExpr {
+				c.expr(stmt.extra)
+			}
 		}
 		ast.AssignStmt {
 			c.assign_stmt(stmt, false)
@@ -1552,6 +1570,12 @@ fn (mut c Checker) stmt(stmt ast.Stmt) {
 				c.expr(expr)
 			}
 		}
+		ast.ComptimeStmt {
+			c.stmt(stmt.stmt)
+		}
+		ast.LabelStmt {
+			c.stmt(stmt.stmt)
+		}
 		else {}
 	}
 }
@@ -1621,9 +1645,10 @@ fn (mut c Checker) process_pending_struct_decls() {
 		}
 		mut fields := []Field{}
 		for field in pending.decl.fields {
+			field_typ := c.expr(field.typ)
 			fields << Field{
 				name:         field.name
-				typ:          c.expr(field.typ)
+				typ:          field_typ
 				default_expr: field.value
 			}
 		}
@@ -1722,6 +1747,61 @@ fn (mut c Checker) check_pending_fn_body(pending PendingFnBody) {
 		c.scope = prev_scope
 	}
 	c.env.cur_generic_types = []
+}
+
+// check_struct_field_defaults visits struct field default expressions after all
+// function signatures and bodies are registered, so function calls in defaults resolve.
+fn (mut c Checker) check_struct_field_defaults(files []ast.File) {
+	for file in files {
+		mut mod_scope := &Scope(unsafe { nil })
+		lock c.env.scopes {
+			if file.mod in c.env.scopes {
+				mod_scope = unsafe { c.env.scopes[file.mod] }
+			} else {
+				continue
+			}
+		}
+		c.scope = mod_scope
+		c.cur_file_module = file.mod
+		for stmt in file.stmts {
+			if stmt is ast.StructDecl {
+				for field in stmt.fields {
+					if field.value !is ast.EmptyExpr {
+						field_typ := c.expr(field.typ)
+						prev_expected := c.expected_type
+						c.expected_type = to_optional_type(field_typ)
+						c.expr(field.value)
+						c.expected_type = prev_expected
+					}
+				}
+			}
+		}
+	}
+}
+
+// check_enum_field_values visits enum field value expressions.
+fn (mut c Checker) check_enum_field_values(files []ast.File) {
+	for file in files {
+		mut mod_scope := &Scope(unsafe { nil })
+		lock c.env.scopes {
+			if file.mod in c.env.scopes {
+				mod_scope = unsafe { c.env.scopes[file.mod] }
+			} else {
+				continue
+			}
+		}
+		c.scope = mod_scope
+		c.cur_file_module = file.mod
+		for stmt in file.stmts {
+			if stmt is ast.EnumDecl {
+				for field in stmt.fields {
+					if field.value !is ast.EmptyExpr {
+						c.expr(field.value)
+					}
+				}
+			}
+		}
+	}
 }
 
 // take_deferred is kept for compatibility with parallel type-checking plumbing.
@@ -2128,8 +2208,38 @@ fn (c &Checker) eval_comptime_flag(name string) bool {
 			}
 			return false
 		}
+		'little_endian' {
+			$if little_endian {
+				return true
+			}
+			return false
+		}
+		'big_endian' {
+			$if big_endian {
+				return true
+			}
+			return false
+		}
+		'debug' {
+			$if debug {
+				return true
+			}
+			return false
+		}
+		'native' {
+			return c.pref != unsafe { nil } && (c.pref.backend == .arm64 || c.pref.backend == .x64)
+		}
+		'builtin_write_buf_to_fd_should_use_c_write' {
+			return c.pref != unsafe { nil } && (c.pref.backend == .arm64 || c.pref.backend == .x64)
+		}
+		'new_int', 'gcboehm', 'prealloc', 'autofree' {
+			return false
+		}
 		else {
-			// Unknown flag - return false
+			// Check user-defined comptime flags from -d <name>
+			if c.pref != unsafe { nil } && name in c.pref.user_defines {
+				return true
+			}
 			return false
 		}
 	}
@@ -2610,11 +2720,11 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 		}
 	}
 	if mut fn_ is FnType {
+		mut generic_type_map := map[string]Type{}
 		if fn_.generic_params.len > 0 {
 			// file := c.file_set.file(expr.pos)
 			// pos := file.position(expr.pos)
 			// eprintln('GENERIC CALL: ${expr.lhs.name()} - ${expr.pos} - ${file.name}:${pos.line}')
-			mut generic_type_map := map[string]Type{}
 			// generic types provided `[int, string]`
 			if lhs_expr is ast.GenericArgs {
 				// panic('GOT GENERIC CALL')
@@ -2711,9 +2821,14 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 		// Type-check call arguments with parameter context so shorthand enum
 		// selectors like `.assign` resolve against the callee parameter type.
 		// Skip sort/sorted comparator sugar because that lambda form is lowered later.
+		// Skip map/filter/any/all calls: their body was already typechecked at line 2803
+		// above with the correct 'it' scope. Re-typechecking here would use a stale scope
+		// (inner maps may have overwritten 'it') and corrupt position-based type info.
 		is_sort_cmp_call := lhs_expr is ast.SelectorExpr && lhs_expr.rhs.name in ['sort', 'sorted']
 			&& expr.args.len == 1
-		if fn_.generic_params.len == 0 && !is_sort_cmp_call {
+		is_array_magic_call := lhs_expr is ast.SelectorExpr
+			&& lhs_expr.rhs.name in ['map', 'filter', 'any', 'all']
+		if fn_.generic_params.len == 0 && !is_sort_cmp_call && !is_array_magic_call {
 			prev_expected := c.expected_type
 			for i, arg in expr.args {
 				if i < fn_.params.len {
@@ -2742,6 +2857,15 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 			// 		}
 			// 	}
 			// }
+			// Resolve generic return type: if the return type is a NamedType (generic
+			// parameter like T) and we inferred a concrete type for it, return the
+			// concrete type so downstream code gets f64 instead of NamedType("T").
+			if return_type is NamedType && generic_type_map.len > 0 {
+				if resolved := generic_type_map[string(return_type)] {
+					c.log('returning resolved generic: ${resolved.name()}')
+					return resolved
+				}
+			}
 			c.log('returning: ${return_type.name()}')
 			return return_type
 		}
@@ -3034,12 +3158,16 @@ fn (mut c Checker) find_field_or_method(t Type, name string) !Type {
 			if name == 'wait' && arr_type.elem_type is Thread {
 				return fn_with_return_type(FnType{}, Type(void_))
 			}
-			// Compiler-magic array methods (any, all, contains, index)
-			// Return FnType with array as return_type so 'it' gets the element type
-			if name in ['any', 'all', 'contains'] {
-				return fn_with_return_type(FnType{}, Type(arr_type))
+			// Compiler-magic array methods
+			// contains returns bool, index returns int
+			if name == 'contains' {
+				return fn_with_return_type(FnType{}, Type(bool_))
 			}
 			if name == 'index' {
+				return fn_with_return_type(FnType{}, Type(int_))
+			}
+			// any/all need array type for 'it' variable insertion
+			if name in ['any', 'all'] {
 				return fn_with_return_type(FnType{}, Type(arr_type))
 			}
 			// TODO: has to be a better way

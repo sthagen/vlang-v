@@ -118,6 +118,10 @@ fn (mut g Gen) gen_struct_decl(node ast.StructDecl) {
 	if node.language == .c {
 		return
 	}
+	// Skip generic struct declarations (unresolved type parameters)
+	if node.generic_params.len > 0 {
+		return
+	}
 
 	name := g.get_struct_name(node)
 	body_key := 'body_${name}'
@@ -363,13 +367,13 @@ fn (mut g Gen) infer_sum_variant_from_expr(type_name string, variants []string, 
 			v_short := if v.contains('__') { v.all_after_last('__') } else { v }
 			if v_short == expr_variant_short || v == expr_variant || v == expr_variant_c {
 				inner_type := if type_name.contains('__') {
-					'${type_name.all_before_last('__')}__${v_short}'
+					'${type_name.all_before_last('__')}__${v}'
 				} else {
-					v_short
+					v
 				}
 				return SumVariantMatch{
 					tag:          i
-					field_name:   v_short
+					field_name:   v
 					is_primitive: false
 					inner_type:   inner_type
 				}

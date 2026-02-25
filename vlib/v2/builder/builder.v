@@ -88,6 +88,7 @@ pub fn (mut b Builder) build(files []string) {
 	// Transform AST (flag enum desugaring, etc.)
 	transform_start := sw.elapsed()
 	mut trans := transformer.Transformer.new_with_pref(b.files, b.env, b.pref)
+	trans.set_file_set(b.file_set)
 	b.files = trans.transform_files(b.files)
 	transform_time := time.Duration(sw.elapsed() - transform_start)
 	print_time('Transform', transform_time)
@@ -424,6 +425,24 @@ fn (mut b Builder) gen_cleanc_with_cached_core(output_name string, cc string, cc
 	}
 	b.ensure_core_module_headers()
 
+	// When TCC is the default compiler but fell back to cc for cache
+	// compilation (e.g. due to TCC not supporting certain C constructs),
+	// the cached .o files are Mach-O (from cc) while TCC would produce ELF.
+	// Detect this mismatch and use cc for main compilation and linking too.
+	mut main_cc := cc
+	mut main_cc_flags := cc_flags
+	if cc.contains('tcc') && os.exists(builtin_obj) {
+		bytes := os.read_bytes(builtin_obj) or { []u8{} }
+		is_elf := bytes.len >= 4 && bytes[0] == 0x7f && bytes[1] == 0x45 && bytes[2] == 0x4c
+			&& bytes[3] == 0x46
+		if !is_elf {
+			// Cached .o was compiled by cc (via TCC fallback), not TCC.
+			// Use cc for main compilation and linking to match formats.
+			main_cc = 'cc'
+			main_cc_flags = (os.getenv_opt('V2CFLAGS') or { '' })
+		}
+	}
+
 	mut cached_init_calls := []string{}
 	cached_init_calls << '__v2_cached_init_${builtin_cache_name}'
 	if vlib_obj.len > 0 {
@@ -441,9 +460,16 @@ fn (mut b Builder) gen_cleanc_with_cached_core(output_name string, cc string, cc
 
 	cc_start := sw.elapsed()
 	main_obj := output_name + '.main.o'
-	compile_main_cmd := '${cc} ${cc_flags} -w -c "${main_c_file}" -o "${main_obj}"${error_limit_flag}'
-	run_cc_cmd_or_exit(compile_main_cmd, 'C compilation', b.pref.show_cc)
-	mut link_cmd := '${cc} ${cc_flags} -w "${main_obj}" "${builtin_obj}"'
+	compile_main_cmd := '${main_cc} ${main_cc_flags} -w -c "${main_c_file}" -o "${main_obj}"${error_limit_flag}'
+	main_fell_back := run_cc_cmd_or_exit(compile_main_cmd, 'C compilation', b.pref.show_cc)
+	if main_fell_back && main_cc.contains('tcc') {
+		// TCC failed on main.c but cached .o files are ELF (from TCC).
+		// Fallback produced Mach-O main.o — can't link with ELF cache.
+		// Fall back to non-cached full compilation.
+		os.rm(main_obj) or {}
+		return false
+	}
+	mut link_cmd := '${main_cc} ${main_cc_flags} -w "${main_obj}" "${builtin_obj}"'
 	if vlib_obj.len > 0 {
 		link_cmd += ' "${vlib_obj}"'
 	}
@@ -538,7 +564,9 @@ fn tcc_flags(cc string, vroot string) string {
 		'lib')}"'
 }
 
-fn run_cc_cmd_or_exit(cmd string, stage string, show_cc bool) {
+// run_cc_cmd_or_exit runs a C compiler command, falling back from tcc to cc
+// if needed. Returns true if tcc fell back to cc.
+fn run_cc_cmd_or_exit(cmd string, stage string, show_cc bool) bool {
 	if show_cc {
 		println(cmd)
 	} else if os.getenv('V2VERBOSE') != '' {
@@ -547,13 +575,16 @@ fn run_cc_cmd_or_exit(cmd string, stage string, show_cc bool) {
 	result := os.execute(cmd)
 	if result.exit_code != 0 {
 		// If tcc failed, fall back to cc.
-		if cmd.contains('tcc') {
+		// Check only the compiler binary (before the first space), not the full
+		// command string which contains tcc in include/library flag paths.
+		cc_binary := cmd.all_before(' ')
+		if cc_binary.contains('tcc') {
 			eprintln('Failed to compile with tcc, falling back to cc')
 			eprintln('tcc cmd: ${cmd}')
 			eprintln(result.output)
-			fallback_cmd := cmd.replace_once(cmd.all_before(' '), 'cc')
+			fallback_cmd := cmd.replace_once(cc_binary, 'cc')
 			run_cc_cmd_or_exit(fallback_cmd, stage, show_cc)
-			return
+			return true
 		}
 		eprintln('${stage} failed:')
 		lines := result.output.split_into_lines()
@@ -575,6 +606,7 @@ fn run_cc_cmd_or_exit(cmd string, stage string, show_cc bool) {
 		}
 		exit(1)
 	}
+	return false
 }
 
 fn (mut b Builder) gen_native(backend_arch pref.Arch) {
