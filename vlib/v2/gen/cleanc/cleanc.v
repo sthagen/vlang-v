@@ -102,6 +102,14 @@ fn is_empty_stmt(s ast.Stmt) bool {
 	return s is ast.EmptyStmt
 }
 
+fn stmt_has_valid_data(stmt ast.Stmt) bool {
+	return unsafe { (&u64(&stmt))[1] } != 0
+}
+
+fn expr_has_valid_data(expr ast.Expr) bool {
+	return unsafe { (&u64(&expr))[1] } != 0
+}
+
 pub fn Gen.new(files []ast.File) &Gen {
 	return Gen.new_with_env_and_pref(files, unsafe { nil }, unsafe { nil })
 }
@@ -150,6 +158,9 @@ pub fn Gen.new_with_env_and_pref(files []ast.File, env &types.Environment, p &pr
 fn (mut g Gen) gen_file(file ast.File) {
 	g.set_file_module(file)
 	for stmt in file.stmts {
+		if !stmt_has_valid_data(stmt) {
+			continue
+		}
 		// Skip struct/enum/type/interface/const decls - already emitted in earlier passes
 		if stmt is ast.StructDecl || stmt is ast.EnumDecl || stmt is ast.TypeDecl
 			|| stmt is ast.ConstDecl || stmt is ast.InterfaceDecl {
@@ -259,6 +270,9 @@ pub fn (mut g Gen) gen() string {
 	for file in g.files {
 		g.set_file_module(file)
 		for stmt in file.stmts {
+			if !stmt_has_valid_data(stmt) {
+				continue
+			}
 			if stmt is ast.GlobalDecl {
 				for field in stmt.fields {
 					if g.cur_module != '' && g.cur_module != 'main' && g.cur_module != 'builtin' {
@@ -275,6 +289,9 @@ pub fn (mut g Gen) gen() string {
 	for file in g.files {
 		g.set_file_module(file)
 		for stmt in file.stmts {
+			if !stmt_has_valid_data(stmt) {
+				continue
+			}
 			if stmt is ast.StructDecl {
 				if stmt.language == .c {
 					continue
@@ -315,6 +332,9 @@ pub fn (mut g Gen) gen() string {
 	for file in g.files {
 		g.set_file_module(file)
 		for stmt in file.stmts {
+			if !stmt_has_valid_data(stmt) {
+				continue
+			}
 			if stmt is ast.EnumDecl {
 				g.gen_enum_decl(stmt)
 			} else if stmt is ast.TypeDecl {
@@ -337,6 +357,9 @@ pub fn (mut g Gen) gen() string {
 	for file in g.files {
 		g.set_file_module(file)
 		for stmt in file.stmts {
+			if !stmt_has_valid_data(stmt) {
+				continue
+			}
 			if stmt is ast.StructDecl {
 				if stmt.language == .c {
 					continue
@@ -407,6 +430,9 @@ pub fn (mut g Gen) gen() string {
 			continue
 		}
 		for stmt in file.stmts {
+			if !stmt_has_valid_data(stmt) {
+				continue
+			}
 			if stmt is ast.ConstDecl {
 				g.gen_const_decl(stmt)
 			}
@@ -416,7 +442,9 @@ pub fn (mut g Gen) gen() string {
 	// Recursive array equality helper for nested arrays and string arrays
 	g.sb.writeln('bool string__eq(string a, string b);')
 	g.sb.writeln('static inline bool __v2_array_eq(array a, array b) {')
-	g.sb.writeln('	if (a.len != b.len || a.element_size != b.element_size) return false;')
+	g.sb.writeln('	if (a.len != b.len) return false;')
+	g.sb.writeln('	if (a.len == 0) return true;')
+	g.sb.writeln('	if (a.element_size != b.element_size) return false;')
 	g.sb.writeln('	if (a.element_size == sizeof(array)) {')
 	g.sb.writeln('		for (int i = 0; i < a.len; i++) {')
 	g.sb.writeln('			if (!__v2_array_eq(((array*)a.data)[i], ((array*)b.data)[i])) return false;')
@@ -441,6 +469,9 @@ pub fn (mut g Gen) gen() string {
 	for file in g.files {
 		g.set_file_module(file)
 		for stmt in file.stmts {
+			if !stmt_has_valid_data(stmt) {
+				continue
+			}
 			if stmt is ast.FnDecl {
 				if !g.should_emit_fn_decl(g.cur_module, stmt) {
 					continue
@@ -740,6 +771,34 @@ fn strip_literal_quotes(raw string) string {
 		return raw[1..raw.len - 1]
 	}
 	return raw
+}
+
+// process_line_continuations strips V line continuation sequences from string content.
+// A `\` immediately before a newline (0x0a) in V source means line continuation:
+// the `\`, the newline, and any leading whitespace on the next line are removed.
+fn process_line_continuations(val string) string {
+	mut i := 0
+	for i < val.len {
+		if val[i] == `\\` && i + 1 < val.len && val[i + 1] == `\n` {
+			// Found `\` + newline: strip `\`, newline, and leading whitespace
+			mut sb := strings.new_builder(val.len)
+			sb.write_string(val[..i])
+			mut j := i + 2 // skip `\` and newline
+			for j < val.len && val[j] in [` `, `\t`] {
+				j++
+			}
+			sb.write_string(val[j..])
+			// Process recursively for multiple continuations
+			return process_line_continuations(sb.str())
+		}
+		// Skip past V escape sequences (e.g., `\n`, `\t`, `\\`)
+		if val[i] == `\\` && i + 1 < val.len {
+			i += 2
+			continue
+		}
+		i++
+	}
+	return val
 }
 
 fn escape_char_literal_content(raw string) string {

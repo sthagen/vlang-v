@@ -530,11 +530,13 @@ fn runtime_const_init_call_name(mod string, fn_name string) string {
 }
 
 fn (mut t Transformer) collect_runtime_const_inits(files []ast.File) {
+	is_native := t.pref != unsafe { nil }
+		&& (t.pref.backend == .arm64 || t.pref.backend == .x64 || t.pref.backend == .c)
 	for file in files {
 		for stmt in file.stmts {
 			if stmt is ast.ConstDecl {
 				for field in stmt.fields {
-					if !t.contains_call_expr(field.value) {
+					if !t.needs_runtime_const_init(field.value, is_native) {
 						continue
 					}
 					if file.mod !in t.runtime_const_inits_by_mod {
@@ -550,6 +552,26 @@ fn (mut t Transformer) collect_runtime_const_inits(files []ast.File) {
 			}
 		}
 	}
+}
+
+// needs_runtime_const_init checks whether a const initializer requires runtime
+// initialization.  For C/cleanc backends only call-expressions need it (the C
+// compiler can handle static array/struct initializers).  For SSA-based backends
+// (arm64, x64, c) array and map literals also need runtime init because the SSA
+// builder cannot embed them in the data segment.
+fn (t &Transformer) needs_runtime_const_init(expr ast.Expr, is_native bool) bool {
+	if t.contains_call_expr(expr) {
+		return true
+	}
+	if is_native {
+		if expr is ast.ArrayInitExpr {
+			return true
+		}
+		if expr is ast.InitExpr {
+			return true
+		}
+	}
+	return false
 }
 
 fn (mut t Transformer) transform_expr_in_module(mod string, expr ast.Expr) ast.Expr {
@@ -702,6 +724,9 @@ fn (mut t Transformer) transform_file(file ast.File) ast.File {
 }
 
 fn (mut t Transformer) transform_stmt(stmt ast.Stmt) ast.Stmt {
+	if !stmt_has_valid_data(stmt) {
+		return stmt
+	}
 	// Check for OrExpr assignment that needs expansion
 	if stmt is ast.AssignStmt {
 		if expanded := t.try_expand_or_expr_assign(stmt) {
@@ -3520,23 +3545,29 @@ fn (mut t Transformer) lower_defer_stmts(stmts []ast.Stmt, has_return_type bool)
 
 fn (t &Transformer) has_defer_stmt(stmts []ast.Stmt) bool {
 	for stmt in stmts {
+		if !stmt_has_valid_data(stmt) {
+			continue
+		}
 		match stmt {
 			ast.DeferStmt {
 				return true
 			}
 			ast.ExprStmt {
-				if stmt.expr is ast.IfExpr {
-					if t.has_defer_stmt(stmt.expr.stmts) {
-						return true
-					}
-					if stmt.expr.else_expr is ast.IfExpr {
-						if t.has_defer_stmt(stmt.expr.else_expr.stmts) {
+				if expr_has_valid_data(stmt.expr) {
+					if stmt.expr is ast.IfExpr {
+						if t.has_defer_stmt(stmt.expr.stmts) {
 							return true
 						}
-					}
-				} else if stmt.expr is ast.UnsafeExpr {
-					if t.has_defer_stmt(stmt.expr.stmts) {
-						return true
+						if expr_has_valid_data(stmt.expr.else_expr)
+							&& stmt.expr.else_expr is ast.IfExpr {
+							if t.has_defer_stmt(stmt.expr.else_expr.stmts) {
+								return true
+							}
+						}
+					} else if stmt.expr is ast.UnsafeExpr {
+						if t.has_defer_stmt(stmt.expr.stmts) {
+							return true
+						}
 					}
 				}
 			}
@@ -3753,8 +3784,30 @@ fn (mut t Transformer) transform_return_stmt(stmt ast.ReturnStmt) ast.ReturnStmt
 					}
 				}
 			}
-			// Check for `return none` — appears as Ident{name:'none'}
-			if ret_expr is ast.Ident && ret_expr.name == 'none' {
+			// Check for `return none` — appears as Keyword{tok:.key_none} or Ident{name:'none'}
+			is_none_type := if ret_expr is ast.Type {
+				ret_expr is ast.NoneType
+			} else {
+				false
+			}
+			is_none_ident := ret_expr is ast.Ident && ret_expr.name == 'none'
+			if is_none_type || is_none_ident {
+				// For sum type returns (?SumType), return two zeros (tag=0, data=0)
+				// so the SSA builder doesn't try to wrap the single 0 in a sum type constructor
+				if t.cur_fn_ret_type_name != '' && t.is_sum_type(t.cur_fn_ret_type_name) {
+					return ast.ReturnStmt{
+						exprs: [
+							ast.Expr(ast.BasicLiteral{
+								kind:  .number
+								value: '0'
+							}),
+							ast.Expr(ast.BasicLiteral{
+								kind:  .number
+								value: '0'
+							}),
+						]
+					}
+				}
 				return ast.ReturnStmt{
 					exprs: [
 						ast.Expr(ast.BasicLiteral{
@@ -3800,6 +3853,9 @@ fn (mut t Transformer) transform_return_stmt(stmt ast.ReturnStmt) ast.ReturnStmt
 				}
 			}
 		}
+		if t.cur_fn_name_str == 'base_type' {
+			eprintln('TRACE ret base_type: expr_type=${expr.type_name()} smartcast=${smartcast_variant} ret_sum=${t.cur_fn_ret_type_name}')
+		}
 		transformed := t.transform_expr(expr)
 		// Wrap variant values in sum type initialization if needed.
 		// Use wrap_sumtype_value_transformed because the value is already transformed above.
@@ -3816,6 +3872,11 @@ fn (mut t Transformer) transform_return_stmt(stmt ast.ReturnStmt) ast.ReturnStmt
 					exprs << wrapped
 					continue
 				}
+				eprintln('WRAP-FAIL: build_sumtype_init failed for variant=${smartcast_variant} sumtype=${t.cur_fn_ret_type_name} fn=${t.cur_fn_name_str}')
+			}
+			// Diagnostic: wrapping failed completely
+			if t.pref != unsafe { nil } && (t.pref.backend == .arm64 || t.pref.backend == .x64) {
+				eprintln('WRAP-MISS: return in sumtype fn without wrapping: sumtype=${t.cur_fn_ret_type_name} smartcast=${smartcast_variant} fn=${t.cur_fn_name_str}')
 			}
 		}
 		exprs << transformed
@@ -4177,11 +4238,38 @@ fn (t &Transformer) get_sprintf_format_for_type(typ types.Type) string {
 
 fn (mut t Transformer) resolve_sprintf_format(inter ast.StringInter) string {
 	mut fmt := '%'
-	if inter.width > 0 {
-		fmt += '${inter.width}'
+	mut width := inter.width
+	mut precision := inter.precision
+	// Extract width/precision from format_expr when not set explicitly by the parser
+	if width == 0 && precision == 0 && inter.format_expr !is ast.EmptyExpr {
+		if inter.format_expr is ast.BasicLiteral {
+			val := inter.format_expr.value
+			if val.contains('.') {
+				parts := val.split('.')
+				if parts.len == 2 {
+					if parts[0].len > 0 && parts[0] != '0' {
+						width = parts[0].int()
+					}
+					precision = parts[1].int()
+				}
+			} else {
+				if val.starts_with('0') && val.len > 1 {
+					fmt += '0'
+				}
+				width = val.int()
+			}
+		} else if inter.format_expr is ast.PrefixExpr {
+			if inter.format_expr.op == .minus && inter.format_expr.expr is ast.BasicLiteral {
+				fmt += '-'
+				width = inter.format_expr.expr.value.int()
+			}
+		}
 	}
-	if inter.precision > 0 {
-		fmt += '.${inter.precision}'
+	if width > 0 {
+		fmt += '${width}'
+	}
+	if precision > 0 {
+		fmt += '.${precision}'
 	}
 	if inter.format != .unformatted {
 		match inter.format {
@@ -4230,6 +4318,13 @@ fn (mut t Transformer) transform_sprintf_arg(inter ast.StringInter) ast.Expr {
 		}
 		types.Primitive {
 			if typ.props.has(types.Properties.boolean) {
+				is_native_be := t.pref != unsafe { nil }
+					&& (t.pref.backend == .arm64 || t.pref.backend == .x64 || t.pref.backend == .c)
+				if is_native_be {
+					// For native/SSA backends, pass the bool as-is; the SSA builder's
+					// convert_to_string will call builtin__bool__str.
+					return transformed
+				}
 				// bool -> if expr { "true" } else { "false" } (ternary for %s)
 				return ast.Expr(ast.IfExpr{
 					cond:      transformed
@@ -5341,15 +5436,24 @@ fn (t &Transformer) is_string_expr(expr ast.Expr) bool {
 			}
 		}
 		// Try to look up the type of the field using the environment
+		mut field_found := false
 		if lhs_type := t.get_expr_type(expr.lhs) {
 			base_type := if lhs_type is types.Pointer {
 				lhs_type.base_type
 			} else {
 				lhs_type
 			}
+			// string.str is &u8, string.len is int — none are strings
+			if base_type is types.String {
+				return false
+			}
 			if base_type is types.Struct {
+				if base_type.name == 'string' {
+					return false
+				}
 				for field in base_type.fields {
 					if field.name == expr.rhs.name {
+						field_found = true
 						if field.typ is types.String {
 							return true
 						}
@@ -5364,8 +5468,8 @@ fn (t &Transformer) is_string_expr(expr ast.Expr) bool {
 			}
 		}
 		// Fallback: Check field names that are typically strings
-		// Only use this for common string field names
-		if expr.rhs.name in ['name', 'str', 'msg'] {
+		// Only use heuristic if the field type couldn't be determined
+		if !field_found && expr.rhs.name in ['name', 'str', 'msg'] {
 			return true
 		}
 	}
@@ -5861,10 +5965,29 @@ fn is_core_generated_fn(name string) bool {
 
 fn (mut t Transformer) generate_str_functions() []ast.Stmt {
 	mut result := []ast.Stmt{cap: t.needed_str_fns.len}
-	for fn_name, elem_type in t.needed_str_fns {
-		// Generate array str function (skip fixed arrays - they need different handling)
-		if fn_name.starts_with('Array_') && !fn_name.starts_with('Array_fixed_') {
-			result << t.generate_array_str_fn(fn_name, elem_type)
+	// Use worklist to handle recursive str function registration
+	// (e.g., Array_Array_int_str adds Array_int_str during generation)
+	mut generated := map[string]bool{}
+	for {
+		mut found_new := false
+		for fn_name, elem_type in t.needed_str_fns {
+			if fn_name in generated {
+				continue
+			}
+			if fn_name.starts_with('Array_fixed_') {
+				// Generate fixed array str function
+				generated[fn_name] = true
+				found_new = true
+				result << t.generate_fixed_array_str_fn(fn_name)
+			} else if fn_name.starts_with('Array_') {
+				// Generate dynamic array str function
+				generated[fn_name] = true
+				found_new = true
+				result << t.generate_array_str_fn(fn_name, elem_type)
+			}
+		}
+		if !found_new {
+			break
 		}
 	}
 	return result
@@ -6156,6 +6279,14 @@ fn (mut t Transformer) generate_array_str_fn(fn_name string, elem_type string) a
 		'${resolved_elem_type}__str'
 	}
 
+	// Recursively register inner element str function for nested array/map types
+	if resolved_elem_type.starts_with('Array_') && !resolved_elem_type.starts_with('Array_fixed_') {
+		inner_elem := resolved_elem_type['Array_'.len..]
+		if elem_str_fn !in t.needed_str_fns {
+			t.needed_str_fns[elem_str_fn] = inner_elem
+		}
+	}
+
 	// Build the function body statements
 	mut body_stmts := []ast.Stmt{}
 
@@ -6396,6 +6527,297 @@ fn (mut t Transformer) generate_array_str_fn(fn_name string, elem_type string) a
 	}
 }
 
+fn (mut t Transformer) generate_fixed_array_str_fn(fn_name string) ast.Stmt {
+	// fn_name is like 'Array_fixed_int_3_str' or 'Array_fixed_Array_fixed_int_3_3_str'
+	type_name := fn_name[..fn_name.len - 4] // Remove '_str' suffix
+
+	// Parse elem_type and size from type_name
+	// 'Array_fixed_int_3' → elem='int', size=3
+	// 'Array_fixed_Array_fixed_int_3_3' → elem='Array_fixed_int_3', size=3
+	payload := type_name['Array_fixed_'.len..]
+	elem_type := payload.all_before_last('_')
+	arr_size := payload.all_after_last('_').int()
+
+	if arr_size == 0 {
+		// Fallback: return a function that returns "[]"
+		return ast.FnDecl{
+			name:  fn_name
+			typ:   ast.FnType{
+				params:      [
+					ast.Parameter{
+						name: 'a'
+						typ:  ast.Ident{
+							name: type_name
+						}
+					},
+				]
+				return_type: ast.Ident{
+					name: 'string'
+				}
+			}
+			stmts: [
+				ast.Stmt(ast.ReturnStmt{
+					exprs: [
+						ast.Expr(ast.StringLiteral{
+							kind:  .v
+							value: '[]'
+						}),
+					]
+				}),
+			]
+		}
+	}
+
+	// Create parameter: a Array_fixed_T_N
+	param_a := ast.Parameter{
+		name: 'a'
+		typ:  ast.Ident{
+			name: type_name
+		}
+	}
+	t.register_generated_fn_scope(fn_name, 'builtin', [param_a])
+
+	// Get element str function name
+	mut resolved_elem_type := elem_type
+	if elem_type.ends_with('ptr') && elem_type != 'voidptr' && elem_type != 'charptr'
+		&& elem_type != 'byteptr' {
+		resolved_elem_type = elem_type[..elem_type.len - 3]
+	}
+	elem_str_fn := if resolved_elem_type.starts_with('Array_')
+		|| resolved_elem_type.starts_with('Map_') {
+		'${resolved_elem_type}_str'
+	} else {
+		'${resolved_elem_type}__str'
+	}
+
+	// Recursively register inner element str function for nested types
+	if resolved_elem_type.starts_with('Array_fixed_') {
+		if elem_str_fn !in t.needed_str_fns {
+			inner_payload := resolved_elem_type['Array_fixed_'.len..]
+			inner_elem := inner_payload.all_before_last('_')
+			t.needed_str_fns[elem_str_fn] = inner_elem
+		}
+	} else if resolved_elem_type.starts_with('Array_') {
+		inner_elem := resolved_elem_type['Array_'.len..]
+		if elem_str_fn !in t.needed_str_fns {
+			t.needed_str_fns[elem_str_fn] = inner_elem
+		}
+	}
+
+	// Build the function body statements
+	mut body_stmts := []ast.Stmt{}
+
+	// mut sb := strings__new_builder(2 + arr_size * 10)
+	body_stmts << ast.AssignStmt{
+		op:  .decl_assign
+		lhs: [
+			ast.Expr(ast.ModifierExpr{
+				kind: .key_mut
+				expr: ast.Ident{
+					name: 'sb'
+				}
+			}),
+		]
+		rhs: [
+			ast.Expr(ast.CallExpr{
+				lhs:  ast.Ident{
+					name: 'strings__new_builder'
+				}
+				args: [
+					ast.Expr(ast.BasicLiteral{
+						kind:  .number
+						value: '${2 + arr_size * 10}'
+					}),
+				]
+			}),
+		]
+	}
+
+	// strings__Builder__write_string(&sb, "[")
+	body_stmts << ast.ExprStmt{
+		expr: ast.CallExpr{
+			lhs:  ast.Ident{
+				name: 'strings__Builder__write_string'
+			}
+			args: [
+				ast.Expr(ast.PrefixExpr{
+					op:   .amp
+					expr: ast.Ident{
+						name: 'sb'
+					}
+				}),
+				ast.Expr(ast.StringLiteral{
+					kind:  .v
+					value: '['
+				}),
+			]
+		}
+	}
+
+	// Build the for loop body
+	mut for_body := []ast.Stmt{}
+
+	// if i > 0 { strings__Builder__write_string(&sb, ", ") }
+	for_body << ast.ExprStmt{
+		expr: ast.IfExpr{
+			cond:  ast.InfixExpr{
+				op:  .gt
+				lhs: ast.Ident{
+					name: 'i'
+				}
+				rhs: ast.BasicLiteral{
+					kind:  .number
+					value: '0'
+				}
+			}
+			stmts: [
+				ast.Stmt(ast.ExprStmt{
+					expr: ast.CallExpr{
+						lhs:  ast.Ident{
+							name: 'strings__Builder__write_string'
+						}
+						args: [
+							ast.Expr(ast.PrefixExpr{
+								op:   .amp
+								expr: ast.Ident{
+									name: 'sb'
+								}
+							}),
+							ast.Expr(ast.StringLiteral{
+								kind:  .v
+								value: ', '
+							}),
+						]
+					}
+				}),
+			]
+		}
+	}
+
+	// strings__Builder__write_string(&sb, elem_str_fn(a[i]))
+	for_body << ast.ExprStmt{
+		expr: ast.CallExpr{
+			lhs:  ast.Ident{
+				name: 'strings__Builder__write_string'
+			}
+			args: [
+				ast.Expr(ast.PrefixExpr{
+					op:   .amp
+					expr: ast.Ident{
+						name: 'sb'
+					}
+				}),
+				ast.Expr(ast.CallExpr{
+					lhs:  ast.Ident{
+						name: elem_str_fn
+					}
+					args: [
+						ast.Expr(ast.IndexExpr{
+							lhs:  ast.Ident{
+								name: 'a'
+							}
+							expr: ast.Ident{
+								name: 'i'
+							}
+						}),
+					]
+				}),
+			]
+		}
+	}
+
+	// for i := 0; i < arr_size; i++ { ... }
+	body_stmts << ast.ForStmt{
+		init:  ast.AssignStmt{
+			op:  .decl_assign
+			lhs: [ast.Expr(ast.Ident{
+				name: 'i'
+			})]
+			rhs: [ast.Expr(ast.BasicLiteral{
+				kind:  .number
+				value: '0'
+			})]
+		}
+		cond:  ast.InfixExpr{
+			op:  .lt
+			lhs: ast.Ident{
+				name: 'i'
+			}
+			rhs: ast.BasicLiteral{
+				kind:  .number
+				value: '${arr_size}'
+			}
+		}
+		post:  ast.AssignStmt{
+			op:  .plus_assign
+			lhs: [ast.Expr(ast.Ident{
+				name: 'i'
+			})]
+			rhs: [ast.Expr(ast.BasicLiteral{
+				kind:  .number
+				value: '1'
+			})]
+		}
+		stmts: for_body
+	}
+
+	// strings__Builder__write_string(&sb, "]")
+	body_stmts << ast.ExprStmt{
+		expr: ast.CallExpr{
+			lhs:  ast.Ident{
+				name: 'strings__Builder__write_string'
+			}
+			args: [
+				ast.Expr(ast.PrefixExpr{
+					op:   .amp
+					expr: ast.Ident{
+						name: 'sb'
+					}
+				}),
+				ast.Expr(ast.StringLiteral{
+					kind:  .v
+					value: ']'
+				}),
+			]
+		}
+	}
+
+	// return strings__Builder__str(&sb)
+	body_stmts << ast.ReturnStmt{
+		exprs: [
+			ast.Expr(ast.CallExpr{
+				lhs:  ast.Ident{
+					name: 'strings__Builder__str'
+				}
+				args: [
+					ast.Expr(ast.PrefixExpr{
+						op:   .amp
+						expr: ast.Ident{
+							name: 'sb'
+						}
+					}),
+				]
+			}),
+		]
+	}
+
+	// Create the function declaration
+	return ast.FnDecl{
+		name:       fn_name
+		is_public:  false
+		is_method:  false
+		is_static:  false
+		attributes: []ast.Attribute{}
+		typ:        ast.FnType{
+			params:      [param_a]
+			return_type: ast.Ident{
+				name: 'string'
+			}
+		}
+		stmts:      body_stmts
+	}
+}
+
 // expr_to_v_string reconstructs V source text from an AST expression.
 // Used to preserve original expression text in assert statements before transformation.
 fn expr_to_v_string(expr ast.Expr) string {
@@ -6466,6 +6888,9 @@ fn assert_expr_is_simple(expr ast.Expr) bool {
 // For InfixExpr comparisons with simple operands, also prints left/right values.
 fn (mut t Transformer) expand_assert_stmt(stmt ast.AssertStmt) []ast.Stmt {
 	expr_str := expr_to_v_string(stmt.expr)
+	if !expr_has_valid_data(stmt.expr) {
+		return []
+	}
 	pos := stmt.expr.pos()
 	line := t.get_line_for_pos(pos)
 	fn_name := t.cur_fn_name_str

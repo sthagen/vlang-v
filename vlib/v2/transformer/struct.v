@@ -232,7 +232,7 @@ fn (mut t Transformer) transform_array_init_expr(expr ast.ArrayInitExpr) ast.Exp
 				value: '0'
 			})
 		})
-		init_expr := ast.Expr(if expr.init !is ast.EmptyExpr {
+		mut init_expr := ast.Expr(if expr.init !is ast.EmptyExpr {
 			t.transform_expr(expr.init)
 		} else {
 			ast.Expr(ast.Ident{
@@ -243,6 +243,87 @@ fn (mut t Transformer) transform_array_init_expr(expr ast.ArrayInitExpr) ast.Exp
 		if expr.init !is ast.EmptyExpr && t.expr_contains_ident_named(init_expr, 'index') {
 			return t.expand_array_init_with_index(len_expr, cap_expr, sizeof_expr, init_expr,
 				expr.pos)
+		}
+		// When element type is a reference type (array or map) and no explicit init,
+		// synthesize a proper default so inner elements get initialized correctly
+		// (not zero-filled via NULL, which leaves element_size=0 or hash_fn=null).
+		// sizeof_expr holds elem_type_expr before smartcasting, so use it to avoid issues.
+		elem_is_nested_array := elem_type_expr is ast.Type && elem_type_expr is ast.ArrayType
+		elem_is_map := elem_type_expr is ast.Type && elem_type_expr is ast.MapType
+		if expr.init is ast.EmptyExpr && elem_is_nested_array {
+			init_expr = ast.Expr(t.transform_array_init_expr(ast.ArrayInitExpr{
+				typ: sizeof_expr
+			}))
+		}
+		if expr.init is ast.EmptyExpr && elem_is_map {
+			init_expr = ast.Expr(t.transform_map_init_expr(ast.MapInitExpr{
+				typ: sizeof_expr
+			}))
+		}
+		// When element type is a struct with map fields and no explicit init,
+		// synthesize a struct default and use for-loop expansion so each element
+		// gets its own map allocation (memcpy would share internal pointers).
+		if expr.init is ast.EmptyExpr && !elem_is_nested_array && !elem_is_map {
+			if elem_type := t.get_expr_type(elem_type_expr) {
+				elem_base := t.unwrap_alias_and_pointer_type(elem_type)
+				if elem_base is types.Struct {
+					mut field_inits := []ast.FieldInit{}
+					for field in elem_base.fields {
+						if field.typ is types.Map {
+							map_type_expr := t.type_to_ast_type_expr(field.typ)
+							map_init := t.transform_map_init_expr(ast.MapInitExpr{
+								typ: map_type_expr
+							})
+							field_inits << ast.FieldInit{
+								name:  field.name
+								value: map_init
+							}
+						}
+					}
+					if field_inits.len > 0 {
+						struct_init := ast.Expr(ast.InitExpr{
+							typ:    elem_type_expr
+							fields: field_inits
+						})
+						return t.expand_array_init_with_index(len_expr, cap_expr, sizeof_expr,
+							struct_init, expr.pos)
+					}
+				}
+			}
+		}
+		// When init value is an array, use __new_array_with_array_default for deep cloning
+		// (shallow memcpy would share data pointers between all elements)
+		mut init_is_array := expr.init is ast.ArrayInitExpr
+		if !init_is_array && elem_is_nested_array && expr.init is ast.EmptyExpr {
+			init_is_array = true
+		}
+		if !init_is_array {
+			if init_type := t.get_expr_type(expr.init) {
+				init_base := t.unwrap_alias_and_pointer_type(init_type)
+				init_is_array = init_base is types.Array
+			}
+		}
+		if init_is_array {
+			return ast.CallExpr{
+				lhs:  ast.Ident{
+					name: '__new_array_with_array_default'
+				}
+				args: [
+					len_expr,
+					cap_expr,
+					ast.Expr(ast.KeywordOperator{
+						op:    .key_sizeof
+						exprs: [sizeof_expr]
+					}),
+					init_expr,
+					// depth parameter for clone_to_depth
+					ast.Expr(ast.BasicLiteral{
+						kind:  .number
+						value: '3'
+					}),
+				]
+				pos:  expr.pos
+			}
 		}
 		return ast.CallExpr{
 			lhs:  ast.Ident{
@@ -1064,9 +1145,19 @@ fn (mut t Transformer) add_missing_struct_field_defaults(struct_name string, fie
 	if struct_name == '' {
 		return fields
 	}
-	struct_type := t.lookup_type(struct_name) or { return fields }
+	struct_type := t.lookup_type(struct_name) or {
+		if struct_name.contains('Scope') || struct_name.contains('DenseArray')
+			|| struct_name.contains('Env') {
+			eprintln('DIAG add_missing_defaults: FAILED lookup for "${struct_name}"')
+		}
+		return fields
+	}
 	base_type := t.unwrap_alias_and_pointer_type(struct_type)
 	if base_type !is types.Struct {
+		if struct_name.contains('Scope') || struct_name.contains('DenseArray')
+			|| struct_name.contains('Env') {
+			eprintln('DIAG add_missing_defaults: NOT struct for "${struct_name}" type=${base_type.type_name()}')
+		}
 		return fields
 	}
 	struct_info := base_type as types.Struct
@@ -1103,6 +1194,9 @@ fn (mut t Transformer) add_missing_struct_field_defaults(struct_name string, fie
 		}
 		field_type := t.unwrap_alias_and_pointer_type(struct_field.typ)
 		if field_type is types.Map {
+			if struct_name.contains('Scope') || struct_name.contains('Env') {
+				eprintln('DIAG add_missing_defaults: adding map default for "${struct_name}.${struct_field.name}"')
+			}
 			map_init := ast.Expr(ast.MapInitExpr{
 				typ: t.type_to_ast_type_expr(field_type)
 			})

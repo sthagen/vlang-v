@@ -76,7 +76,7 @@ pub fn (mut e Environment) set_expr_type(id int, typ Type) {
 pub fn (e &Environment) get_expr_type(id int) ?Type {
 	if id > 0 && id < e.expr_type_values.len {
 		typ := e.expr_type_values[id]
-		if typ is Void {
+		if typ is Void || type_has_null_data(typ) {
 			return none
 		}
 		return typ
@@ -84,13 +84,26 @@ pub fn (e &Environment) get_expr_type(id int) ?Type {
 		idx := -id
 		if idx < e.expr_type_neg_values.len {
 			typ := e.expr_type_neg_values[idx]
-			if typ is Void {
+			if typ is Void || type_has_null_data(typ) {
 				return none
 			}
 			return typ
 		}
 	}
 	return none
+}
+
+// type_has_null_data checks if a Type sumtype has a null internal data pointer.
+// In cleanc-generated code, sumtype variants are heap-allocated and referenced
+// by pointer. A zero-initialized Type has tag 0 (Alias) with a null data pointer,
+// which would crash if any variant field were accessed. This function detects
+// that case without dereferencing the data pointer.
+fn type_has_null_data(t Type) bool {
+	// Layout: { int _tag (4 bytes); padding (4 bytes); void* _data (8 bytes) }
+	// The data pointer lives at byte offset 8.
+	p := unsafe { &u8(&t) + 8 }
+	data_ptr := unsafe { *(&voidptr(p)) }
+	return data_ptr == unsafe { nil }
 }
 
 // lookup_method looks up a method by receiver type name and method name
@@ -456,7 +469,8 @@ pub fn (mut c Checker) preregister_types(file ast.File) {
 		if file.mod in c.env.scopes {
 			mod_scope = unsafe { c.env.scopes[file.mod] }
 		} else {
-			panic('scope should exist for mod: ${file.mod}')
+			eprintln('warning: scope not found for mod: ${file.mod}, skipping')
+			return
 		}
 	}
 	c.scope = mod_scope
@@ -498,7 +512,8 @@ pub fn (mut c Checker) preregister_fn_signatures(file ast.File) {
 		if file.mod in c.env.scopes {
 			mod_scope = unsafe { c.env.scopes[file.mod] }
 		} else {
-			panic('scope should exist for mod: ${file.mod}')
+			eprintln('warning: scope not found for mod: ${file.mod}, skipping')
+			return
 		}
 	}
 	c.scope = mod_scope
@@ -3101,8 +3116,19 @@ fn (mut c Checker) selector_expr(expr ast.SelectorExpr) Type {
 			// 	return c.find_field_or_method(lhs_obj.origin, expr.rhs.name) or { c.error_with_pos(err.msg(), expr.pos) }
 			// }
 			else {
-				c.error_with_pos('unsupported ${lhs_obj.typ().name()} - ${expr.rhs.name}',
-					token.Pos{})
+				// Fallback: handle C constants (C.XXX) and module-qualified lookups
+				// when the sum type dispatch doesn't reach the Module branch.
+				// This can happen in the native backend due to sum type tag issues.
+				if expr.lhs.name == 'C' {
+					return int_
+				}
+				// Try module scope lookup for other modules
+				if scope := c.env.get_scope(expr.lhs.name) {
+					if rhs_obj := scope.lookup_parent(expr.rhs.name, 0) {
+						return rhs_obj.typ()
+					}
+				}
+				c.error_with_pos('unsupported ${expr.rhs.name}', token.Pos{})
 				return Type(void_)
 			}
 		}
