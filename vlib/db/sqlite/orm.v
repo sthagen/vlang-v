@@ -23,17 +23,6 @@ pub fn (db DB) select(config orm.SelectConfig, data orm.QueryData, where orm.Que
 	sqlite_stmt_binder(stmt, data, query, mut c)!
 
 	mut ret := [][]orm.Primitive{}
-
-	if config.is_count {
-		// 2. Get count of returned values & add it to ret array
-		step := stmt.step()
-		if step !in [sqlite_row, sqlite_ok, sqlite_done] {
-			return db.error_message(step, query)
-		}
-		count := stmt.sqlite_select_column(0, 8)!
-		ret << [count]
-		return ret
-	}
 	for {
 		// 2. Parse returned values
 		step := stmt.step()
@@ -95,6 +84,36 @@ pub fn (db DB) create(table orm.Table, fields []orm.TableField) ! {
 pub fn (db DB) drop(table orm.Table) ! {
 	query := 'DROP TABLE `${table.name}`;'
 	sqlite_stmt_worker(db, query, orm.QueryData{}, orm.QueryData{})!
+}
+
+// orm_begin starts a transaction for ORM helpers.
+pub fn (mut db DB) orm_begin() ! {
+	db.begin()!
+}
+
+// orm_commit commits a transaction for ORM helpers.
+pub fn (mut db DB) orm_commit() ! {
+	db.commit()!
+}
+
+// orm_rollback rolls back a transaction for ORM helpers.
+pub fn (mut db DB) orm_rollback() ! {
+	db.rollback()!
+}
+
+// orm_savepoint creates a savepoint for ORM helpers.
+pub fn (mut db DB) orm_savepoint(name string) ! {
+	db.savepoint(name)!
+}
+
+// orm_rollback_to rolls back to a savepoint for ORM helpers.
+pub fn (mut db DB) orm_rollback_to(name string) ! {
+	db.rollback_to(name)!
+}
+
+// orm_release_savepoint releases a savepoint for ORM helpers.
+pub fn (mut db DB) orm_release_savepoint(name string) ! {
+	db.release_savepoint(name)!
 }
 
 // helper

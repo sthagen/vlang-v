@@ -175,6 +175,78 @@ result := sql db {
 }!
 ```
 
+ORM select expressions also support built-in aggregate functions. `count` keeps
+its legacy syntax, while the other aggregates use SQL-like function calls.
+
+```v ignore
+total_age := sql db {
+    select sum(age) from Foo
+}!
+
+average_age := sql db {
+    select avg(age) from Foo where id > 1
+}!
+
+lowest_name := sql db {
+    select min(name) from Foo
+}!
+
+highest_created_at := sql db {
+    select max(created_at) from Foo
+}!
+```
+
+`sum`, `avg`, `min`, and `max` return options so empty result sets can surface
+SQL `NULL` as `none`. `count` continues to return `int`.
+
+### Transactions
+
+ORM transactions work with both `sql tx {}` and the function-call API.
+
+```v ignore
+import orm
+
+orm.transaction[int](mut db, fn (mut tx orm.Tx) !int {
+    user := User{
+        name: 'Alice'
+    }
+    sql tx {
+        insert user into User
+    }!
+    return tx.last_id()
+})!
+```
+
+For manual control, start a transaction explicitly and commit or roll it back yourself.
+
+```v ignore
+import orm
+
+mut tx := orm.begin(mut db)!
+sql tx {
+    update User set name = 'Bob' where id == 1
+}!
+tx.commit()!
+```
+
+Nested transactions use savepoints instead of a second `BEGIN`.
+
+```v ignore
+import orm
+
+orm.transaction[int](mut db, fn (mut tx orm.Tx) !int {
+    tx.transaction[int](fn (mut nested orm.Tx) !int {
+        sql nested {
+            delete from User where id == 2
+        }!
+        return 0
+    })!
+    return 0
+})!
+```
+
+Transaction helpers use each driver's default transaction mode. v1 does not expose isolation
+levels or SQLite begin-mode configuration yet.
 
 ### Update
 
@@ -326,6 +398,25 @@ struct User {
 	qb.set('age = ?, title = ?', 71, 'boss')!.where('name = ?','John')!.update()!
 ```
 
+9. Query aggregate values​​:
+
+```v ignore
+	total_age := qb.sum('age')!
+	average_score := qb.avg('score')!
+	first_name := qb.min('name')!
+	latest_created_at := qb.max('created_at')!
+	count := qb.count()!
+
+	assert total_age.as_int()? == 42
+	assert average_score.as_f64()? == 9.5
+	assert first_name.as_string()? == 'Alice'
+	assert latest_created_at.as_time()? == created_at
+```
+
+`sum`, `avg`, `min`, and `max` return an `AggregateValue`. Use
+`as_int()`, `as_f64()`, `as_string()`, or `as_time()` to unwrap the typed
+value, or check `has_value` for empty result sets. `count` returns `int`.
+
 9. Drop the table​​:
 
 ```v ignore
@@ -355,4 +446,3 @@ The API includes a built-in parser to handle intricate `WHERE` clause conditions
 
 Note the use of placeholders `?`.
 The conditional expressions support logical operators including `AND`, `OR`, `||`, and `&&`.
-

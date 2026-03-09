@@ -88,7 +88,27 @@ pub fn (db &DB) str() string {
 
 pub struct Row {
 pub mut:
-	vals []string
+	vals  []string
+	names []string
+}
+
+// get_string returns the value for the given column name, or '' if the column is not found
+// or if the corresponding value index is out of range.
+pub fn (r &Row) get_string(col_name string) string {
+	for i, name in r.names {
+		if name == col_name {
+			if i < r.vals.len {
+				return r.vals[i]
+			}
+			return ''
+		}
+	}
+	return ''
+}
+
+// get_int returns the integer value for the given column name, or 0 if the column is not found.
+pub fn (r &Row) get_int(col_name string) int {
+	return r.get_string(col_name).int()
 }
 
 pub type Params = []string | [][]string
@@ -233,7 +253,6 @@ pub fn (db &DB) q_string(query string) !string {
 }
 
 // exec_map executes the query on the given `db`, and returns an array of maps of strings, or an error on failure
-@[manualfree]
 pub fn (db &DB) exec_map(query string) ![]map[string]string {
 	$if trace_sqlite ? {
 		eprintln('> exec_map query: "${query}"')
@@ -247,23 +266,22 @@ pub fn (db &DB) exec_map(query string) ![]map[string]string {
 		C.sqlite3_finalize(stmt)
 	}
 	nr_cols := C.sqlite3_column_count(stmt)
+	mut col_names := []string{cap: nr_cols}
+	for i in 0 .. nr_cols {
+		col_char := unsafe { &u8(C.sqlite3_column_name(stmt, i)) }
+		col_names << if col_char != unsafe { nil } { unsafe { tos_clone(col_char) } } else { '' }
+	}
 	mut res := 0
 	mut rows := []map[string]string{}
 	for {
 		res = C.sqlite3_step(stmt)
-		if res != 100 {
+		if res != sqlite_row {
 			break
 		}
 		mut row := map[string]string{}
 		for i in 0 .. nr_cols {
 			val := unsafe { &u8(C.sqlite3_column_text(stmt, i)) }
-			col_char := unsafe { &u8(C.sqlite3_column_name(stmt, i)) }
-			col := unsafe { col_char.vstring() }
-			if val == &u8(unsafe { nil }) {
-				row[col] = ''
-			} else {
-				row[col] = unsafe { tos_clone(val) }
-			}
+			row[col_names[i]] = if val != unsafe { nil } { unsafe { tos_clone(val) } } else { '' }
 		}
 		rows << row
 	}
@@ -273,7 +291,6 @@ pub fn (db &DB) exec_map(query string) ![]map[string]string {
 fn C.sqlite3_memory_used() i64
 
 // exec executes the query on the given `db`, and returns an array of all the results, or an error on failure
-@[manualfree]
 pub fn (db &DB) exec(query string) ![]Row {
 	$if trace_sqlite ? {
 		eprintln('> exec query: "${query}"')
@@ -287,22 +304,27 @@ pub fn (db &DB) exec(query string) ![]Row {
 		C.sqlite3_finalize(stmt)
 	}
 	nr_cols := C.sqlite3_column_count(stmt)
+	mut col_names := []string{cap: nr_cols}
+	for i in 0 .. nr_cols {
+		col_char := unsafe { &u8(C.sqlite3_column_name(stmt, i)) }
+		col_names << if col_char != unsafe { nil } { unsafe { tos_clone(col_char) } } else { '' }
+	}
 	mut res := 0
 	mut rows := []Row{}
 	for {
 		res = C.sqlite3_step(stmt)
-		// Result Code SQLITE_ROW; Another row is available
-		if res != 100 {
-			// C.puts(C.sqlite3_errstr(res))
+		if res != sqlite_row {
 			break
 		}
-		mut row := Row{}
+		mut row := Row{
+			names: col_names
+		}
 		for i in 0 .. nr_cols {
 			val := unsafe { &u8(C.sqlite3_column_text(stmt, i)) }
 			if val == &u8(unsafe { nil }) {
 				row.vals << ''
 			} else {
-				row.vals << unsafe { val.vstring() }
+				row.vals << unsafe { tos_clone(val) }
 			}
 		}
 		rows << row
@@ -376,6 +398,11 @@ pub fn (db &DB) exec_param_many(query string, params Params) ![]Row {
 
 	mut rows := []Row{}
 	nr_cols := C.sqlite3_column_count(stmt)
+	mut col_names := []string{cap: nr_cols}
+	for i in 0 .. nr_cols {
+		col_char := unsafe { &u8(C.sqlite3_column_name(stmt, i)) }
+		col_names << if col_char != unsafe { nil } { unsafe { tos_clone(col_char) } } else { '' }
+	}
 
 	if params is []string {
 		for i, param in params {
@@ -385,7 +412,9 @@ pub fn (db &DB) exec_param_many(query string, params Params) ![]Row {
 			}
 		}
 		for {
-			mut row := Row{}
+			mut row := Row{
+				names: col_names
+			}
 			code = C.sqlite3_step(stmt)
 			if is_error(code) {
 				return db.error_message(code, query)
@@ -398,7 +427,7 @@ pub fn (db &DB) exec_param_many(query string, params Params) ![]Row {
 				if val == &u8(unsafe { nil }) {
 					row.vals << ''
 				} else {
-					row.vals << unsafe { val.vstring() }
+					row.vals << unsafe { tos_clone(val) }
 				}
 			}
 			rows << row
@@ -406,7 +435,9 @@ pub fn (db &DB) exec_param_many(query string, params Params) ![]Row {
 	} else if params is [][]string {
 		// Rows to process
 		for params_row in params {
-			mut row := Row{}
+			mut row := Row{
+				names: col_names
+			}
 			// Param values to bind
 			for i, param in params_row {
 				code = C.sqlite3_bind_text(stmt, i + 1, voidptr(param.str), param.len,
@@ -428,7 +459,7 @@ pub fn (db &DB) exec_param_many(query string, params Params) ![]Row {
 					if val == &u8(unsafe { nil }) {
 						row.vals << ''
 					} else {
-						row.vals << unsafe { val.vstring() }
+						row.vals << unsafe { tos_clone(val) }
 					}
 				}
 				rows << row
@@ -540,6 +571,14 @@ pub fn (mut db DB) rollback_to(savepoint string) ! {
 		return error('savepoint should be a identifier string')
 	}
 	db.exec('ROLLBACK TO ${savepoint};')!
+}
+
+// release_savepoint releases a specified savepoint.
+pub fn (mut db DB) release_savepoint(savepoint string) ! {
+	if !savepoint.is_identifier() {
+		return error('savepoint should be a identifier string')
+	}
+	db.exec('RELEASE SAVEPOINT ${savepoint};')!
 }
 
 // reset returns the connection to initial state for reuse
