@@ -119,6 +119,10 @@ fn (mut p Parser) parse_array_type(expecting token.Kind, is_option bool) ast.Typ
 		defer {
 			p.fixed_array_dim--
 		}
+		elem_type_pos := p.tok.pos()
+		if p.tok.kind == .name && p.tok.lit == 'byte' {
+			p.error_with_pos('byte is deprecated, use u8 instead', elem_type_pos)
+		}
 		elem_type := p.parse_type()
 		if elem_type.idx() == 0 {
 			// error is handled by parse_type
@@ -141,6 +145,10 @@ fn (mut p Parser) parse_array_type(expecting token.Kind, is_option bool) ast.Typ
 	}
 	// array
 	p.check(.rsbr)
+	elem_type_pos := p.tok.pos()
+	if p.tok.kind == .name && p.tok.lit == 'byte' {
+		p.error_with_pos('byte is deprecated, use u8 instead', elem_type_pos)
+	}
 	elem_type := p.parse_type()
 	if elem_type.idx() == 0 {
 		// error is set in parse_type
@@ -253,12 +261,14 @@ fn (mut p Parser) parse_thread_type() ast.Type {
 		idx := p.table.find_or_register_thread(ret_type)
 		return ast.new_type(idx)
 	}
-	is_opt := p.peek_tok.kind == .question
-	is_result := p.peek_tok.kind == .not
+	is_same_line := p.peek_tok.line_nr == p.tok.line_nr
+	is_opt := is_same_line && p.peek_tok.kind == .question
+	is_result := is_same_line && p.peek_tok.kind == .not
 	if is_opt || is_result {
 		p.next()
 	}
-	if p.peek_tok.kind !in [.name, .key_pub, .key_mut, .amp, .lsbr] {
+	if p.peek_tok.line_nr > p.tok.line_nr
+		|| p.peek_tok.kind !in [.name, .key_pub, .key_mut, .amp, .lsbr] {
 		p.next()
 		if is_opt {
 			mut ret_type := ast.void_type
@@ -626,7 +636,7 @@ fn (mut p Parser) parse_type() ast.Type {
 	}
 	if nr_muls > 0 {
 		typ = typ.set_nr_muls(nr_muls)
-		if is_array && nr_amps > 0 {
+		if is_array && nr_amps > 0 && !p.inside_fn_param {
 			p.error_with_pos('V arrays are already references behind the scenes,
 there is no need to use a reference to an array (e.g. use `[]string` instead of `&[]string`).
 If you need to modify an array in a function, use a mutable argument instead: `fn foo(mut s []string) {}`.',

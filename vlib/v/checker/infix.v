@@ -8,11 +8,36 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	defer {
 		c.expected_type = former_expected_type
 	}
+	// In bool contexts like `assert` and `return`, short enum literals on the left
+	// need the right operand type first, so `.a == x` resolves `.a` correctly.
+	mut check_right_type_first_for_left_short_enum := false
+	if node.op in [.eq, .ne] && node.left is ast.EnumVal {
+		left_enum := node.left as ast.EnumVal
+		if left_enum.enum_name.len == 0 {
+			if node.right is ast.EnumVal {
+				right_enum := node.right as ast.EnumVal
+				check_right_type_first_for_left_short_enum = right_enum.enum_name.len > 0
+			} else {
+				check_right_type_first_for_left_short_enum = true
+			}
+		}
+	}
+	mut right_type := ast.void_type
+	if check_right_type_first_for_left_short_enum {
+		right_type = c.expr(mut node.right)
+		if right_type == ast.no_type {
+			node.right_type = right_type
+			return ast.void_type
+		}
+		node.right_type = right_type
+		c.expected_type = right_type
+	}
 	mut left_type := c.expr(mut node.left)
 	if left_type == ast.no_type {
 		node.left_type = left_type
 		return ast.void_type
 	}
+	left_type = c.maybe_wrap_index_expr_smartcast(mut node.left, left_type)
 	mut left_sym := c.table.sym(left_type)
 	node.left_type = left_type
 	c.expected_type = left_type
@@ -84,15 +109,18 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			}
 		}
 	}
-	mut right_type := c.expr(mut node.right)
-	if right_type == ast.no_type {
-		node.right_type = right_type
-		if node.op in [.key_is, .not_is] {
-			node.promoted_type = ast.bool_type
-			return ast.bool_type
+	if !check_right_type_first_for_left_short_enum {
+		right_type = c.expr(mut node.right)
+		if right_type == ast.no_type {
+			node.right_type = right_type
+			if node.op in [.key_is, .not_is] {
+				node.promoted_type = ast.bool_type
+				return ast.bool_type
+			}
+			return ast.void_type
 		}
-		return ast.void_type
 	}
+	right_type = c.maybe_wrap_index_expr_smartcast(mut node.right, right_type)
 	if node.op == .key_is {
 		c.inside_x_is_type = false
 	}
@@ -891,6 +919,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				node.promoted_type = return_type
 				return return_type
 			}
+
 			left_is_option := left_type.has_flag(.option) || (left_sym.kind == .alias
 				&& (left_sym.info as ast.Alias).parent_type.has_flag(.option))
 			right_is_option := right_type.has_flag(.option)
@@ -989,6 +1018,32 @@ fn (mut c Checker) invalid_operator_error(op token.Kind, left_type ast.Type, rig
 }
 
 // `if node is ast.Ident && node.is_mut { ... }` -> `if node is ast.Ident && (node as ast.Ident).is_mut { ... }`
+fn (mut c Checker) maybe_wrap_index_expr_smartcast(mut expr ast.Expr, expr_type ast.Type) ast.Type {
+	if isnil(c.fn_scope) || expr_type in [ast.no_type, ast.void_type] {
+		return expr_type
+	}
+	if expr is ast.IndexExpr {
+		index_expr := expr as ast.IndexExpr
+		scope := c.fn_scope.innermost(index_expr.pos.pos)
+		expr_key := smartcast_index_expr_scope_key(index_expr)
+		if var := scope.find_var(expr_key) {
+			if var.smartcasts.len > 0 {
+				cast_type := var.smartcasts.last()
+				if cast_type != expr_type {
+					expr = ast.AsCast{
+						expr:      ast.Expr(index_expr)
+						typ:       cast_type
+						expr_type: expr_type
+						pos:       index_expr.pos
+					}
+				}
+				return cast_type
+			}
+		}
+	}
+	return expr_type
+}
+
 fn (mut c Checker) autocast_in_if_conds(mut right ast.Expr, from_expr ast.Expr, from_type ast.Type, to_type ast.Type) {
 	if '${right}' == from_expr.str() {
 		right = ast.AsCast{
@@ -1104,7 +1159,9 @@ fn (mut c Checker) check_sort_external_variable_access(node ast.Expr) bool {
 }
 
 fn (mut c Checker) check_option_infix_expr(node ast.InfixExpr, left_type ast.Type, right_type ast.Type, left_sym ast.TypeSymbol, right_sym ast.TypeSymbol) {
-	if c.inside_sql {
+	// SQL expressions can compare optional values directly, but anon fn bodies in SQL
+	// should keep regular option checks.
+	if c.inside_sql && !c.inside_anon_fn {
 		return
 	}
 	left_is_option := left_type.has_flag(.option)

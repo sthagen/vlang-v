@@ -253,6 +253,7 @@ shell/editor after that, so that it can pick up the new PATH variable.
 - [JetBrains](https://plugins.jetbrains.com/plugin/20287-vlang/docs/syntax-highlighting.html)
 - [Sublime Text 3](https://github.com/vlang/awesome-v#sublime-text-3)
 - [Vim](https://github.com/vlang/awesome-v#vim)
+- [Vim/Neovim Runtime Files](editors/vim)
 - [VS Code](https://marketplace.visualstudio.com/items?itemName=VOSCA.vscode-v-analyzer)
 - [zed](https://github.com/lv37/zed-v)
 
@@ -286,6 +287,10 @@ v run word_counter/word_counter.v word_counter/cinderella.txt
 v run news_fetcher.v
 v run tetris/tetris.v
 ```
+
+When a project has a `.vvmrc` file, `v <project>` and `v run <project>` try
+to use the requested V binary (for example `v0.4.6`) before falling back to
+the current compiler.
 
 
 <img src='https://raw.githubusercontent.com/vlang/v/master/examples/tetris/screenshot.png' width=300 alt='tetris screenshot'>

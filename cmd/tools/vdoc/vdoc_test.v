@@ -4,6 +4,9 @@ module main
 
 import os
 import arrays
+import v.ast
+import document as doc
+import markdown
 
 const vexe_path = @VEXE
 const vexe_ = os.quoted_path(vexe_path)
@@ -108,6 +111,18 @@ fn test_get_module_list() {
 	assert !mod_list.any(it.contains(os.join_path(tpath, 'delta')))
 }
 
+fn test_html_highlight_escapes_html_tokens() {
+	table := ast.new_table()
+	code := 'fn main() {
+	// <h1>owned</h1>
+	assert 1 < 2
+}'
+	highlighted := html_highlight(code, table)
+	assert highlighted.contains('// &lt;h1&gt;owned&lt;/h1&gt;')
+	assert !highlighted.contains('<h1>owned</h1>')
+	assert highlighted.contains('<span class="token operator">&lt;</span>')
+}
+
 fn test_get_readme_md_src() {
 	// a special testcase for `src` dir get_readme
 	// https://github.com/vlang/v/issues/24232
@@ -131,4 +146,81 @@ pub fn square(x int) int {
 	res := os.execute_opt('${vexe_} doc -m src/ -v') or { panic(err) }
 	assert res.exit_code == 0
 	assert res.output.contains('square')
+}
+
+fn test_gen_modules_toc_skips_hash_links_for_prefix_only_groups() {
+	mut vd := VDoc{
+		cfg: Config{
+			is_multi: true
+		}
+	}
+	vd.docs = [
+		doc.Doc{
+			head: doc.DocNode{
+				name: 'main'
+			}
+		},
+		doc.Doc{
+			head: doc.DocNode{
+				name: 'db.mysql'
+			}
+		},
+		doc.Doc{
+			head: doc.DocNode{
+				name: 'db.sqlite'
+			}
+		},
+	]
+	toc := vd.gen_modules_toc('main')
+	assert !toc.contains('href="#"')
+	assert toc.contains('<div class="menu-row"><a>db</a></div>')
+	assert toc.contains('<li><a href="./db.mysql.html">mysql</a></li>')
+}
+
+fn test_gen_modules_toc_uses_prefix_module_page_when_available() {
+	mut vd := VDoc{
+		cfg: Config{
+			is_multi: true
+		}
+	}
+	vd.docs = [
+		doc.Doc{
+			head: doc.DocNode{
+				name: 'db.sqlite'
+			}
+		},
+		doc.Doc{
+			head: doc.DocNode{
+				name: 'db'
+			}
+		},
+	]
+	toc := vd.gen_modules_toc('db')
+	assert toc.contains('<div class="menu-row"><a href="./db.html">db</a></div>')
+}
+
+fn test_resolve_relative_markdown_link() {
+	base := 'https://github.com/vlang/v/blob/master/vlib/net/html/'
+	assert resolve_relative_markdown_link(base, 'parser_test.v') == 'https://github.com/vlang/v/blob/master/vlib/net/html/parser_test.v'
+	assert resolve_relative_markdown_link(base, './html_test.v') == 'https://github.com/vlang/v/blob/master/vlib/net/html/html_test.v'
+	assert resolve_relative_markdown_link(base, '../README.md#usage') == 'https://github.com/vlang/v/blob/master/vlib/net/README.md#usage'
+}
+
+fn test_resolve_relative_markdown_link_keeps_absolute_urls() {
+	base := 'https://github.com/vlang/v/blob/master/vlib/net/html/'
+	assert resolve_relative_markdown_link(base, 'https://vlang.io') == 'https://vlang.io'
+	assert resolve_relative_markdown_link(base, '/rooted/path') == '/rooted/path'
+	assert resolve_relative_markdown_link(base, '#local') == '#local'
+}
+
+fn test_markdown_renderer_resolves_relative_links() ! {
+	base := 'https://github.com/vlang/v/blob/master/vlib/net/html/'
+	mut renderer := markdown.HtmlRenderer{
+		transformer: &MdHtmlCodeHighlighter{
+			table:              ast.new_table()
+			relative_link_base: base
+		}
+	}
+	out := markdown.render('More examples in [parser](parser_test.v).', mut renderer)!
+	assert out.contains('<a href="https://github.com/vlang/v/blob/master/vlib/net/html/parser_test.v">')
 }

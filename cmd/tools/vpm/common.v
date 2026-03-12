@@ -15,6 +15,12 @@ struct ModuleVpmInfo {
 	nr_downloads int
 }
 
+struct VpmInstallServerSelector {
+mut:
+	selected_url   string
+	candidate_urls []string
+}
+
 @[params]
 struct ErrorOptions {
 	details string
@@ -23,13 +29,59 @@ struct ErrorOptions {
 
 const vexe = os.quoted_path(os.getenv('VEXE'))
 const home_dir = os.home_dir()
+const selected_server_url_env = 'VPM_SELECTED_SERVER_URL'
+
+fn merge_server_urls(default_urls []string, custom_urls []string) []string {
+	mut server_urls := default_urls.clone()
+	for url in custom_urls {
+		if url in server_urls {
+			continue
+		}
+		server_urls << url
+	}
+	return server_urls
+}
+
+fn get_server_urls() []string {
+	return merge_server_urls(vpm_server_urls, settings.server_urls)
+}
+
+fn selected_server_url(set bool, url string) string {
+	if set {
+		os.setenv(selected_server_url_env, url, true)
+	}
+	return os.getenv(selected_server_url_env)
+}
+
+fn active_server_urls() []string {
+	selected_url := selected_server_url(false, '')
+	if selected_url != '' {
+		return [selected_url]
+	}
+	return get_server_urls()
+}
 
 fn get_mod_vpm_info(name string) !ModuleVpmInfo {
+	mut selector := VpmInstallServerSelector{
+		candidate_urls: if settings.server_urls.len > 0 {
+			settings.server_urls
+		} else {
+			vpm_server_urls
+		}
+	}
+	return get_mod_vpm_info_with_selector(name, mut selector)
+}
+
+fn get_mod_vpm_info_with_selector(name string, mut selector VpmInstallServerSelector) !ModuleVpmInfo {
 	if name.len < 2 || (!name[0].is_digit() && !name[0].is_letter()) {
 		return error('invalid module name `${name}`.')
 	}
+	if selector.candidate_urls.len == 0 {
+		return error('no vpm server urls configured.')
+	}
 	mut errors := []string{}
-	for url in vpm_server_urls {
+	is_initial_selection := selected_server_url(false, '') == ''
+	for url in selector.metadata_server_urls() {
 		modurl := url + '/api/packages/${name}'
 		verbose_println_more(@FILE_LINE, @FN, 'Retrieving metadata for `${name}` from `${modurl}` by making a GET request ...')
 		r := http.get(modurl) or {
@@ -59,6 +111,13 @@ fn get_mod_vpm_info(name string) !ModuleVpmInfo {
 			errors << 'Skipping module `${name}`, since it is missing name or url information.'
 			continue
 		}
+		if selector.selected_url == '' {
+			selector.selected_url = url
+			verbose_println_more(@FILE_LINE, @FN, 'Using `${url}` for this installation.')
+		}
+		if is_initial_selection {
+			selected_server_url(true, url)
+		}
 		verbose_println_more(@FILE_LINE, @FN, 'name: ${name}; mod: ${mod}')
 		return mod
 	}
@@ -67,13 +126,53 @@ fn get_mod_vpm_info(name string) !ModuleVpmInfo {
 	return error(final_error)
 }
 
+fn new_install_server_selector() VpmInstallServerSelector {
+	return VpmInstallServerSelector{
+		candidate_urls: if settings.server_urls.len > 0 {
+			settings.server_urls
+		} else {
+			build_install_server_urls(vpm_server_urls, settings.mirror_urls)
+		}
+	}
+}
+
+fn build_install_server_urls(default_urls []string, mirror_urls []string) []string {
+	mut urls := []string{}
+	urls << default_urls
+	urls << mirror_urls
+	return unique_server_urls(urls)
+}
+
+fn (selector VpmInstallServerSelector) metadata_server_urls() []string {
+	return if selector.selected_url != '' {
+		[selector.selected_url]
+	} else {
+		selector.candidate_urls
+	}
+}
+
 fn get_ident_from_url(raw_url string) !(string, string) {
 	verbose_println_more(@FILE_LINE, @FN, 'raw_url: ${raw_url}')
+	// On Windows, absolute paths like `C:\...` are misinterpreted by urllib.parse
+	// (the drive letter `C:` is treated as a URL scheme). Handle local paths first.
+	if os.is_abs_path(raw_url) || raw_url.starts_with('./') || raw_url.starts_with('../')
+		|| raw_url.starts_with('~/') || raw_url.starts_with('.\\') || raw_url.starts_with('..\\')
+		|| raw_url.starts_with('file://') {
+		normalized := raw_url.trim_string_left('file://').replace('\\', '/').trim_left('/')
+		_, name := normalized.rsplit_once('/') or {
+			return '', normalized.trim_string_right('.git')
+		}
+		return '', name.trim_string_right('.git')
+	}
 	url := urllib.parse(raw_url) or { return error('failed to parse module URL `${raw_url}`.') }
-	publisher, mut name := url.path.trim_left('/').rsplit_once('/') or {
+	normalized_path := url.path.trim_left('/').trim_space()
+	publisher, mut name := normalized_path.rsplit_once('/') or {
 		if settings.vcs == .hg && raw_url.count(':') > 1 {
 			verbose_println_more(@FILE_LINE, @FN, 'ok, publisher: "", name: "test_module"')
 			return '', 'test_module'
+		}
+		if url.scheme in ['file', ''] && normalized_path.len > 0 {
+			return '', normalized_path
 		}
 		final_error := 'failed to retrieve module name for `${url}`.'
 		verbose_println_more(@FILE_LINE, @FN, 'failed error: `${final_error}`')
@@ -173,16 +272,15 @@ fn get_path_of_existing_module(mod_name string) ?string {
 }
 
 fn get_working_server_url() string {
-	server_urls := if settings.server_urls.len > 0 {
-		settings.server_urls
-	} else {
-		vpm_server_urls
-	}
-	for url in server_urls {
+	is_initial_selection := selected_server_url(false, '') == ''
+	for url in active_server_urls() {
 		verbose_println('Trying server url: ${url}')
 		http.head(url) or {
 			vpm_error('failed to connect to server url `${url}`.', details: err.msg())
 			continue
+		}
+		if is_initial_selection {
+			selected_server_url(true, url)
 		}
 		verbose_println_more(@FILE_LINE, @FN, 'found url: ${url}')
 		return url
@@ -202,13 +300,24 @@ fn ensure_vmodules_dir_exist() {
 	verbose_println_more(@FILE_LINE, @FN, 'settings.vmodules_path: ${settings.vmodules_path}')
 }
 
-fn increment_module_download_count(name string) ! {
+fn increment_module_download_count(name string, preferred_server_url string) ! {
 	if settings.no_dl_count_increment {
 		println('Skipping download count increment for `${name}`.')
 		return
 	}
+	server_urls := if preferred_server_url != '' {
+		unique_server_urls([preferred_server_url])
+	} else if settings.server_urls.len > 0 {
+		settings.server_urls
+	} else {
+		vpm_server_urls
+	}
+	if server_urls.len == 0 {
+		return error('no vpm server urls configured.')
+	}
 	mut errors := []string{}
-	for url in vpm_server_urls {
+	is_initial_selection := selected_server_url(false, '') == ''
+	for url in server_urls {
 		modurl := url + '/api/packages/${name}/incr_downloads'
 		verbose_println_more(@FILE_LINE, @FN, 'making a POST request to modurl: ${modurl} ...')
 		r := http.post(modurl, '') or {
@@ -219,6 +328,9 @@ fn increment_module_download_count(name string) ! {
 		if r.status_code != 200 {
 			errors << 'Failed to increment the download count for module `${name}`, since `${url}` responded with ${r.status_code} http status code. Please try again later.'
 			continue
+		}
+		if is_initial_selection {
+			selected_server_url(true, url)
 		}
 		return
 	}

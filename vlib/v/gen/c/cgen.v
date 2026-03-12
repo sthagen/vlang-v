@@ -1004,7 +1004,8 @@ pub fn (mut g Gen) init() {
 				g.cheaders.writeln('#include <stddef.h>')
 			} else {
 				install_compiler_msg := ' Please install the package `build-essential`.'
-				g.cheaders.writeln(get_guarded_include_text('<inttypes.h>', 'The C compiler can not find <inttypes.h>.${install_compiler_msg}')) // int64_t etc
+				// int64_t etc; allow a fallback to <stdint.h> for toolchains that do not ship <inttypes.h>.
+				g.cheaders.writeln(get_inttypes_or_stdint_include_text('The C compiler can not find <stdint.h>.${install_compiler_msg}'))
 				if g.pref.os == .ios {
 					g.cheaders.writeln(get_guarded_include_text('<stdbool.h>', 'The C compiler can not find <stdbool.h>.${install_compiler_msg}')) // bool, true, false
 				}
@@ -1023,6 +1024,7 @@ pub fn (mut g Gen) init() {
 		} else {
 			g.cheaders.writeln(c_headers)
 		}
+		g.cheaders.writeln(c_float_to_unsigned_conversion_functions)
 		if !g.pref.skip_unused || g.table.used_features.safe_int {
 			g.cheaders.writeln(c_unsigned_comparison_functions)
 		}
@@ -2681,6 +2683,25 @@ fn (mut g Gen) write_v_source_line_info_stmt(stmt ast.Stmt) {
 	}
 }
 
+fn (g &Gen) should_autofree_discarded_call_result(typ ast.Type) bool {
+	if typ == 0 || typ == ast.void_type || typ.has_option_or_result() {
+		return false
+	}
+	sym := g.table.final_sym(typ)
+	if sym.kind in [.array, .string] {
+		return true
+	}
+	if sym.has_method('free') {
+		return true
+	}
+	sym_name := sym.name.after('.')
+	is_user_ref := typ.is_ptr() && sym_name.len > 0 && sym_name[0].is_capital()
+	if is_user_ref && g.pref.experimental {
+		return true
+	}
+	return false
+}
+
 fn (mut g Gen) stmt(node ast.Stmt) {
 	$if trace_cgen_stmt ? {
 		ntype := typeof(node).replace('v.ast.', '')
@@ -2753,8 +2774,22 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 			// if af {
 			// g.autofree_call_pregen(node.expr as ast.CallExpr)
 			// }
+			can_emit_standalone_expr_stmt := !g.skip_stmt_pos && g.inside_ternary == 0
+				&& !g.inside_if_option && !g.inside_match_option && !g.inside_if_result
+				&& !g.inside_match_result && !node.is_expr && node.expr !is ast.IfExpr
+			mut needs_tmp_return_autofree := false
+			if can_emit_standalone_expr_stmt && g.is_autofree && !g.is_builtin_mod
+				&& node.expr is ast.CallExpr && g.should_autofree_discarded_call_result(node.typ) {
+				call_expr := node.expr as ast.CallExpr
+				needs_tmp_return_autofree = call_expr.or_block.kind == .absent
+			}
+			mut discarded_ret_tmp_name := ''
+			if needs_tmp_return_autofree {
+				discarded_ret_tmp_name = g.new_tmp_var()
+				g.write('${g.styp(node.typ)} ${discarded_ret_tmp_name} = ')
+			}
 			old_is_void_expr_stmt := g.is_void_expr_stmt
-			g.is_void_expr_stmt = !node.is_expr
+			g.is_void_expr_stmt = !node.is_expr && !needs_tmp_return_autofree
 			if node.expr.is_auto_deref_var() {
 				g.write('*')
 			}
@@ -2765,7 +2800,19 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 				g.expr(node.expr)
 			}
 			g.is_void_expr_stmt = old_is_void_expr_stmt
-			if g.inside_ternary == 0 && !g.inside_if_option && !g.inside_match_option
+			if needs_tmp_return_autofree {
+				g.writeln(';')
+				// Discarded non-void call results should still be released under -autofree.
+				g.autofree_variable(ast.Var{
+					name: discarded_ret_tmp_name
+					expr: node.expr
+					typ:  node.typ
+					pos:  node.pos
+				})
+				for g.autofree_scope_stmts.len > 0 {
+					g.write(g.autofree_scope_stmts.pop())
+				}
+			} else if g.inside_ternary == 0 && !g.inside_if_option && !g.inside_match_option
 				&& !g.inside_if_result && !g.inside_match_result && !node.is_expr
 				&& node.expr !is ast.IfExpr {
 				if node.expr is ast.MatchExpr {
@@ -3900,7 +3947,7 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 			}
 			g.call_expr(node)
 			if g.is_autofree && !g.is_builtin_mod && !g.is_js_call && g.strs_to_free0.len == 0
-				&& !g.is_autofree_tmp && !g.inside_lambda {
+				&& !g.is_autofree_tmp && !g.inside_lambda && g.inside_ternary == 0 {
 				// if len != 0, that means we are handling call expr inside call expr (arg)
 				// and it'll get messed up here, since it's handled recursively in autofree_call_pregen()
 				// so just skip it
@@ -4356,7 +4403,7 @@ fn (mut g Gen) typeof_expr(node ast.TypeOf) {
 	if sym.kind == .sum_type {
 		// When encountering a .sum_type, typeof() should be done at runtime,
 		// because the subtype of the expression may change:
-		g.write('builtin__charptr_vstring_literal(v_typeof_sumtype_${sym.cname}( (')
+		g.write('builtin__tos3(v_typeof_sumtype_${sym.cname}( (')
 		if typ.nr_muls() > 0 {
 			g.write('*'.repeat(typ.nr_muls()))
 		}
@@ -5074,10 +5121,12 @@ fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 fn (mut g Gen) enum_decl(node ast.EnumDecl) {
 	enum_name := util.no_dots(node.name)
 	is_flag := node.is_flag
-	if g.is_cc_msvc {
+	// Explicit-size enums are emitted as typedef + defines, so all C compilers
+	// (including tinyc) respect the selected storage size.
+	if g.is_cc_msvc || node.typ != ast.int_type {
 		mut last_value := '0'
 		enum_typ_name := g.table.get_type_name(node.typ)
-		if g.pref.skip_unused && node.typ.idx() !in g.table.used_features.used_syms {
+		if g.pref.skip_unused && node.enum_typ !in g.table.used_features.used_syms {
 			return
 		}
 		g.enum_typedefs.writeln('')
@@ -5887,6 +5936,17 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 				g.write('(${g.styp(node.expr.typ)})')
 			}
 			g.expr(node.expr)
+		}
+	} else if !node_typ_is_option && !node_typ.is_ptr() && !expr_type.is_ptr()
+		&& final_sym.kind == .u64 && final_expr_sym.kind in [.f32, .f64, .float_literal] {
+		if g.inside_const {
+			g.write('((uint64_t)(')
+			g.expr(node.expr)
+			g.write('))')
+		} else {
+			g.write('_v_f64_to_u64((double)(')
+			g.expr(node.expr)
+			g.write('))')
 		}
 	} else if (expr_type == ast.bool_type && node_typ.is_int()) || node_typ == ast.bool_type {
 		if node_typ_is_option {
@@ -8700,6 +8760,23 @@ pub fn get_guarded_include_text(iname string, imessage string) string {
 	|#endif
 	|#else
 	|#include ${iname}
+	|#endif
+	'.strip_margin()
+	return res
+}
+
+pub fn get_inttypes_or_stdint_include_text(imessage string) string {
+	res := '
+	|#if defined(__has_include)
+	|#if __has_include(<inttypes.h>)
+	|#include <inttypes.h>
+	|#elif __has_include(<stdint.h>)
+	|#include <stdint.h>
+	|#else
+	|#error VERROR_MESSAGE ${imessage}
+	|#endif
+	|#else
+	|#include <stdint.h>
 	|#endif
 	'.strip_margin()
 	return res

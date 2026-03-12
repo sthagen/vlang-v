@@ -147,7 +147,7 @@ fn (mut g Gen) comptime_call(mut node ast.ComptimeCall) {
 	g.trace_autofree('// \$method call. sym="${sym.name}"')
 	if node.method_name == 'method' {
 		// `app.$method()`
-		m := sym.find_method(g.comptime.comptime_for_method.name) or { return }
+		m := g.table.find_method(sym, g.comptime.comptime_for_method.name) or { return }
 		/*
 		vals := m.attrs[0].split('/')
 		args := vals.filter(it.starts_with(':')).map(it[1..])
@@ -192,7 +192,10 @@ fn (mut g Gen) comptime_call(mut node ast.ComptimeCall) {
 			}
 		}
 		// TODO: check argument types
-		g.write('${g.cc_type(left_type, false)}_${g.comptime.comptime_for_method.name}(')
+		// Use the declaring receiver type for the symbol prefix, so alias
+		// comptime calls can dispatch to inherited methods.
+		method_receiver_type := g.unwrap_generic(m.params[0].typ)
+		g.write('${g.cc_type(method_receiver_type, false)}_${g.comptime.comptime_for_method.name}(')
 
 		// try to see if we need to pass a pointer
 		if mut node.left is ast.Ident {
@@ -294,15 +297,16 @@ fn (mut g Gen) comptime_call(mut node ast.ComptimeCall) {
 fn cgen_attrs(attrs []ast.Attr) []string {
 	mut res := []string{cap: attrs.len}
 	for attr in attrs {
-		// we currently don't quote 'arg' (otherwise we could just use `s := attr.str()`)
 		mut s := attr.name
-		if attr.arg.len > 0 {
-			s += ': ${attr.arg}'
+		if attr.has_arg {
+			mut arg := attr.arg
+			if attr.kind == .string {
+				quote := if attr.quote == `"` { '"' } else { "'" }
+				arg = '${quote}${arg}${quote}'
+			}
+			s += ': ${arg}'
 		}
-		if attr.kind == .string {
-			s = escape_quotes(s)
-		}
-		res << '_S("${s}")'
+		res << '_S("${escape_quotes(s)}")'
 	}
 	return res
 }
@@ -621,17 +625,19 @@ fn (mut g Gen) pop_comptime_info() {
 }
 
 fn (mut g Gen) comptime_for(node ast.ComptimeFor) {
-	sym := if node.typ != g.field_data_type {
-		g.table.final_sym(g.unwrap_generic(node.typ))
+	for_typ := if node.typ != g.field_data_type {
+		g.unwrap_generic(node.typ)
 	} else {
-		g.table.final_sym(g.comptime.comptime_for_field_type)
+		g.comptime.comptime_for_field_type
 	}
-	g.writeln('/* \$for ${node.val_var} in ${sym.name}.${node.kind.str()} */ {')
+	sym := g.table.final_sym(for_typ)
+	iter_sym_name := if node.kind == .methods { g.table.sym(for_typ).name } else { sym.name }
+	g.writeln('/* \$for ${node.val_var} in ${iter_sym_name}.${node.kind.str()} */ {')
 	g.indent++
 	mut i := 0
 	old_defer_stmts := g.defer_stmts
 	if node.kind == .methods {
-		methods := sym.get_methods()
+		methods := g.table.get_type_methods(for_typ)
 		if methods.len > 0 {
 			g.writeln('FunctionData ${node.val_var} = {0};')
 		}

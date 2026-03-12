@@ -84,7 +84,7 @@ pub fn (s string) runes() []rune {
 // It will panic, if the pointer `s` is 0.
 @[unsafe]
 pub fn cstring_to_vstring(const_s &char) string {
-	return unsafe { tos2(&u8(const_s)) }.clone()
+	return unsafe { tos2(byteptr(const_s)) }.clone()
 }
 
 // tos_clone creates a new V string copy of the C style string, pointed by `s`.
@@ -339,7 +339,7 @@ fn (a string) option_clone_static() ?string {
 
 // clone returns a copy of the V string `a`.
 pub fn (a string) clone() string {
-	if a.len <= 0 || u64(a.str) <= 0xFFFF {
+	if a.len <= 0 {
 		return ''
 	}
 	mut b := string{
@@ -833,8 +833,8 @@ fn (s string) < (a string) bool {
 
 @[direct_array_access]
 fn (s string) + (a string) string {
-	slen := if s.len > 0 && u64(s.str) > 0xFFFF { s.len } else { 0 }
-	alen := if a.len > 0 && u64(a.str) > 0xFFFF { a.len } else { 0 }
+	slen := if s.len > 0 { s.len } else { 0 }
+	alen := if a.len > 0 { a.len } else { 0 }
 	new_len := alen + slen
 	mut res := string{
 		str: unsafe { malloc_noscan(new_len + 1) }
@@ -855,9 +855,9 @@ fn (s string) + (a string) string {
 // for `s + s2 + s3`, an optimization (faster than string_plus(string_plus(s1, s2), s3))
 @[direct_array_access]
 fn (s string) plus_two(a string, b string) string {
-	slen := if s.len > 0 && u64(s.str) > 0xFFFF { s.len } else { 0 }
-	alen := if a.len > 0 && u64(a.str) > 0xFFFF { a.len } else { 0 }
-	blen := if b.len > 0 && u64(b.str) > 0xFFFF { b.len } else { 0 }
+	slen := if s.len > 0 { s.len } else { 0 }
+	alen := if a.len > 0 { a.len } else { 0 }
+	blen := if b.len > 0 { b.len } else { 0 }
 	new_len := alen + blen + slen
 	mut res := string{
 		str: unsafe { malloc_noscan(new_len + 1) }
@@ -2307,6 +2307,7 @@ pub fn (s &string) free() {
 		free(s.str)
 		s.str = nil
 	}
+	s.len = 0
 	s.is_lit = -98761234
 }
 
@@ -2776,42 +2777,25 @@ pub fn (name string) match_glob(pattern string) bool {
 				`[` {
 					if nx < nlen {
 						wanted_c := name[nx]
-						mut bstart := px
 						mut is_inverted := false
 						mut inner_match := false
-						mut inner_idx := bstart + 1
-						mut inner_c := 0
-						if inner_idx < plen {
-							inner_c = pattern[inner_idx]
-							if inner_c == `^` {
-								is_inverted = true
-								inner_idx++
-							}
+						mut inner_idx := px + 1
+						if inner_idx < plen && pattern[inner_idx] == `^` {
+							is_inverted = true
+							inner_idx++
 						}
-						for ; inner_idx < plen; inner_idx++ {
-							inner_c = pattern[inner_idx]
-							if inner_c == `]` {
-								break
-							}
-							if inner_c == wanted_c {
+						for ; inner_idx < plen && pattern[inner_idx] != `]`; inner_idx++ {
+							if pattern[inner_idx] == wanted_c {
 								inner_match = true
-								for px < plen && pattern[px] != `]` {
-									px++
-								}
-								break
 							}
 						}
-						if is_inverted {
-							if inner_match {
-								return false
-							} else {
-								px = inner_idx
-							}
+						if inner_idx < plen && ((inner_match && !is_inverted)
+							|| (!inner_match && is_inverted)) {
+							px = inner_idx + 1
+							nx++
+							continue
 						}
 					}
-					px++
-					nx++
-					continue
 				}
 				else {
 					// an ordinary character
@@ -3039,7 +3023,7 @@ pub fn (s string) hex() string {
 	if s == '' {
 		return ''
 	}
-	return unsafe { data_to_hex_string(&u8(s.str), s.len) }
+	return unsafe { data_to_hex_string(s.str, s.len) }
 }
 
 @[unsafe]

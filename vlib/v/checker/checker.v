@@ -439,6 +439,8 @@ pub fn (mut c Checker) check_files(ast_files []&ast.File) {
 	mut has_main_mod_file := false
 	mut has_no_main_mod_file := false
 	mut has_main_fn := false
+	mut invalid_test_file_name := ''
+	mut invalid_test_file_pos := token.Pos{}
 	// Determine the project directory when using -line-info
 	mut project_dir := ''
 	if c.pref.is_vls && c.pref.line_info != '' {
@@ -471,6 +473,10 @@ pub fn (mut c Checker) check_files(ast_files []&ast.File) {
 				if c.file_has_main_fn(file) {
 					has_main_fn = true
 				}
+			}
+			if invalid_test_file_name == '' && is_likely_invalid_test_file_name(file) {
+				invalid_test_file_name = file.path_base
+				invalid_test_file_pos = file.mod.pos
 			}
 			c.timers.show('checker_check ${file.path}')
 		}
@@ -569,11 +575,21 @@ pub fn (mut c Checker) check_files(ast_files []&ast.File) {
 		return
 	}
 	if !has_main_mod_file {
-		c.error('project must include a `main` module or be a shared library (compile with `v -shared`)',
-			token.Pos{})
+		if invalid_test_file_name != '' {
+			c.add_error_detail('Test files should have names ending with `_test.v`.')
+			c.error('invalid test file name `${invalid_test_file_name}`', invalid_test_file_pos)
+		} else {
+			c.error('project must include a `main` module or be a shared library (compile with `v -shared`)',
+				token.Pos{})
+		}
 	} else if !has_main_fn && !c.pref.is_o {
 		c.error('function `main` must be declared in the main module', token.Pos{})
 	}
+}
+
+fn is_likely_invalid_test_file_name(file &ast.File) bool {
+	return !file.is_test && (file.path_base.ends_with('.v') || file.path_base.ends_with('.vv'))
+		&& file.path_base.starts_with('test_')
 }
 
 fn (mut c Checker) stmts_has_main_fn(stmts []ast.Stmt) bool {
@@ -1345,7 +1361,8 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 	if mut inter_sym.info is ast.Interface {
 		mut generic_type := interface_type
 		mut generic_info := inter_sym.info
-		if inter_sym.info.parent_type.has_flag(.generic) {
+		if inter_sym.info.parent_type.has_flag(.generic) && (inter_sym.info.concrete_types.len == 0
+			|| inter_sym.info.concrete_types.any(it.has_flag(.generic))) {
 			parent_sym := c.table.sym(inter_sym.info.parent_type)
 			if parent_sym.info is ast.Interface {
 				generic_type = inter_sym.info.parent_type
@@ -1353,13 +1370,15 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 			}
 		}
 		mut inferred_type := interface_type
-		if generic_info.is_generic {
+		is_fully_concrete := inter_sym.info.concrete_types.len > 0
+			&& !inter_sym.info.concrete_types.any(it.has_flag(.generic))
+		if generic_info.is_generic && !is_fully_concrete {
 			inferred_type = c.unwrap_generic_interface(typ, generic_type, pos)
 			if inferred_type == 0 {
 				return false
 			}
 		}
-		if inter_sym.info.is_generic {
+		if inter_sym.info.is_generic && !is_fully_concrete {
 			if inferred_type == interface_type {
 				// terminate early, since otherwise we get an infinite recursion/segfault:
 				return false
@@ -2102,7 +2121,7 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 				c.smartcast_mut_pos)
 		}
 		if c.smartcast_cond_pos != token.Pos{} {
-			c.note('smartcast can only be used on the ident or selector, e.g. match foo, match foo.bar',
+			c.note('smartcast can only be used on ident, selector or index expressions, e.g. match foo, match foo.bar, match foo[0]',
 				c.smartcast_cond_pos)
 		}
 		c.error(unknown_field_msg, node.pos)
@@ -2416,6 +2435,24 @@ fn (mut c Checker) enum_decl(mut node ast.EnumDecl) {
 						}
 					}
 				}
+				ast.CallExpr {
+					c.check_expr_option_or_result_call(field.expr, c.expr(mut field.expr))
+					if comptime_value := c.eval_comptime_const_expr(field.expr, 0) {
+						comptime_lit := c.comptime_value_to_integer_literal(comptime_value,
+							field.expr.pos) or {
+							c.error('the default value for an enum has to be an integer',
+								field.expr.pos)
+							continue
+						}
+						c.check_enum_field_integer_literal(comptime_lit, signed, node.is_multi_allowed,
+							senum_type, field.expr.pos, mut useen, enum_umin, enum_umax, mut
+							iseen, enum_imin, enum_imax)
+						field.expr = comptime_lit
+					} else {
+						c.error('the default value for an enum has to be an integer',
+							field.expr.pos)
+					}
+				}
 				else {
 					if mut field.expr is ast.Ident {
 						if field.expr.language == .c {
@@ -2481,6 +2518,22 @@ fn (mut c Checker) enum_decl(mut node ast.EnumDecl) {
 		}
 	}
 	node.enum_typ = c.table.find_type_idx(node.name)
+}
+
+fn (c &Checker) comptime_value_to_integer_literal(value ast.ComptTimeConstValue, pos token.Pos) ?ast.IntegerLiteral {
+	if v := value.i64() {
+		return ast.IntegerLiteral{
+			val: v.str()
+			pos: pos
+		}
+	}
+	if v := value.u64() {
+		return ast.IntegerLiteral{
+			val: v.str()
+			pos: pos
+		}
+	}
+	return none
 }
 
 fn (mut c Checker) check_enum_field_integer_literal(expr ast.IntegerLiteral, is_signed bool, is_multi_allowed bool,
@@ -3734,6 +3787,16 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 	if node.typ.has_flag(.generic) {
 		c.table.used_features.comptime_syms[to_type] = true
 	}
+	base_to_type := to_type.clear_option_and_result()
+	if mut node.expr is ast.ArrayInit && node.expr.typ == ast.void_type
+		&& c.table.final_sym(base_to_type).kind == .array {
+		cast_array_type := c.table.unaliased_type(base_to_type).clear_option_and_result()
+		cast_array_sym := c.table.sym(cast_array_type)
+		if cast_array_sym.kind == .array {
+			node.expr.typ = cast_array_type
+			node.expr.elem_type = cast_array_sym.array_info().elem_type
+		}
+	}
 	old_inside_integer_literal_cast := c.inside_integer_literal_cast
 	c.inside_integer_literal_cast = to_type.is_int() && node.expr is ast.IntegerLiteral
 	node.expr_type = c.expr(mut node.expr) // type to be casted
@@ -4637,6 +4700,13 @@ fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 			name = '${node.mod}.${node.name}'
 		}
 		pobj = c.file.global_scope.find_ptr(name)
+		if pobj == unsafe { nil } && c.pref.is_vsh && !node.name.contains('.') {
+			os_name := 'os.${node.name}'
+			pobj = c.file.global_scope.find_ptr(os_name)
+			if pobj != unsafe { nil } {
+				name = os_name
+			}
+		}
 		if pobj != unsafe { nil } {
 			mut obj := *pobj
 			match mut obj {
@@ -4843,6 +4913,10 @@ fn (mut c Checker) concat_expr(mut node ast.ConcatExpr) ast.Type {
 	}
 }
 
+fn smartcast_index_expr_scope_key(expr ast.IndexExpr) string {
+	return '__smartcast_index_expr__${ast.Expr(expr).str()}'
+}
+
 // smartcast takes the expression with the current type which should be smartcasted to the target type in the given scope
 fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.Type, mut scope ast.Scope,
 	is_comptime bool, is_option_unwrap bool) {
@@ -4963,6 +5037,22 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 			} else if is_mut && !expr.is_mut {
 				c.smartcast_mut_pos = expr.pos
 			}
+		}
+		ast.IndexExpr {
+			expr_name := smartcast_index_expr_scope_key(expr)
+			mut smartcasts := []ast.Type{}
+			if var := scope.find_var(expr_name) {
+				smartcasts << var.smartcasts
+			}
+			smartcasts << to_type
+			scope.register(ast.Var{
+				name:       expr_name
+				typ:        cur_type
+				pos:        expr.pos
+				is_used:    true
+				smartcasts: smartcasts
+				orig_type:  cur_type
+			})
 		}
 		else {
 			c.smartcast_cond_pos = expr.pos()
@@ -5532,6 +5622,10 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 			// `mut param []T` function parameter
 			is_ok = node.left.obj.is_mut && node.left.obj.is_arg && !typ.deref().is_ptr()
 				&& typ_sym.kind != .struct
+			// `param &[]T` function parameter
+			if node.left.obj.is_arg && typ_sym.kind == .array {
+				is_ok = true
+			}
 			// `mut param Struct`
 			is_mut_struct = node.left.obj.is_mut && node.left.obj.is_arg && typ_sym.kind == .struct
 		}

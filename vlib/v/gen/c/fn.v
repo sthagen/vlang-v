@@ -113,9 +113,10 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 		// TODO: true for not just "builtin"
 		// TODO: clean this up
 		mod := if g.is_builtin_mod { 'builtin' } else { node.name.all_before_last('.') }
+		module_built_short := g.module_built.all_after_last('/').all_after_last('.')
 		// for now dont skip generic functions as they are being marked as static
 		// when -usecache is enabled, until a better solution is implemented.
-		if ((mod != g.module_built && node.mod != g.module_built.after('/'))
+		if ((mod != g.module_built && node.mod != g.module_built && node.mod != module_built_short)
 			|| should_bundle_module) && node.generic_names.len == 0 {
 			// Skip functions that don't have to be generated for this module.
 			// println('skip bm ${node.name} mod=${node.mod} module_built=${g.module_built}')
@@ -509,6 +510,9 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 		if type_name != 'void' {
 			live_fncall = '${type_name} res = ${live_fncall}'
 			live_fnreturn = 'return res;'
+		}
+		if is_livemain {
+			g.definitions.writeln('${type_name} no_impl_${name}(' + fn_args_list.join(', ') + ');')
 		}
 		g.definitions.writeln('${type_name} ${name}(' + fn_args_list.join(', ') + ');')
 		g.hotcode_definitions.writeln('${type_name} ${name}(' + fn_args_list.join(', ') + '){')
@@ -1688,7 +1692,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		match node.kind {
 			.type_name {
 				if left_sym.kind in [.sum_type, .interface] {
-					g.conversion_function_call('builtin__charptr_vstring_literal(v_typeof_${prefix_name}_${typ_sym.cname}',
+					g.conversion_function_call('builtin__tos3(v_typeof_${prefix_name}_${typ_sym.cname}',
 						')', node)
 					return
 				}
@@ -1793,13 +1797,20 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	}
 	is_interface := left_sym.kind == .interface
 		&& g.table.sym(node.receiver_type).kind == .interface
+	mut receiver_expr_is_addressable := node.left.is_lvalue()
+	if node.left is ast.IndexExpr && node.left.left_type != 0 {
+		indexed_container_sym := g.table.final_sym(g.unwrap_generic(node.left.left_type))
+		if indexed_container_sym.kind == .string && !node.left.left_type.is_ptr() {
+			receiver_expr_is_addressable = false
+		}
+	}
 	if node.receiver_type.is_ptr() && (!left_type.is_ptr()
 		|| node.from_embed_types.len != 0 || (left_type.has_flag(.shared_f) && node.kind != .str)) {
 		// The receiver is a reference, but the caller provided a value
 		// Add `&` automatically.
 		// TODO: same logic in call_args()
 		if !is_range_slice {
-			if !node.left.is_lvalue() {
+			if !receiver_expr_is_addressable {
 				if node.left.is_as_cast() {
 					g.inside_smartcast = true
 					if node.left is ast.SelectorExpr && !left_type.is_ptr() {
@@ -2325,6 +2336,24 @@ fn (mut g Gen) gen_trace_call(node ast.CallExpr, name string) {
 	}
 }
 
+fn (mut g Gen) autofree_tmp_arg_init_stmt(prepend string, expr ast.Expr) string {
+	saved_out := g.out
+	saved_stmt_path_pos := g.stmt_path_pos.clone()
+	saved_empty_line := g.empty_line
+	saved_indent := g.indent
+	g.out = strings.new_builder(256)
+	g.stmt_path_pos = [0]
+	g.empty_line = true
+	g.indent = 0
+	defer {
+		g.out = saved_out
+		g.stmt_path_pos = saved_stmt_path_pos
+		g.empty_line = saved_empty_line
+		g.indent = saved_indent
+	}
+	return g.expr_string_surround(prepend, expr, ';').trim_space()
+}
+
 fn (mut g Gen) autofree_call_pregen(node ast.CallExpr) {
 	// g.writeln('// autofree_call_pregen()')
 	// Create a temporary var before fn call for each argument in order to free it (only if it's a complex expression,
@@ -2392,21 +2421,14 @@ fn (mut g Gen) autofree_call_pregen(node ast.CallExpr) {
 			s = 'string ${t} = '
 		}
 		g.is_autofree_tmp = true
-		pos_before := g.out.len
-
 		old_is_autofree := g.is_autofree
 		if arg.expr is ast.CallExpr && arg.expr.is_method && arg.expr.left is ast.CallExpr {
 			g.is_autofree = false
 		}
-
-		g.expr(arg.expr)
-		expr_code := g.out.cut_to(pos_before).trim_space()
-
+		tmp_arg_init := g.autofree_tmp_arg_init_stmt(s, arg.expr)
 		g.is_autofree = old_is_autofree
 		g.is_autofree_tmp = false
-		s += expr_code
-		s += ';'
-		g.strs_to_free0 << s
+		g.strs_to_free0 << tmp_arg_init
 		// This tmp arg var will be freed with the rest of the vars at the end of the scope.
 	}
 }
@@ -2554,7 +2576,21 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 		} else if arg.expr is ast.ArrayDecompose {
 			mut d_count := 0
 			remaining_params := expected_types.len - i
-			if !arg.expr.expr_type.has_flag(.variadic) && remaining_params > 0 {
+			if node.language == .v && node.is_variadic && arg.expr.expr_type.has_flag(.variadic)
+				&& remaining_params > 0 && i < expected_types.len - 1 {
+				tmp_array := g.new_tmp_var()
+				line := g.go_before_last_stmt()
+				array_typ := g.styp(arg.expr.expr_type)
+				g.write('\t${array_typ} ${tmp_array} = ')
+				g.expr(arg.expr)
+				g.writeln(';')
+				g.write(line.trim_left('\t'))
+				for d_i in i .. expected_types.len - 1 {
+					g.write('*(${g.styp(expected_types[d_i])}*)builtin__array_get(${tmp_array}, ${d_count}), ')
+					d_count++
+				}
+				g.write('builtin__array_slice(${tmp_array}, ${d_count}, 2147483647)')
+			} else if !arg.expr.expr_type.has_flag(.variadic) && remaining_params > 0 {
 				tmp_array := g.new_tmp_var()
 				line := g.go_before_last_stmt()
 				array_typ := g.styp(arg.expr.expr_type)
@@ -2625,7 +2661,7 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 			}
 		}
 		use_tmp_var_autofree := g.is_autofree && arg.typ == ast.string_type && arg.is_tmp_autofree
-			&& !g.inside_const && !g.is_builtin_mod
+			&& !g.inside_const && !g.is_builtin_mod && g.inside_ternary == 0
 		// g.write('/* af=${arg.is_tmp_autofree} */')
 		// some c fn definitions dont have args (cfns.v) or are not updated in checker
 		// when these are fixed we wont need this check
@@ -2641,7 +2677,20 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 				name := '_arg_expr_${fn_name}_${i + 1}_${node.pos.pos}'
 				scope := g.file.scope.innermost(node.pos.pos)
 				if !g.is_autofree_tmp || scope.known_var(name) {
-					g.write('/*autofree arg*/' + name)
+					tmp_arg := ast.CallArg{
+						typ:    arg.typ
+						is_mut: arg.is_mut
+						expr:   ast.Ident{
+							name: name
+							kind: .variable
+							info: ast.IdentVar{
+								typ:    arg.typ
+								is_mut: arg.is_mut
+							}
+						}
+					}
+					g.write('/*autofree arg*/')
+					g.ref_or_deref_arg(tmp_arg, expected_types[i], node.language, is_smartcast)
 					wrote_tmp_arg = true
 				}
 			}

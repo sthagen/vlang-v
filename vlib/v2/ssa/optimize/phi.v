@@ -15,8 +15,8 @@ fn simplify_phi_nodes(mut m ssa.Module) bool {
 	mut changed := true
 	for changed {
 		changed = false
-		for func in m.funcs {
-			for blk_id in func.blocks {
+		for fi in 0 .. m.funcs.len {
+			for blk_id in m.funcs[fi].blocks {
 				for val_id in m.blocks[blk_id].instrs {
 					if m.values[val_id].kind != .instruction {
 						continue
@@ -108,17 +108,16 @@ fn remove_phi_use(mut m ssa.Module, val_id int, user_id int) {
 fn split_critical_edges(mut m ssa.Module) {
 	build_cfg(mut m)
 
-	for mut func in m.funcs {
+	for fi in 0 .. m.funcs.len {
 		mut new_blocks := []ssa.BlockID{}
 
 		// Collect edges to split (can't modify while iterating)
 		mut edges_to_split := [][]ssa.BlockID{} // [pred_id, succ_id]
 
 		// Find all critical edges
-		for blk_id in func.blocks {
-			blk := m.blocks[blk_id]
-			if blk.succs.len > 1 {
-				for succ_id in blk.succs {
+		for blk_id in m.funcs[fi].blocks {
+			if m.blocks[blk_id].succs.len > 1 {
+				for succ_id in m.blocks[blk_id].succs {
 					if m.blocks[succ_id].preds.len > 1 {
 						edges_to_split << [blk_id, succ_id]
 					}
@@ -132,7 +131,7 @@ fn split_critical_edges(mut m ssa.Module) {
 			succ_id := edge[1]
 
 			// Create new intermediate block
-			split_blk := m.add_block(func.id, 'split_${pred_id}_${succ_id}')
+			split_blk := m.add_block(m.funcs[fi].id, 'split_${pred_id}_${succ_id}')
 			new_blocks << split_blk
 
 			// Add unconditional jump from split block to original successor
@@ -140,9 +139,8 @@ fn split_critical_edges(mut m ssa.Module) {
 			m.add_instr(.jmp, split_blk, 0, [succ_val])
 
 			// Update predecessor's terminator to jump to split block instead of successor
-			pred_blk := m.blocks[pred_id]
-			if pred_blk.instrs.len > 0 {
-				term_val_id := pred_blk.instrs.last()
+			if m.blocks[pred_id].instrs.len > 0 {
+				term_val_id := m.blocks[pred_id].instrs[m.blocks[pred_id].instrs.len - 1]
 				mut term := &m.instrs[m.values[term_val_id].index]
 
 				old_succ_val := m.blocks[succ_id].val_id
@@ -174,7 +172,7 @@ fn split_critical_edges(mut m ssa.Module) {
 				}
 			}
 		}
-		// Note: new blocks are already added to func.blocks by add_block()
+		// Note: new blocks are already added to m.funcs[fi].blocks by add_block()
 	}
 
 	// Rebuild CFG after splitting
@@ -208,12 +206,12 @@ fn eliminate_phi_nodes(mut m ssa.Module) {
 	// First split critical edges to ensure correct copy placement
 	split_critical_edges(mut m)
 
-	for func in m.funcs {
+	for fi in 0 .. m.funcs.len {
 		// Collect all phi copies grouped by predecessor block
 		// Map: pred_block -> list of (dest, src) pairs
 		mut pred_copies := map[int][]ParallelCopy{}
 
-		for blk_id in func.blocks {
+		for blk_id in m.funcs[fi].blocks {
 			for val_id in m.blocks[blk_id].instrs {
 				if m.values[val_id].kind != .instruction {
 					continue
@@ -241,7 +239,7 @@ fn eliminate_phi_nodes(mut m ssa.Module) {
 		}
 
 		// Remove phi instructions (mark as nop/bitcast with no operands)
-		for blk_id in func.blocks {
+		for blk_id in m.funcs[fi].blocks {
 			for val_id in m.blocks[blk_id].instrs {
 				if m.values[val_id].kind != .instruction {
 					continue
@@ -355,7 +353,7 @@ fn insert_temp_in_block(mut m ssa.Module, blk_id int, src int, typ int) int {
 	// Safe insertion: find terminator and insert before it
 	mut insert_idx := m.blocks[blk_id].instrs.len
 	if insert_idx > 0 {
-		last_val := m.blocks[blk_id].instrs.last()
+		last_val := m.blocks[blk_id].instrs[m.blocks[blk_id].instrs.len - 1]
 		last_instr := m.instrs[m.values[last_val].index]
 		if last_instr.op in [.ret, .br, .jmp, .switch_, .unreachable] {
 			insert_idx = m.blocks[blk_id].instrs.len - 1
@@ -384,7 +382,7 @@ fn insert_copy_in_block(mut m ssa.Module, blk_id int, dest int, src int) {
 	// Safe insertion: find terminator and insert before it
 	mut insert_idx := m.blocks[blk_id].instrs.len
 	if insert_idx > 0 {
-		last_val := m.blocks[blk_id].instrs.last()
+		last_val := m.blocks[blk_id].instrs[m.blocks[blk_id].instrs.len - 1]
 		last_instr := m.instrs[m.values[last_val].index]
 
 		if last_instr.op in [.ret, .br, .jmp, .switch_, .unreachable] {

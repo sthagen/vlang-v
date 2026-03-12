@@ -20,6 +20,7 @@ pub fn (ch chan) close() {}
 // try_pop returns `ChanState.success` if an object is popped from the channel.
 // try_pop effectively pops from the channel without waiting for objects to become available.
 // Both the test and pop transaction is done atomically.
+// Pass the destination as `mut`: `ch.try_pop(mut value)`, not `ch.try_pop(&value)`.
 pub fn (ch chan) try_pop(obj voidptr) ChanState {
 	return .success
 }
@@ -55,20 +56,14 @@ fn _result_ok(data voidptr, mut res _result, size int) {
 
 // str returns the message of IError.
 pub fn (err IError) str() string {
-	return match err {
-		None__ {
-			'none'
-		}
-		Error {
-			err.msg()
-		}
-		MessageError {
-			(*err).str()
-		}
-		else {
-			'${err.type_name()}: ${err.msg()}'
-		}
+	if err is None__ {
+		return 'none'
 	}
+	c := err.code()
+	if c > 0 {
+		return err.msg() + '; code: ' + c.str()
+	}
+	return err.msg()
 }
 
 // Error is the empty default implementation of `IError`.

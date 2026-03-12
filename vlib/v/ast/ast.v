@@ -1693,18 +1693,19 @@ pub:
 @[minify]
 pub struct ArrayInit {
 pub:
-	pos           token.Pos   // `[]` in []Type{} position
-	elem_type_pos token.Pos   // `Type` in []Type{} position
-	ecmnts        [][]Comment // optional iembed comments after each expr
-	pre_cmnts     []Comment
-	is_fixed      bool
-	is_option     bool // true if it was declared as ?[2]Type or ?[]Type
-	has_val       bool // fixed size literal `[expr, expr]!`
-	mod           string
-	has_len       bool
-	has_cap       bool
-	has_init      bool
-	has_index     bool // true if temp variable index is used
+	pos                token.Pos   // `[]` in []Type{} position
+	elem_type_pos      token.Pos   // `Type` in []Type{} position
+	ecmnts             [][]Comment // optional iembed comments after each expr
+	pre_cmnts          []Comment
+	is_fixed           bool
+	is_option          bool // true if it was declared as ?[2]Type or ?[]Type
+	has_val            bool // fixed size literal `[expr, expr]!`
+	from_to_fixed_size bool // lowered from `[expr, expr].to_fixed_size()`
+	mod                string
+	has_len            bool
+	has_cap            bool
+	has_init           bool
+	has_index          bool // true if temp variable index is used
 pub mut:
 	exprs        []Expr // `[expr, expr]` or `[expr]Type{}` for fixed array
 	len_expr     Expr   // len: expr
@@ -2558,6 +2559,21 @@ pub fn (expr Expr) is_auto_deref_var() bool {
 		}
 		PrefixExpr {
 			expr.op == .amp && expr.right.is_auto_deref_var()
+		}
+		else {
+			false
+		}
+	}
+}
+
+pub fn (expr Expr) is_auto_deref_arg() bool {
+	return match expr {
+		Ident {
+			if expr.obj is Var {
+				expr.obj.is_auto_deref && expr.obj.is_arg
+			} else {
+				false
+			}
 		}
 		else {
 			false

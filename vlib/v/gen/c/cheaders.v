@@ -122,13 +122,11 @@ const c_common_macros = '
 	#define E_STRUCT 0
 #endif
 #ifndef _WIN32
-	#if defined __has_include
-		#if __has_include (<execinfo.h>)
-			#include <execinfo.h>
-		#else
-			// On linux: int backtrace(void **__array, int __size);
-			// On BSD: size_t backtrace(void **, size_t);
-		#endif
+	#if (defined(__linux__) && (defined(__GLIBC__) || defined(__GNU_LIBRARY__))) || defined(__APPLE__) || defined(__NetBSD__) || defined(__FreeBSD__) || defined(__DragonFly__)
+		#include <execinfo.h>
+	#else
+		// On linux: int backtrace(void **__array, int __size);
+		// On BSD: size_t backtrace(void **, size_t);
 	#endif
 #endif
 #ifdef __TINYC__
@@ -281,6 +279,20 @@ static inline bool _us64_le(uint64_t a, int64_t b) { return a <= INT64_MAX && (i
 static inline bool _us64_lt(uint64_t a, int64_t b) { return a < INT64_MAX && (int64_t)a < b; }
 '
 
+const c_float_to_unsigned_conversion_functions = '
+// deterministic float -> u64 conversions for explicit V casts
+// direct C casts are undefined for out-of-range values
+static inline uint64_t _v_f64_to_u64(double x) {
+	if (!(x >= 0.0)) {
+		return 0;
+	}
+	if (x >= 18446744073709551616.0) {
+		return UINT64_MAX;
+	}
+	return (uint64_t)x;
+}
+'
+
 const c_helper_macros = '//============================== HELPER C MACROS =============================*/
 // _SLIT0 is used as NULL string for literal arguments
 // `"" s` is used to enforce a string literal argument
@@ -312,6 +324,34 @@ typedef int (*qsort_callback_func)(const void*, const void*);
 // https://lists.nongnu.org/archive/html/tinycc-devel/2025-10/msg00007.html
 // gnu headers use to #define __attribute__ to empty for non-gcc compilers
 #undef __attribute__
+#endif
+#if defined(_MSC_VER)
+// Ensure C99-like return semantics and NUL-termination for MSVC snprintf/vsnprintf.
+#ifndef va_copy
+	#define va_copy(dest, src) ((dest) = (src))
+#endif
+static int v__vsnprintf(char *s, size_t n, const char *fmt, va_list ap) {
+	va_list ap_copy;
+	va_copy(ap_copy, ap);
+	const int needed = _vscprintf(fmt, ap_copy);
+	va_end(ap_copy);
+	if (n > 0) {
+		const int written = _vsnprintf_s(s, n, _TRUNCATE, fmt, ap);
+		if (written < 0) {
+			s[n - 1] = 0;
+		}
+	}
+	return needed;
+}
+static int v__snprintf(char *s, size_t n, const char *fmt, ...) {
+	va_list ap;
+	va_start(ap, fmt);
+	const int needed = v__vsnprintf(s, n, fmt, ap);
+	va_end(ap);
+	return needed;
+}
+#define vsnprintf v__vsnprintf
+#define snprintf v__snprintf
 #endif
 //================================== GLOBALS =================================*/
 void _vinit(int ___argc, voidptr ___argv);
@@ -374,6 +414,9 @@ void * aligned_alloc(size_t alignment, size_t size) { return malloc(size); }
 #endif
 #endif
 #ifdef _WIN32
+	#ifdef WINVER
+		#undef WINVER
+	#endif
 	#define WINVER 0x0600
 	#ifdef _WIN32_WINNT
 		#undef _WIN32_WINNT
@@ -409,7 +452,7 @@ void * aligned_alloc(size_t alignment, size_t size) { return malloc(size); }
 #if defined(__CYGWIN__) && !defined(_WIN32)
 	#error Cygwin is not supported, please use MinGW or Visual Studio.
 #endif
-#if defined(__MINGW32__) || defined(__MINGW64__) || (defined(_WIN32) && defined(__TINYC__))
+#if defined(__MINGW32__) || defined(__MINGW64__) || (defined(_WIN32) && defined(__TINYC__)) || defined(_MSC_VER)
 	#undef PRId64
 	#undef PRIi64
 	#undef PRIo64

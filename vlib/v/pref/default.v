@@ -241,6 +241,16 @@ fn (mut p Preferences) find_cc_if_cross_compiling() {
 	if p.os == get_host_os() {
 		return
 	}
+	if p.ccompiler_set_by_flag {
+		// Only mingw compilers can cross-compile for Windows (others lack Windows headers),
+		// so override any non-mingw compiler with the proper cross-compiler.
+		if p.os == .windows && !p.ccompiler.contains('mingw') {
+			p.ccompiler = p.vcross_compiler_name()
+			return
+		}
+		// Respect explicit `-cc` selection even in cross-compilation mode.
+		return
+	}
 	if p.os == .windows && p.ccompiler == 'msvc' {
 		// Allow for explicit overrides like `v -showcc -cc msvc -os windows file.v`,
 		// this makes flag passing more easily debuggable on other OSes too, not only

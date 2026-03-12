@@ -31,12 +31,13 @@ enum ModuleKind {
 	https
 	http
 	ssh
+	local
 }
 
-fn parse_query(query []string) []Module {
+fn parse_query(query []string, mut selector VpmInstallServerSelector) []Module {
 	mut p := Parser{}
 	for m in query {
-		p.parse_module(m)
+		p.parse_module(m, mut selector)
 	}
 	if p.errors > 0 && p.errors == query.len {
 		exit(1)
@@ -44,11 +45,12 @@ fn parse_query(query []string) []Module {
 	return p.modules.values()
 }
 
-fn (mut p Parser) parse_module(m string) {
+fn (mut p Parser) parse_module(m string, mut selector VpmInstallServerSelector) {
 	kind := match true {
 		m.starts_with('https://') { ModuleKind.https }
 		m.starts_with('git@') { ModuleKind.ssh }
 		m.starts_with('http://') { ModuleKind.http }
+		is_local_repository(m) { ModuleKind.local }
 		else { ModuleKind.registered }
 	}
 	ident, version := if kind == .ssh {
@@ -124,7 +126,7 @@ fn (mut p Parser) parse_module(m string) {
 		}
 	} else {
 		// VPM registered module.
-		info := get_mod_vpm_info(ident) or {
+		info := get_mod_vpm_info_with_selector(ident, mut selector) or {
 			vpm_error('failed to retrieve metadata for `${ident}`.', details: err.msg())
 			p.errors++
 			return
@@ -187,9 +189,33 @@ fn (mut p Parser) parse_module(m string) {
 	if mod.manifest.dependencies.len > 0 {
 		verbose_println('Found ${mod.manifest.dependencies.len} dependencies for `${mod.name}`: ${mod.manifest.dependencies}.')
 		for d in mod.manifest.dependencies {
-			p.parse_module(d)
+			p.parse_module(d, mut selector)
 		}
 	}
+}
+
+fn is_local_repository(query string) bool {
+	if query.starts_with('file://') {
+		return true
+	}
+	mut path_candidates := [query]
+	if !query.starts_with('git@') {
+		ident, _ := query.rsplit_once('@') or { query, '' }
+		if ident != query {
+			path_candidates << ident
+		}
+	}
+	for candidate in path_candidates {
+		path := os.expand_tilde_to_home(candidate)
+		if os.is_abs_path(path) || path.starts_with('./') || path.starts_with('../')
+			|| path.starts_with('~/') {
+			return true
+		}
+		if os.exists(path) {
+			return true
+		}
+	}
+	return false
 }
 
 fn (mut m Module) get_installed() {

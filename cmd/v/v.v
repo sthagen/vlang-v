@@ -114,6 +114,7 @@ fn main() {
 	mut args_and_flags := util.join_env_vflags_and_os_args()[1..]
 	prefs, command := pref.parse_args_and_show_errors(external_tools, args_and_flags,
 		true)
+	maybe_delegate_to_vvmrc(command, prefs)
 	if prefs.use_cache && os.user_os() == 'windows' {
 		eprintln('-usecache is currently disabled on windows')
 		exit(1)
@@ -145,7 +146,8 @@ fn main() {
 			util.launch_tool(prefs.is_verbose, 'vcreate', os.args[1..])
 			return
 		}
-		'install', 'list', 'outdated', 'remove', 'search', 'show', 'update', 'upgrade' {
+		'install', 'link', 'list', 'outdated', 'remove', 'search', 'show', 'unlink', 'update',
+		'upgrade' {
 			util.launch_tool(prefs.is_verbose, 'vpm', os.args[1..])
 			return
 		}
@@ -178,8 +180,8 @@ fn main() {
 	}
 
 	other_commands := ['run', 'crun', 'build', 'build-module', 'help', 'version', 'new', 'init',
-		'install', 'list', 'outdated', 'remove', 'search', 'show', 'update', 'upgrade', 'vlib-docs',
-		'interpret', 'translate']
+		'install', 'link', 'list', 'outdated', 'remove', 'search', 'show', 'unlink', 'update',
+		'upgrade', 'vlib-docs', 'interpret', 'translate']
 	mut all_commands := []string{}
 	all_commands << external_tools
 	all_commands << other_commands

@@ -44,6 +44,7 @@ mut:
 	inside_for_expr          bool
 	inside_fn                bool // true even with implicit main
 	inside_fn_return         bool
+	inside_fn_param          bool // true while parsing function parameter types
 	inside_fn_concrete_type  bool // parsing fn_name[concrete_type]() call expr
 	inside_call_args         bool // true inside f(  ....  )
 	inside_unsafe_fn         bool
@@ -1029,6 +1030,26 @@ fn (mut p Parser) stmt(is_top_level bool) ast.Stmt {
 					pos:   pos
 				}
 			}
+		}
+		.at, .lsbr {
+			is_stmt_attr := if p.tok.kind == .at {
+				p.peek_tok.kind == .lsbr
+			} else {
+				p.is_attributes()
+			}
+			if p.script_mode && is_stmt_attr {
+				attr_pos := p.tok.pos()
+				p.attributes()
+				if token.is_decl(p.tok.kind) {
+					stmt := p.stmt(is_top_level)
+					p.attrs = []
+					return stmt
+				}
+				p.attrs = []
+				return p.error_with_pos('attributes can only be used before declarations',
+					attr_pos)
+			}
+			return p.parse_multi_expr(is_top_level)
 		}
 		.name {
 			if p.peek_tok.kind == .name && p.tok.lit == 'sql' {
@@ -2255,6 +2276,22 @@ fn (mut p Parser) dot_expr(left ast.Expr) ast.Expr {
 		or_block := p.gen_or_block()
 		end_pos := p.prev_tok.pos()
 		pos := name_pos.extend(end_pos)
+		if field_name == 'to_fixed_size' && left is ast.ArrayInit && args.len == 0
+			&& or_block.kind == .absent {
+			left_array := left as ast.ArrayInit
+			if left_array.is_fixed {
+				return left_array
+			}
+			if left_array.exprs.len > 0 {
+				return ast.ArrayInit{
+					...left_array
+					is_fixed:           true
+					has_val:            true
+					from_to_fixed_size: true
+					pos:                left_array.pos.extend(end_pos)
+				}
+			}
+		}
 		comments := p.eat_comments(same_line: true)
 		mut left_node := unsafe { left }
 		if mut left_node is ast.CallExpr {

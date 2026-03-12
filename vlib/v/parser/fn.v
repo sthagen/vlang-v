@@ -389,6 +389,26 @@ fn (mut p Parser) call_kind(fn_name string) ast.CallKind {
 	}
 }
 
+@[inline]
+fn (p &Parser) is_start_of_call_arg_expr() bool {
+	if p.tok.kind == .name && p.peek_tok.kind == .string && p.tok.lit !in ['c', 'r', 'js'] {
+		return false
+	}
+	return match p.tok.kind {
+		.name, .number, .string, .chartoken, .dot, .at, .dollar, .amp, .mul, .not, .bit_not,
+		.arrow, .minus, .lpar, .lsbr, .lcbr, .pipe, .logical_or, .question, .key_fn, .key_type,
+		.key_struct, .key_none, .key_nil, .key_true, .key_false, .key_if, .key_match, .key_select,
+		.key_lock, .key_rlock, .key_go, .key_spawn, .key_unsafe, .key_likely, .key_unlikely,
+		.key_typeof, .key_sizeof, .key_isreftype, .key_offsetof, .key_dump, .key_mut, .key_shared,
+		.key_atomic, .key_static, .key_volatile {
+			true
+		}
+		else {
+			false
+		}
+	}
+}
+
 fn (mut p Parser) call_args() []ast.CallArg {
 	prev_inside_call_args := p.inside_call_args
 	p.inside_call_args = true
@@ -447,7 +467,10 @@ fn (mut p Parser) call_args() []ast.CallArg {
 			pos:      pos
 		}
 		if p.tok.kind != .comma {
-			break
+			if !p.is_start_of_call_arg_expr() {
+				break
+			}
+			continue
 		}
 		p.next()
 	}
@@ -760,7 +783,12 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 	mut return_type := ast.void_type
 	// don't confuse token on the next line: fn decl, [attribute]
 	same_line := p.tok.line_nr == p.prev_tok.line_nr
-	if (p.tok.kind.is_start_of_type() && (same_line || p.tok.kind != .lsbr))
+	// `fn foo()[` is usually a mistaken body opener; report it as such
+	// instead of trying to parse `[` as a fixed array return type.
+	invalid_body_opener := same_line && p.tok.kind == .lsbr && p.peek_tok.line_nr > p.tok.line_nr
+	if invalid_body_opener {
+		p.unexpected(got: '${p.tok} after function signature', expecting: '`{`')
+	} else if (p.tok.kind.is_start_of_type() && (same_line || p.tok.kind != .lsbr))
 		|| (same_line && p.tok.kind == .key_fn) {
 		// Disallow [T] as return type
 		if p.tok.kind == .lsbr && p.peek_tok.kind == .name && p.peek_tok.lit.len == 1
@@ -1319,7 +1347,10 @@ fn (mut p Parser) fn_params() ([]ast.Param, bool, bool, bool) {
 				}
 			}
 			pos := p.tok.pos()
+			prev_inside_fn_param := p.inside_fn_param
+			p.inside_fn_param = true
 			mut param_type := p.parse_type()
+			p.inside_fn_param = prev_inside_fn_param
 			type_pos := pos.extend(p.prev_tok.pos())
 			if param_type == 0 {
 				// error is added in parse_type
@@ -1453,7 +1484,10 @@ fn (mut p Parser) fn_params() ([]ast.Param, bool, bool, bool) {
 				}
 			}
 			pos := p.tok.pos()
+			prev_inside_fn_param := p.inside_fn_param
+			p.inside_fn_param = true
 			mut typ := p.parse_type()
+			p.inside_fn_param = prev_inside_fn_param
 			type_pos[0] = pos.extend(p.prev_tok.pos())
 			if typ == 0 {
 				// error is added in parse_type

@@ -567,8 +567,10 @@ pub fn expand_tilde_to_home(path string) string {
 // If `path` already exists, it will be overwritten.
 pub fn write_file(path string, text string) ! {
 	mut f := create(path)!
+	defer {
+		f.close()
+	}
 	unsafe { f.write_full_buffer(text.str, usize(text.len))! }
-	f.close()
 }
 
 pub struct ExecutableNotFoundError {
@@ -1002,8 +1004,12 @@ pub fn vtmp_dir() string {
 
 fn default_vmodules_path() string {
 	hdir := home_dir()
-	res := join_path_single(hdir, '.vmodules')
-	return res
+	if hdir != '' {
+		return join_path_single(hdir, '.vmodules')
+	}
+	// In some hermetic CI/sandbox environments HOME/USERPROFILE is intentionally
+	// missing. Fall back to a writable user-specific temp path.
+	return join_path_single(vtmp_dir(), '.vmodules')
 }
 
 // vmodules_dir returns the path to a folder, where v stores its global modules.
