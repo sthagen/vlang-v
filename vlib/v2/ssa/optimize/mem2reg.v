@@ -32,6 +32,15 @@ mut:
 	deferred_phi_ops []int
 }
 
+// Helper: append to an inner array of a [][]int with proper write-back.
+// Direct `arr[idx] << val` is broken in ARM64 self-hosted binaries
+// (chained array-element append copies the struct instead of modifying in-place).
+fn array2d_append(mut arr [][]int, idx int, val int) {
+	mut inner := arr[idx]
+	inner << val
+	arr[idx] = inner
+}
+
 fn promote_memory_to_register(mut m ssa.Module, dom DomInfo, cfg &CfgData) {
 	n_values := m.values.len
 	n_blocks := m.blocks.len
@@ -97,13 +106,13 @@ fn promote_memory_to_register(mut m ssa.Module, dom DomInfo, cfg &CfgData) {
 					ptr := instr.operands[1]
 					// Avoid duplicate def entries for same block
 					if ptr < n_values && blk_id !in ctx.defs[ptr] {
-						ctx.defs[ptr] << blk_id
+						array2d_append(mut ctx.defs, ptr, blk_id)
 					}
 				} else if instr.op == .load {
 					ptr := instr.operands[0]
 					// Avoid duplicate use entries for same block
 					if ptr < n_values && blk_id !in ctx.uses[ptr] {
-						ctx.uses[ptr] << blk_id
+						array2d_append(mut ctx.uses, ptr, blk_id)
 					}
 				}
 			}
@@ -130,7 +139,7 @@ fn promote_memory_to_register(mut m ssa.Module, dom DomInfo, cfg &CfgData) {
 				for di in 0 .. n_df_b {
 					d := df[b][di]
 					if !has_phi[d] {
-						ctx.phi_placements[d] << alloc_id
+						array2d_append(mut ctx.phi_placements, d, alloc_id)
 						if d !in ctx.phi_blocks {
 							ctx.phi_blocks << d
 						}
@@ -170,7 +179,7 @@ fn promote_memory_to_register(mut m ssa.Module, dom DomInfo, cfg &CfgData) {
 				pv.name = '${alloc_val.name}.phi_${blk_id}'
 				m.values[phi_val] = pv
 				// Store phi_val_id in parallel array for direct lookup (no string matching)
-				ctx.phi_vals[blk_id] << phi_val
+				array2d_append(mut ctx.phi_vals, blk_id, phi_val)
 			}
 		}
 
@@ -369,7 +378,7 @@ fn compute_dominance_frontier_flat(m &ssa.Module, func_idx int, dom &DomInfo, cf
 					}
 					// Avoid duplicate entries in dominance frontier
 					if blk_id !in df[runner] {
-						df[runner] << blk_id
+						array2d_append(mut df, runner, blk_id)
 						if runner !in df_blocks {
 							df_blocks << runner
 						}
@@ -544,31 +553,29 @@ fn rename_iterative(mut m ssa.Module, root_blk int, mut ctx Mem2RegCtx, promotab
 						// Direct lookup: phi_vals[succ_id][spai] is the phi for this alloc
 						if succ_id < ctx.phi_vals.len && spai < ctx.phi_vals[succ_id].len {
 							vid := ctx.phi_vals[succ_id][spai]
-							v := m.values[vid]
-							mut val := 0
-							if ctx.stacks[alloc_id].len > 0 {
-								val = ctx.stacks[alloc_id].last()
+							phi_v := m.values[vid]
+							mut phi_val := if ctx.stacks[alloc_id].len > 0 {
+								ctx.stacks[alloc_id].last()
 							} else {
 								// Undef - reading uninitialized memory
 								alloc_v := m.values[alloc_id]
 								alloc_typ := m.type_store.types[alloc_v.typ]
-								typ := alloc_typ.elem_type
-								val = m.get_or_add_const(typ, 'undef')
+								m.get_or_add_const(alloc_typ.elem_type, 'undef')
 							}
 							bvid := block_val_ids[blk_id]
 							// Defer phi operand append to avoid m.instrs[idx].operands << x
 							// which is broken in ARM64 self-hosted binaries.
-							ctx.deferred_phi_ops << v.index
-							ctx.deferred_phi_ops << val
+							ctx.deferred_phi_ops << phi_v.index
+							ctx.deferred_phi_ops << phi_val
 							ctx.deferred_phi_ops << bvid
 							// FIX: Update uses so DCE doesn't remove the value
 							// Avoid m.values[X].uses << Y — chained append broken in ARM64 self-hosted.
-							if val < m.values.len {
-								if vid !in m.values[val].uses {
+							if phi_val < m.values.len {
+								if vid !in m.values[phi_val].uses {
 									// Read whole struct, modify, write back (chained broken in ARM64)
-									mut vv := m.values[val]
+									mut vv := m.values[phi_val]
 									vv.uses << vid
-									m.values[val] = vv
+									m.values[phi_val] = vv
 								}
 							}
 						}

@@ -404,14 +404,10 @@ pub fn (mut b Builder) build(files []string) {
 	if b.pref.skip_type_check {
 		b.env = types.Environment.new()
 	} else {
-		$if parallel ? {
-			b.env = if b.pref.no_parallel {
-				b.type_check_files()
-			} else {
-				b.type_check_files_parallel()
-			}
-		} $else {
-			b.env = b.type_check_files()
+		b.env = if b.pref.no_parallel {
+			b.type_check_files()
+		} else {
+			b.type_check_files_parallel()
 		}
 	}
 	type_check_time := time.Duration(sw.elapsed() - parse_time)
@@ -421,7 +417,11 @@ pub fn (mut b Builder) build(files []string) {
 	transform_start := sw.elapsed()
 	mut trans := transformer.Transformer.new_with_pref(b.files, b.env, b.pref)
 	trans.set_file_set(b.file_set)
-	b.files = trans.transform_files(b.files)
+	b.files = if b.pref.no_parallel_transform {
+		trans.transform_files(b.files)
+	} else {
+		b.transform_files_parallel(mut trans)
+	}
 	transform_time := time.Duration(sw.elapsed() - transform_start)
 	print_time('Transform', transform_time)
 
@@ -498,7 +498,12 @@ fn (mut b Builder) gen_cleanc() {
 		'out'
 	}
 
-	cc := configured_cc(b.pref.vroot)
+	mut cc := configured_cc(b.pref.vroot)
+	// -prod requires a real optimizing compiler — TCC cannot handle -O3/-flto.
+	// Switch to system cc (gcc/clang) when the default compiler is TCC.
+	if b.pref.is_prod && cc.contains('tcc') {
+		cc = 'cc'
+	}
 	directive_flags := b.collect_cflags_from_sources()
 	// Separate directive flags into compile-only and link-only flags.
 	// -framework, -l, -L, .o/.a/.so/.dylib are linker flags and must NOT
@@ -530,14 +535,36 @@ fn (mut b Builder) gen_cleanc() {
 	}
 	cc_flag_parts << '-std=gnu11'
 	cc_flag_parts << '-fwrapv'
+
+	// Detect compiler type for optimization flags and error limit.
+	is_tcc := cc.contains('tcc')
+	mut is_clang := false
+	if !is_tcc {
+		version_res := os.execute('${cc} --version')
+		if version_res.exit_code == 0 && version_res.output.contains('clang') {
+			is_clang = true
+		}
+	}
+
+	// -prod: add -O3, -flto, -DNDEBUG for gcc/clang
+	if b.pref.is_prod {
+		cc_flag_parts << '-O3'
+		cc_flag_parts << '-DNDEBUG'
+		if !b.pref.is_shared_lib {
+			$if !windows {
+				cc_flag_parts << '-flto'
+			}
+		}
+		if !is_clang {
+			cc_flag_parts << '-fno-strict-aliasing'
+		}
+	}
+
 	cc_flags := cc_flag_parts.join(' ')
 	cc_link_flags := cc_link_parts.join(' ')
 	mut error_limit_flag := ''
-	if !cc.contains('tcc') {
-		version_res := os.execute('${cc} --version')
-		if version_res.exit_code == 0 && version_res.output.contains('clang') {
-			error_limit_flag = ' -ferror-limit=0'
-		}
+	if is_clang {
+		error_limit_flag = ' -ferror-limit=0'
 	}
 
 	// If output ends with .c, just write the C file
@@ -608,9 +635,6 @@ fn (b &Builder) should_disable_cleanc_cache() bool {
 		// The arm64 self-hosted compiler still mis-generates cached-core
 		// boundaries for cleanc builds, which drops required runtime helpers.
 		// Force a single translation unit until the cache path is stable there.
-		return true
-	}
-	if b.is_cmd_v2_self_build() {
 		return true
 	}
 	for raw_input in b.user_files {
@@ -880,6 +904,8 @@ fn (mut b Builder) gen_cleanc_with_cached_core(output_name string, cc string, cc
 	// compilation (e.g. due to TCC not supporting certain C constructs),
 	// the cached .o files are Mach-O (from cc) while TCC would produce ELF.
 	// Detect this mismatch and use cc for main compilation and linking too.
+	// Also, -prod builds with -flto require gcc/clang for linking — TCC
+	// cannot link LTO object files.
 	mut main_cc := cc
 	mut main_cc_flags := cc_flags
 	if cc.contains('tcc') && os.exists(builtin_obj) {
@@ -1501,6 +1527,29 @@ fn (mut b Builder) gen_native(backend_arch pref.Arch) {
 	mut ssa_builder := ssa.Builder.new_with_env(mod, b.env)
 	mut native_sw := time.new_stopwatch()
 
+	// Pass markused data for dead code elimination
+	if b.used_fn_keys.len > 0 {
+		ssa_builder.used_fn_keys = b.used_fn_keys.clone()
+	}
+
+	// --single-backend: strip unused backend modules from the binary
+	if b.pref.single_backend {
+		all_backends := ['cleanc', 'eval', 'c', 'x64', 'arm64']
+		own := match b.pref.backend {
+			.arm64 { 'arm64' }
+			.x64 { 'x64' }
+			.cleanc { 'cleanc' }
+			.c { 'c' }
+			.eval { 'eval' }
+			else { '' }
+		}
+		for backend_mod in all_backends {
+			if backend_mod != own {
+				ssa_builder.skip_modules[backend_mod] = true
+			}
+		}
+	}
+
 	// In hot_fn mode, only build the target function body (skip all others)
 	if b.pref.hot_fn.len > 0 {
 		ssa_builder.hot_fn = b.pref.hot_fn
@@ -1508,7 +1557,16 @@ fn (mut b Builder) gen_native(backend_arch pref.Arch) {
 
 	// Build all files together with proper multi-file ordering
 	mut stage_start := native_sw.elapsed()
-	ssa_builder.build_all(b.files)
+	if b.pref.no_parallel || b.pref.hot_fn.len > 0 {
+		ssa_builder.build_all(b.files)
+	} else {
+		// Phases 1-3 sequential, Phase 4 parallel, Phase 5 sequential
+		ssa_builder.skip_fn_bodies = true
+		ssa_builder.build_all(b.files)
+		ssa_builder.skip_fn_bodies = false
+		b.ssa_build_parallel(mut ssa_builder, b.files)
+		ssa_builder.generate_vinit()
+	}
 	print_time('SSA Build', time.Duration(native_sw.elapsed() - stage_start))
 
 	stage_start = native_sw.elapsed()
@@ -1585,7 +1643,11 @@ fn (mut b Builder) gen_native(backend_arch pref.Arch) {
 		// Use built-in linker for ARM64 macOS
 		stage_start = native_sw.elapsed()
 		mut gen := arm64.Gen.new(&mir_mod)
-		gen.gen()
+		if b.pref.no_parallel {
+			gen.gen()
+		} else {
+			b.gen_arm64_parallel(mut gen)
+		}
 		print_time('ARM64 Gen', time.Duration(native_sw.elapsed() - stage_start))
 
 		if b.pref.hot_fn.len > 0 {
@@ -1609,7 +1671,11 @@ fn (mut b Builder) gen_native(backend_arch pref.Arch) {
 
 		if arch == .arm64 {
 			mut gen := arm64.Gen.new(&mir_mod)
-			gen.gen()
+			if b.pref.no_parallel {
+				gen.gen()
+			} else {
+				b.gen_arm64_parallel(mut gen)
+			}
 			gen.write_file(obj_file)
 		} else {
 			mut gen := x64.Gen.new(&mir_mod)

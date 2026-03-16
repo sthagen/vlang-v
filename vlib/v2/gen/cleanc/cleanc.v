@@ -226,6 +226,10 @@ fn (mut g Gen) emit_live_reload_infrastructure() {
 	if g.pref != unsafe { nil } && g.pref.is_shared_lib {
 		return
 	}
+	// Skip in cached module sources — __v_live_init belongs only in the main module.
+	if g.cache_bundle_name.len > 0 {
+		return
+	}
 	if g.live_fns.len == 0 {
 		// No @[live] functions — emit a no-op __v_live_init
 		g.sb.writeln('')
@@ -1340,9 +1344,10 @@ fn (mut g Gen) gen_spawn_expr(node ast.KeywordOperator) {
 	mut receiver_expr := ast.empty_expr
 	if call_lhs is ast.SelectorExpr {
 		sel := call_lhs as ast.SelectorExpr
-		if !(sel.lhs is ast.Ident && g.is_module_ident((sel.lhs as ast.Ident).name)) {
+		sel_lhs := sel.lhs
+		if !(sel_lhs is ast.Ident && g.is_module_ident((sel_lhs as ast.Ident).name)) {
 			is_method = true
-			receiver_expr = sel.lhs
+			receiver_expr = sel_lhs
 		}
 	}
 	// Build a unique name for the wrapper (deduplication key)

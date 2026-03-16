@@ -29,7 +29,8 @@ pub mut:
 	skip_builtin          bool
 	skip_imports          bool
 	skip_type_check       bool // Skip type checking phase (for backends that don't need it yet)
-	no_parallel           bool = true // default to sequential parsing until parallel is fixed
+	no_parallel           bool // when true, run type check sequentially (default: parallel)
+	no_parallel_transform bool // when true, run transform sequentially (default: parallel)
 	no_cache              bool // Disable build cache
 	no_markused           bool // Disable markused stage and dead-function pruning
 	show_cc               bool // Print C compiler command(s)
@@ -39,12 +40,14 @@ pub mut:
 	use_context_allocator bool // Use context allocator for heap allocations (enables profiling)
 	is_shared_lib         bool // Compile to shared library (.dylib/.so) for live reload
 	no_optimize           bool // -O0: skip SSA optimization (mem2reg, phi elimination)
+	is_prod               bool // -prod: use -O3 optimization for C compiler
 	backend               Backend
 	arch                  Arch = .auto
 	output_file           string
 	printfn_list          []string // List of function names whose generated C source should be printed
 	user_defines          []string // User-defined comptime flags via -d <name>
 	hot_fn                string   // Extract raw machine code for this function only (hot reload)
+	single_backend        bool     // Only include the selected backend (strip other backends from binary)
 	eval_runtime_args     []string // Program argv exposed to the eval backend
 pub:
 	vroot         string = detect_vroot()
@@ -241,10 +244,11 @@ pub fn new_preferences_from_args(args []string) Preferences {
 	known_flags_with_values := ['-backend', '-b', '-o', '-output', '-arch', '-printfn', '-gc',
 		'-d', '-hot-fn']
 	known_boolean_flags := ['--debug', '--verbose', '-v', '--skip-genv', '--skip-builtin',
-		'--skip-imports', '--skip-type-check', '--parallel', '-nocache', '--nocache', '-nomarkused',
-		'--nomarkused', '-showcc', '--showcc', '-stats', '--stats', '-print-parsed-files',
-		'--print-parsed-files', '-keepc', '--profile-alloc', '-profile-alloc', '-enable-globals',
-		'--enable-globals', '-shared', '--shared', '-O0']
+		'--skip-imports', '--skip-type-check', '--no-parallel', '-nocache', '--nocache',
+		'-nomarkused', '--nomarkused', '-showcc', '--showcc', '-stats', '--stats',
+		'-print-parsed-files', '--print-parsed-files', '-keepc', '--profile-alloc', '-profile-alloc',
+		'-enable-globals', '--enable-globals', '-shared', '--shared', '-O0', '--single-backend',
+		'-single-backend', '-prod']
 	for opt in options {
 		if opt !in known_flags_with_values && opt !in known_boolean_flags {
 			eprintln('error: unknown flag `${opt}`')
@@ -261,18 +265,17 @@ pub fn new_preferences_from_args(args []string) Preferences {
 			eprintln('  -nocache, --nocache    Disable build cache')
 			eprintln('  -d <name>              Define a comptime flag')
 			eprintln('  -enable-globals        Accepted for v1 compatibility')
+			eprintln('  -prod                  Production build: optimize with -O3 -flto')
 			eprintln('  -O0                    Skip SSA optimization (faster compile, slower code)')
 			eprintln('  --debug                Enable debug mode')
 			eprintln('  -v, --verbose          Enable verbose output')
 			eprintln('  -showcc, --showcc      Print C compiler command')
 			eprintln('  -keepc                 Keep generated C file')
-			eprintln('  --parallel             Enable parallel parsing')
+			eprintln('  --no-parallel          Disable parallel type check and transform')
 			exit(1)
 		}
 	}
 
-	// Default to sequential parsing (no_parallel=true) unless --parallel is specified
-	use_parallel := '--parallel' in options
 	return Preferences{
 		debug:                 '--debug' in options
 		verbose:               '--verbose' in options || '-v' in options
@@ -280,7 +283,8 @@ pub fn new_preferences_from_args(args []string) Preferences {
 		skip_builtin:          '--skip-builtin' in options
 		skip_imports:          '--skip-imports' in options
 		skip_type_check:       '--skip-type-check' in options
-		no_parallel:           !use_parallel
+		no_parallel:           '--no-parallel' in options
+		no_parallel_transform: '--no-parallel' in options
 		no_cache:              '-nocache' in options || '--nocache' in options
 		no_markused:           '-nomarkused' in options || '--nomarkused' in options
 		show_cc:               '-showcc' in options || '--showcc' in options
@@ -290,6 +294,8 @@ pub fn new_preferences_from_args(args []string) Preferences {
 		use_context_allocator: '--profile-alloc' in options || '-profile-alloc' in options
 		is_shared_lib:         '-shared' in options || '--shared' in options
 		no_optimize:           '-O0' in options
+		is_prod:               '-prod' in options
+		single_backend:        '--single-backend' in options || '-single-backend' in options
 		backend:               backend
 		arch:                  arch
 		output_file:           output_file
@@ -325,8 +331,6 @@ pub fn new_preferences_using_options(options []string) Preferences {
 		arch = .arm64
 	}
 
-	// Default to sequential parsing (no_parallel=true) unless --parallel is specified
-	use_parallel := '--parallel' in options
 	return Preferences{
 		// config flags
 		debug:                 '--debug' in options
@@ -335,7 +339,8 @@ pub fn new_preferences_using_options(options []string) Preferences {
 		skip_builtin:          '--skip-builtin' in options
 		skip_imports:          '--skip-imports' in options
 		skip_type_check:       '--skip-type-check' in options
-		no_parallel:           !use_parallel
+		no_parallel:           '--no-parallel' in options
+		no_parallel_transform: '--no-parallel' in options
 		no_cache:              '-nocache' in options || '--nocache' in options
 		no_markused:           '-nomarkused' in options || '--nomarkused' in options
 		show_cc:               '-showcc' in options || '--showcc' in options
@@ -344,6 +349,8 @@ pub fn new_preferences_using_options(options []string) Preferences {
 		use_context_allocator: '--profile-alloc' in options || '-profile-alloc' in options
 		is_shared_lib:         '-shared' in options || '--shared' in options
 		no_optimize:           '-O0' in options
+		is_prod:               '-prod' in options
+		single_backend:        '--single-backend' in options || '-single-backend' in options
 		backend:               backend
 		arch:                  arch
 	}

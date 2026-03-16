@@ -11,6 +11,7 @@ import encoding.binary
 import os
 
 pub struct Gen {
+pub:
 	mod &mir.Module
 mut:
 	macho &MachOObject
@@ -28,9 +29,10 @@ pub mut:
 	total_resolved     int
 
 	// Register allocation
-	reg_map   map[int]int
-	used_regs []int
-	next_blk  int
+	reg_map    map[int]int
+	used_regs  []int
+	next_blk   int
+	cur_blk_id int // current block being generated (for phi copy emission)
 
 	// Track which string literals have been materialized (value_id -> str_data offset)
 	string_literal_offsets map[int]int
@@ -50,10 +52,12 @@ pub mut:
 	// therefore must outlive the current stack frame.
 	sumtype_data_heap_allocas map[int]bool
 	// Type layout caches/guards to avoid recursive size/alignment loops.
-	type_size_cache  map[int]int
-	type_align_cache map[int]int
-	type_size_stack  map[int]bool
-	type_align_stack map[int]bool
+	type_size_cache  []int  // indexed by type_id, 0 = not cached (valid sizes are > 0 or == 0 only for void)
+	type_align_cache []int  // indexed by type_id, 0 = not cached
+	type_size_stack  []bool // indexed by type_id (recursion guard)
+	type_align_stack []bool // indexed by type_id (recursion guard)
+	// Cache for struct field offset calculations (key: typ_id << 16 | field_idx)
+	struct_field_offset_cache map[int]int
 	// Lookup caches for O(1) name resolution
 	func_by_name   map[string]int // function name → index in g.mod.funcs
 	global_by_name map[string]int // global name → index in g.mod.globals
@@ -83,19 +87,26 @@ pub mut:
 	env_trace_struct_addr string
 	env_trace_strlit      string
 	env_trace_storeval    string
+	env_trace_regalloc    string
+	env_no_regalloc       bool
+	// SP-relative addressing: sp_base_offset = callee_saved_size + stack_size
+	// so that fp - N = sp + (sp_base_offset - N) for positive sp-relative offsets.
+	sp_base_offset int
+	sp_adjusted    bool // true when sp is temporarily modified (call arg push)
 	// Reverse map: val_id → block_id for block-kind values.
 	// Value.index is unreliable in ARM64-compiled binaries, so use this instead.
 	val_to_block []int
 }
 
 pub fn Gen.new(mod &mir.Module) &Gen {
+	n_types := mod.type_store.types.len
 	return &Gen{
 		mod:                   mod
 		macho:                 MachOObject.new()
-		type_size_cache:       map[int]int{}
-		type_align_cache:      map[int]int{}
-		type_size_stack:       map[int]bool{}
-		type_align_stack:      map[int]bool{}
+		type_size_cache:       []int{len: n_types}
+		type_align_cache:      []int{len: n_types}
+		type_size_stack:       []bool{len: n_types}
+		type_align_stack:      []bool{len: n_types}
 		env_dump_funcrefs:     os.getenv('V2_ARM64_DUMP_FUNCREFS')
 		env_trace_skip_dead:   os.getenv('V2_ARM64_TRACE_SKIP_DEAD')
 		env_dump_stackmap:     os.getenv('V2_ARM64_DUMP_STACKMAP')
@@ -119,10 +130,22 @@ pub fn Gen.new(mod &mir.Module) &Gen {
 		env_trace_struct_addr: os.getenv('V2_ARM64_TRACE_STRUCT_ADDR')
 		env_trace_strlit:      os.getenv('V2_ARM64_TRACE_STRLIT')
 		env_trace_storeval:    os.getenv('V2_ARM64_TRACE_STOREVAL')
+		env_trace_regalloc:    os.getenv('V2_ARM64_TRACE_REGALLOC')
+		env_no_regalloc:       os.getenv('V2_ARM64_NO_REGALLOC').len > 0
 	}
 }
 
 pub fn (mut g Gen) gen() {
+	g.gen_pre_pass()
+	for fi := 0; fi < g.mod.funcs.len; fi++ {
+		g.gen_func(g.mod.funcs[fi])
+	}
+	g.gen_post_pass()
+}
+
+// gen_pre_pass registers global symbols and builds lookup caches.
+// Must be called before any gen_func calls.
+pub fn (mut g Gen) gen_pre_pass() {
 	// Pre-register global symbols BEFORE generating functions
 	// This ensures add_undefined() finds existing symbols instead of creating undefined ones
 	mut data_offset := u64(0)
@@ -150,10 +173,29 @@ pub fn (mut g Gen) gen() {
 		g.global_by_name[gvar.name] = gi
 	}
 
-	for fi := 0; fi < g.mod.funcs.len; fi++ {
-		g.gen_func(g.mod.funcs[fi])
+	// Build val_to_block once (block data doesn't change between functions).
+	// Scan values for basic_block kind instead of using g.mod.blocks[bid].val_id
+	// which returns wrong results in ARM64-compiled binaries (large struct copy bug).
+	g.val_to_block = []int{len: g.mod.values.len}
+	for vtb_i := 0; vtb_i < g.val_to_block.len; vtb_i++ {
+		g.val_to_block[vtb_i] = -1
+	}
+	for vi := 0; vi < g.mod.values.len; vi++ {
+		if g.mod.values[vi].kind == .basic_block {
+			bid := g.mod.values[vi].index
+			if bid >= 0 && bid < g.mod.blocks.len {
+				g.val_to_block[vi] = bid
+			}
+		}
 	}
 
+	// Pre-populate type size/align caches so parallel workers can share them read-only
+	g.pre_populate_type_caches()
+}
+
+// gen_post_pass emits the unresolved stub, global data, and patches symbol addresses.
+// Must be called after all gen_func calls.
+pub fn (mut g Gen) gen_post_pass() {
 	// Add return-zero stub for unresolved symbols.
 	// When the linker can't resolve a symbol, it redirects calls here instead of
 	// letting them jump to the Mach-O header which corrupts memory.
@@ -267,15 +309,138 @@ pub fn (mut g Gen) gen() {
 	}
 }
 
-fn (mut g Gen) gen_func(func mir.Function) {
+// new_worker_clone creates a new Gen instance for parallel code generation.
+// The worker shares the read-only MIR module and lookup caches, but has its
+// own MachOObject buffers for independent code emission.
+// pre_populate_type_caches computes type_size and type_align for ALL types
+// in the type store, so that workers can share the caches read-only.
+pub fn (mut g Gen) pre_populate_type_caches() {
+	for tid := 0; tid < g.mod.type_store.types.len; tid++ {
+		g.type_size(tid)
+		g.type_align(tid)
+	}
+}
+
+pub fn (g &Gen) new_worker_clone() &Gen {
+	// Clone all maps and arrays to avoid COW data races between threads.
+	// V's map/array assignment shares internal data; concurrent reads can
+	// trigger internal rehashing/COW writes that race with other threads.
+	return &Gen{
+		mod:                   g.mod
+		macho:                 MachOObject.new()
+		func_by_name:          g.func_by_name.clone()
+		global_by_name:        g.global_by_name.clone()
+		val_to_block:          g.val_to_block.clone()
+		type_size_cache:       g.type_size_cache.clone()
+		type_align_cache:      g.type_align_cache.clone()
+		type_size_stack:       g.type_size_stack.clone()
+		type_align_stack:      g.type_align_stack.clone()
+		env_dump_funcrefs:     g.env_dump_funcrefs
+		env_trace_skip_dead:   g.env_trace_skip_dead
+		env_dump_stackmap:     g.env_dump_stackmap
+		env_dump_blocks:       g.env_dump_blocks
+		env_trace_paramspill:  g.env_trace_paramspill
+		env_trace_val:         g.env_trace_val
+		env_trace_instr:       g.env_trace_instr
+		env_trace_cmp:         g.env_trace_cmp
+		env_trace_store:       g.env_trace_store
+		env_trace_load:        g.env_trace_load
+		env_trace_call:        g.env_trace_call
+		env_trace_ret:         g.env_trace_ret
+		env_trace_bitcast:     g.env_trace_bitcast
+		env_trace_assign:      g.env_trace_assign
+		env_trace_extract:     g.env_trace_extract
+		env_trace_struct_init: g.env_trace_struct_init
+		env_trace_agg_copy:    g.env_trace_agg_copy
+		env_trace_insert:      g.env_trace_insert
+		env_trace_callcount:   g.env_trace_callcount
+		env_trace_callarg:     g.env_trace_callarg
+		env_trace_struct_addr: g.env_trace_struct_addr
+		env_trace_strlit:      g.env_trace_strlit
+		env_trace_storeval:    g.env_trace_storeval
+		env_trace_regalloc:    g.env_trace_regalloc
+		env_no_regalloc:       g.env_no_regalloc
+	}
+}
+
+// merge_worker merges a parallel worker's output buffers into the main Gen.
+// text_data, str_data, symbols, and relocations are concatenated with offset adjustment.
+pub fn (mut g Gen) merge_worker(w &Gen) {
+	text_base := g.macho.text_data.len
+	str_base := g.macho.str_data.len
+
+	// Append machine code
+	g.macho.text_data << w.macho.text_data
+
+	// Append string literal data
+	g.macho.str_data << w.macho.str_data
+
+	// Merge symbols: remap worker symbol indices to main symbol table
+	mut sym_remap := []int{len: w.macho.symbols.len}
+	for wi, sym in w.macho.symbols {
+		mut new_value := sym.value
+		if sym.sect == 1 {
+			new_value += u64(text_base)
+		} else if sym.sect == 2 {
+			new_value += u64(str_base)
+		}
+		// Local symbols (L_str_*, L_cstr_*) are per-worker and must never be
+		// deduplicated — each worker's L_str_0 refers to a different string literal.
+		is_local := sym.name.len > 2 && sym.name[0] == `L` && sym.name[1] == `_`
+		// Check if symbol already exists in main (e.g., pre-registered global or extern)
+		if !is_local {
+			if existing := g.macho.sym_by_name[sym.name] {
+				// Update existing symbol with definition if this one defines it
+				if sym.type_ != 0x01 { // not N_UNDF
+					mut main_sym := &g.macho.symbols[existing]
+					main_sym.type_ = sym.type_
+					main_sym.sect = sym.sect
+					main_sym.value = new_value
+				}
+				sym_remap[wi] = existing
+				continue
+			}
+		}
+		sym_remap[wi] = g.macho.symbols.len
+		name_off := g.macho.str_table.len
+		g.macho.str_table << sym.name.bytes()
+		g.macho.str_table << 0
+		g.macho.symbols << Symbol{
+			name:     sym.name
+			type_:    sym.type_
+			sect:     sym.sect
+			desc:     sym.desc
+			value:    new_value
+			name_off: name_off
+		}
+		if !is_local {
+			g.macho.sym_by_name[sym.name] = sym_remap[wi]
+		}
+	}
+
+	// Merge relocations with adjusted addresses and remapped symbol indices
+	for rel in w.macho.relocs {
+		g.macho.relocs << RelocationInfo{
+			addr:    rel.addr + text_base
+			sym_idx: sym_remap[rel.sym_idx]
+			pcrel:   rel.pcrel
+			length:  rel.length
+			extern:  rel.extern
+			type_:   rel.type_
+		}
+	}
+}
+
+pub fn (mut g Gen) gen_func(func mir.Function) {
 	if func.is_c_extern {
 		// C extern functions are provided by external libraries (libc, etc.).
 		// Don't emit any local symbol — let the linker resolve them as undefined externals.
 		return
 	}
 	if func.blocks.len == 0 {
-		// Emit a minimal stub: just a ret instruction
-		// This is needed for functions like __v_init_consts that are called but have no body
+		// Emit a minimal stub: just a ret instruction.
+		// This handles functions registered in Phase 3 but not built in Phase 4
+		// (dead code elimination), or functions with empty bodies.
 		g.curr_offset = g.macho.text_data.len
 		sym_name := '_' + func.name
 		g.macho.add_symbol(sym_name, u64(g.curr_offset), false, 1)
@@ -283,38 +448,37 @@ fn (mut g Gen) gen_func(func mir.Function) {
 		return
 	}
 	g.curr_offset = g.macho.text_data.len
-	g.stack_map = map[int]int{}
-	g.alloca_offsets = map[int]int{}
-	g.alloca_ptr_cache = map[int]u8{}
-	g.block_offsets = []int{len: g.mod.blocks.len}
-	// Initialize to -1 manually (init: -1 may not work on all backends)
-	for bo_idx := 0; bo_idx < g.block_offsets.len; bo_idx++ {
-		g.block_offsets[bo_idx] = -1
-	}
-	// Build reverse map: val_id → block_id.
-	// Value.index is unreliable for block-kind values in ARM64-compiled binaries.
-	if g.val_to_block.len < g.mod.values.len {
-		g.val_to_block = []int{len: g.mod.values.len}
-	}
-	for vtb_i := 0; vtb_i < g.val_to_block.len; vtb_i++ {
-		g.val_to_block[vtb_i] = -1
-	}
-	for bid := 0; bid < g.mod.blocks.len; bid++ {
-		bval := g.mod.blocks[bid].val_id
-		if bval >= 0 && bval < g.val_to_block.len {
-			g.val_to_block[bval] = bid
+	g.stack_map.clear()
+	g.alloca_offsets.clear()
+	g.alloca_ptr_cache.clear()
+	// Reuse block_offsets array, grow if needed, only zero this function's blocks
+	n_blks := g.mod.blocks.len
+	if g.block_offsets.len < n_blks {
+		g.block_offsets = []int{len: n_blks}
+		// Fresh allocation needs full -1 init
+		for bo_idx := 0; bo_idx < n_blks; bo_idx++ {
+			g.block_offsets[bo_idx] = -1
+		}
+	} else {
+		// Only reset blocks belonging to this function
+		for fbi := 0; fbi < func.blocks.len; fbi++ {
+			bid := func.blocks[fbi]
+			if bid >= 0 && bid < g.block_offsets.len {
+				g.block_offsets[bid] = -1
+			}
 		}
 	}
-	g.pending_label_blks = []int{}
-	g.pending_label_offs = []int{}
+	// val_to_block is built once in gen(), not per function
+	g.pending_label_blks.clear()
+	g.pending_label_offs.clear()
 	g.func_count++
 	g.total_pending = 0
 	g.total_resolved = 0
-	g.reg_map = map[int]int{}
-	g.used_regs = []int{}
-	g.string_literal_offsets = map[int]int{}
-	g.const_cache = map[int]i64{}
-	g.sumtype_data_heap_allocas = map[int]bool{}
+	g.reg_map.clear()
+	g.used_regs.clear()
+	g.string_literal_offsets.clear()
+	g.const_cache.clear()
+	g.sumtype_data_heap_allocas.clear()
 	g.cur_func_ret_type = func.typ
 	g.cur_func_name = func.name
 	g.x8_save_offset = 0
@@ -402,20 +566,11 @@ fn (mut g Gen) gen_func(func mir.Function) {
 					used_string_literals[op] = true
 				}
 			}
-		}
-	}
-	// Also check return values - if function returns a string_literal directly
-	for blk_id in func.blocks {
-		blk := g.mod.blocks[blk_id]
-		for val_id in blk.instrs {
-			val := g.mod.values[val_id]
-			if val.kind == .instruction {
-				instr := g.mod.instrs[val.index]
-				if instr.op == .ret && instr.operands.len > 0 {
-					ret_val := g.mod.values[instr.operands[0]]
-					if ret_val.kind == .string_literal {
-						used_string_literals[instr.operands[0]] = true
-					}
+			// Also check return values - if function returns a string_literal directly
+			if instr.op == .ret && instr.operands.len > 0 {
+				ret_val := g.mod.values[instr.operands[0]]
+				if ret_val.kind == .string_literal {
+					used_string_literals[instr.operands[0]] = true
 				}
 			}
 		}
@@ -591,9 +746,6 @@ fn (mut g Gen) gen_func(func mir.Function) {
 				}
 			}
 
-			if val_id in g.reg_map {
-				continue
-			}
 			// Assign slot for result of instruction (or pointer for alloca)
 			g.stack_map[val_id] = -slot_offset
 			slot_offset += 8
@@ -722,6 +874,11 @@ fn (mut g Gen) gen_func(func mir.Function) {
 
 	g.emit_sub_sp(g.stack_size)
 
+	// Compute sp_base_offset for sp-relative addressing.
+	// sp = fp - callee_saved_size - stack_size, so fp - N = sp + (sp_base_offset + N).
+	g.sp_base_offset = callee_saved_size + g.stack_size
+	g.sp_adjusted = false
+
 	// Save x8 if this function returns a large struct
 	// x8 contains the indirect return pointer from the caller
 	// Save it at a fixed offset from fp (below callee-saved registers)
@@ -761,11 +918,10 @@ fn (mut g Gen) gen_func(func mir.Function) {
 			if float_reg_idx < 8 {
 				// fmov xN, dN to get float bits into integer register
 				g.emit(asm_fmov_x_d(Reg(9), float_reg_idx))
-				if reg := g.reg_map[pid] {
-					g.emit_mov_reg(reg, 9)
-				} else {
-					offset := g.stack_map[pid]
-					g.emit_str_reg_offset(9, 29, offset)
+				offset := g.stack_map[pid]
+				g.emit_str_reg_offset(9, 29, offset)
+				if pid in g.reg_map {
+					g.emit_mov_reg(g.reg_map[pid], 9)
 				}
 			}
 			float_reg_idx++
@@ -793,8 +949,8 @@ fn (mut g Gen) gen_func(func mir.Function) {
 			}
 			// Large/indirect params are represented as addresses in registers.
 			// Materialize the local spill address for any register-allocated uses.
-			if reg := g.reg_map[pid] {
-				g.emit_add_fp_imm(reg, offset)
+			if pid in g.reg_map {
+				g.emit_add_fp_imm(g.reg_map[pid], offset)
 			}
 			reg_idx += 1
 		} else if param_type_info.kind == .struct_t && param_size > 8 {
@@ -814,11 +970,14 @@ fn (mut g Gen) gen_func(func mir.Function) {
 					g.emit_str_reg_offset(cur_reg, 29, offset + ri * 8)
 				}
 			}
-			if reg := g.reg_map[pid] {
-				g.emit_add_fp_imm(reg, offset)
+			if pid in g.reg_map {
+				g.emit_add_fp_imm(g.reg_map[pid], offset)
 			}
 			reg_idx += num_regs
-		} else if reg := g.reg_map[pid] {
+		} else if pid in g.reg_map {
+			reg := g.reg_map[pid]
+			offset := g.stack_map[pid]
+			g.emit_str_reg_offset(src_reg, 29, offset)
 			if reg != src_reg {
 				g.emit_mov_reg(reg, src_reg)
 			}
@@ -853,6 +1012,7 @@ fn (mut g Gen) gen_func(func mir.Function) {
 	for i := 0; i < func.blocks.len; i++ {
 		blk_id := int(func.blocks[i])
 		g.next_blk = if i + 1 < func.blocks.len { int(func.blocks[i + 1]) } else { -1 }
+		g.cur_blk_id = blk_id
 		blk := g.mod.blocks[blk_id]
 		g.block_offsets[blk_id] = g.macho.text_data.len - g.curr_offset
 
@@ -918,7 +1078,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 	match op {
 		.fadd, .fsub, .fmul, .fdiv, .frem {
 			// Float operations using scalar SIMD instructions (d0-d7)
-			dest_reg := if r := g.reg_map[val_id] { r } else { 8 }
+			dest_reg := g.get_dest_reg(val_id)
 
 			// For now, load operands as float constants or from memory
 			// Load LHS to d0
@@ -954,13 +1114,11 @@ fn (mut g Gen) gen_instr(val_id int) {
 			// Store the float bits in the result (for later int() conversion)
 			g.emit(asm_fmov_x_d(Reg(dest_reg), 0))
 
-			if val_id !in g.reg_map {
-				g.store_reg_to_val(dest_reg, val_id)
-			}
+			g.store_reg_to_val(dest_reg, val_id)
 		}
 		.fptosi {
 			// Float to signed integer conversion
-			dest_reg := if r := g.reg_map[val_id] { r } else { 8 }
+			dest_reg := g.get_dest_reg(val_id)
 
 			// Load float operand to d0
 			g.load_float_operand(instr.operands[0], 0)
@@ -968,13 +1126,11 @@ fn (mut g Gen) gen_instr(val_id int) {
 			// FCVTZS Xd, Dn (convert to signed int, truncate toward zero)
 			g.emit(asm_fcvtzs_x_d(Reg(dest_reg), 0))
 
-			if val_id !in g.reg_map {
-				g.store_reg_to_val(dest_reg, val_id)
-			}
+			g.store_reg_to_val(dest_reg, val_id)
 		}
 		.sitofp {
 			// Signed integer to float conversion
-			dest_reg := if r := g.reg_map[val_id] { r } else { 8 }
+			dest_reg := g.get_dest_reg(val_id)
 
 			// Load integer operand to x8
 			src_reg := g.get_operand_reg(instr.operands[0], 8)
@@ -997,13 +1153,11 @@ fn (mut g Gen) gen_instr(val_id int) {
 				g.emit(asm_fmov_x_d(Reg(dest_reg), 0))
 			}
 
-			if val_id !in g.reg_map {
-				g.store_reg_to_val(dest_reg, val_id)
-			}
+			g.store_reg_to_val(dest_reg, val_id)
 		}
 		.uitofp {
 			// Unsigned integer to float conversion
-			dest_reg := if r := g.reg_map[val_id] { r } else { 8 }
+			dest_reg := g.get_dest_reg(val_id)
 
 			// Load integer operand to x8
 			src_reg := g.get_operand_reg(instr.operands[0], 8)
@@ -1026,13 +1180,11 @@ fn (mut g Gen) gen_instr(val_id int) {
 				g.emit(asm_fmov_x_d(Reg(dest_reg), 0))
 			}
 
-			if val_id !in g.reg_map {
-				g.store_reg_to_val(dest_reg, val_id)
-			}
+			g.store_reg_to_val(dest_reg, val_id)
 		}
 		.fptoui {
 			// Float to unsigned integer conversion
-			dest_reg := if r := g.reg_map[val_id] { r } else { 8 }
+			dest_reg := g.get_dest_reg(val_id)
 
 			// Load float operand to d0
 			g.load_float_operand(instr.operands[0], 0)
@@ -1040,15 +1192,13 @@ fn (mut g Gen) gen_instr(val_id int) {
 			// FCVTZU Xd, Dn (convert to unsigned int, truncate toward zero)
 			g.emit(asm_fcvtzu_x_d(Reg(dest_reg), 0))
 
-			if val_id !in g.reg_map {
-				g.store_reg_to_val(dest_reg, val_id)
-			}
+			g.store_reg_to_val(dest_reg, val_id)
 		}
 		.add, .sub, .mul, .sdiv, .udiv, .srem, .urem, .and_, .or_, .xor, .shl, .ashr, .lshr, .eq,
 		.ne, .lt, .gt, .le, .ge, .ult, .ugt, .ule, .uge {
 			// Optimization: Use actual registers if allocated, avoid shuffling to x8/x9
 			// Dest register
-			dest_reg := if r := g.reg_map[val_id] { r } else { 8 }
+			dest_reg := g.get_dest_reg(val_id)
 
 			// Op0 (LHS)
 			lhs_reg := g.get_operand_reg(instr.operands[0], 8)
@@ -1222,10 +1372,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 				}
 			}
 			// If dest_reg was not the allocated one (e.g. was 8), move it.
-			// Only if spilled (not in reg_map) do we need to store.
-			if val_id !in g.reg_map {
-				g.store_reg_to_val(dest_reg, val_id)
-			}
+			g.store_reg_to_val(dest_reg, val_id)
 		}
 		.store {
 			src_id := instr.operands[0]
@@ -1608,13 +1755,11 @@ fn (mut g Gen) gen_instr(val_id int) {
 			}
 		}
 		.load {
-			dest_reg := if r := g.reg_map[val_id] { r } else { 8 }
+			dest_reg := g.get_dest_reg(val_id)
 			ptr_id := instr.operands[0]
 			trace_load := g.env_trace_load.len > 0
 				&& (g.env_trace_load == '*' || g.cur_func_name == g.env_trace_load)
 			mut loaded_into_aggregate_slot := false
-			mut force_spill_small_struct := false
-			mut handled_sumtype_data_word_load := false
 			mut ptr_is_null_const := false
 			// ValueID 0 is the SSA null/invalid sentinel.
 			if ptr_id <= 0 || ptr_id >= g.mod.values.len {
@@ -1624,7 +1769,6 @@ fn (mut g Gen) gen_instr(val_id int) {
 					eprintln('ARM64 LOAD fn=${g.cur_func_name} val=${val_id} ptr=${ptr_id} sumtype_data_word=${data_word_id}')
 				}
 				g.load_val_to_reg(dest_reg, data_word_id)
-				handled_sumtype_data_word_load = true
 			} else {
 				ptr_is_null_const = g.is_effective_null_pointer_value(ptr_id)
 				ptr_reg := g.get_operand_reg(ptr_id, 9)
@@ -1776,9 +1920,6 @@ fn (mut g Gen) gen_instr(val_id int) {
 								else { g.emit(asm_ldr(Reg(dest_reg), Reg(ptr_reg))) }
 							}
 						}
-						if result_typ.kind == .struct_t && result_size <= 8 && val_id in g.stack_map {
-							force_spill_small_struct = true
-						}
 					}
 				} else {
 					if ptr_is_null_const {
@@ -1789,8 +1930,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 				}
 			}
 
-			if !loaded_into_aggregate_slot && (handled_sumtype_data_word_load
-				|| val_id !in g.reg_map || force_spill_small_struct) {
+			if !loaded_into_aggregate_slot {
 				g.store_reg_to_val(dest_reg, val_id)
 			}
 		}
@@ -1822,6 +1962,23 @@ fn (mut g Gen) gen_instr(val_id int) {
 			} else {
 				data_off := g.alloca_offsets[val_id]
 				g.emit_add_fp_imm(8, data_off)
+				// Zero-initialize large fixed array allocas.
+				// The SSA builder skips element-by-element zero-init for arrays > 16 elements,
+				// so the codegen must bulk-zero them here.
+				alloca_val := g.mod.values[val_id]
+				if alloca_val.typ > 0 && alloca_val.typ < g.mod.type_store.types.len {
+					alloca_ptr_type := g.mod.type_store.types[alloca_val.typ]
+					if alloca_ptr_type.kind == .ptr_t && alloca_ptr_type.elem_type > 0
+						&& alloca_ptr_type.elem_type < g.mod.type_store.types.len {
+						elem_typ := g.mod.type_store.types[alloca_ptr_type.elem_type]
+						if elem_typ.kind == .array_t && elem_typ.len > 16 {
+							arr_size := g.type_size(alloca_ptr_type.elem_type)
+							if arr_size > 0 {
+								g.zero_ptr_bytes(8, arr_size)
+							}
+						}
+					}
+				}
 				g.store_reg_to_val(8, val_id)
 			}
 		}
@@ -2006,6 +2163,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 					// Allocate stack space for variadic args (8 bytes each, 16-byte aligned)
 					stack_space := ((num_variadic * 8) + 15) & ~0xF
 					if stack_space > 0 {
+						g.sp_adjusted = true
 						g.emit_sub_sp(stack_space)
 					}
 
@@ -2042,6 +2200,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 							g.emit_mov_imm(10, u64(stack_space))
 							g.emit(asm_add_sp_reg(Reg(10)))
 						}
+						g.sp_adjusted = false
 					}
 				} else {
 					// Non-variadic call:
@@ -2083,6 +2242,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 					total_stack_slots := num_int_stack + num_float_stack
 					stack_space := ((total_stack_slots * 8) + 15) & ~0xF
 					if stack_space > 0 {
+						g.sp_adjusted = true
 						g.emit_sub_sp(stack_space)
 						mut stack_idx := 0
 						for a in 0 .. num_args {
@@ -2166,6 +2326,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 							g.emit_mov_imm(10, u64(stack_space))
 							g.emit(asm_add_sp_reg(Reg(10)))
 						}
+						g.sp_adjusted = false
 					}
 				}
 
@@ -2255,6 +2416,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 			}
 			stack_space := ((num_stack_slots * 8) + 15) & ~0xF
 			if stack_space > 0 {
+				g.sp_adjusted = true
 				g.emit_sub_sp(stack_space)
 				mut stack_idx := 0
 				for a in 0 .. num_args {
@@ -2313,6 +2475,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 					g.emit_mov_imm(10, u64(stack_space))
 					g.emit(asm_add_sp_reg(Reg(10)))
 				}
+				g.sp_adjusted = false
 			}
 
 			ci_result_typ_id := g.mod.values[val_id].typ
@@ -2370,6 +2533,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 			}
 			stack_space := ((sr_num_stack_slots * 8) + 15) & ~0xF
 			if stack_space > 0 {
+				g.sp_adjusted = true
 				g.emit_sub_sp(stack_space)
 				mut stack_idx := 0
 				for a in 0 .. num_args {
@@ -2433,6 +2597,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 					g.emit_mov_imm(10, u64(stack_space))
 					g.emit(asm_add_sp_reg(Reg(10)))
 				}
+				g.sp_adjusted = false
 			}
 		}
 		.ret {
@@ -2704,6 +2869,9 @@ fn (mut g Gen) gen_instr(val_id int) {
 				g.mod.values[target_blk].index
 			}
 
+			// Emit phi copies for the target block before branching
+			g.emit_phi_copies(target_idx)
+
 			// Fallthrough optimization: Don't jump if target is next block
 			if target_idx != g.next_blk {
 				if target_idx >= 0 && target_idx < g.block_offsets.len
@@ -2749,37 +2917,82 @@ fn (mut g Gen) gen_instr(val_id int) {
 				g.mod.values[instr.operands[2]].index
 			}
 
-			// Fallthrough optimization for False block
-			// If false block is next, we only need CBNZ to true block
+			has_phis := g.block_has_phis(true_blk) || g.block_has_phis(false_blk)
+			if has_phis {
+				// When target blocks have phi nodes (e.g. -O0 mode), we must emit
+				// phi copies on each branch path separately. Structure:
+				//   CBZ x8, false_path
+				//   <true phi copies>
+				//   B true_blk
+				//   false_path:
+				//   <false phi copies>
+				//   B false_blk (or fall-through)
+				cbz_off := g.macho.text_data.len - g.curr_offset
+				g.emit(asm_cbz(Reg(8), 0)) // placeholder, will patch
 
-			if true_blk >= 0 && true_blk < g.block_offsets.len && g.block_offsets[true_blk] != -1 {
-				off := g.block_offsets[true_blk]
-				rel := (off - (g.macho.text_data.len - g.curr_offset)) / 4
-				if rel >= -262144 && rel < 262144 {
-					g.emit(asm_cbnz(Reg(8), rel))
-				} else {
-					// Branch target too far for CBNZ (19-bit range).
-					// Use trampoline: CBZ skip; B target; skip:
-					g.emit(asm_cbz(Reg(8), 2)) // skip over next B instruction
-					g.emit(asm_b(rel - 1)) // adjust for the extra CBZ instruction
-				}
-			} else {
-				// Forward reference: use trampoline pattern to avoid 19-bit overflow.
-				// CBZ x8, skip; B target; skip:
-				g.emit(asm_cbz(Reg(8), 2)) // skip over next B instruction
-				g.record_pending_label(true_blk)
-				g.emit(asm_b(0))
-			}
-
-			if false_blk != g.next_blk {
-				if false_blk >= 0 && false_blk < g.block_offsets.len
-					&& g.block_offsets[false_blk] != -1 {
-					off := g.block_offsets[false_blk]
+				// True path: emit phi copies then branch to true block
+				g.emit_phi_copies(true_blk)
+				if true_blk >= 0 && true_blk < g.block_offsets.len
+					&& g.block_offsets[true_blk] != -1 {
+					off := g.block_offsets[true_blk]
 					rel := (off - (g.macho.text_data.len - g.curr_offset)) / 4
 					g.emit(asm_b(rel))
 				} else {
-					g.record_pending_label(false_blk)
+					g.record_pending_label(true_blk)
 					g.emit(asm_b(0))
+				}
+
+				// Patch CBZ to jump here (false path)
+				false_path_off := g.macho.text_data.len - g.curr_offset
+				cbz_rel := (false_path_off - cbz_off) / 4
+				cbz_abs := g.curr_offset + cbz_off
+				g.write_u32(cbz_abs, asm_cbz(Reg(8), cbz_rel))
+
+				// False path: emit phi copies then branch to false block
+				g.emit_phi_copies(false_blk)
+				if false_blk != g.next_blk {
+					if false_blk >= 0 && false_blk < g.block_offsets.len
+						&& g.block_offsets[false_blk] != -1 {
+						off := g.block_offsets[false_blk]
+						rel := (off - (g.macho.text_data.len - g.curr_offset)) / 4
+						g.emit(asm_b(rel))
+					} else {
+						g.record_pending_label(false_blk)
+						g.emit(asm_b(0))
+					}
+				}
+			} else {
+				// No phi nodes — use efficient branch pattern
+				if true_blk >= 0 && true_blk < g.block_offsets.len
+					&& g.block_offsets[true_blk] != -1 {
+					off := g.block_offsets[true_blk]
+					rel := (off - (g.macho.text_data.len - g.curr_offset)) / 4
+					if rel >= -262144 && rel < 262144 {
+						g.emit(asm_cbnz(Reg(8), rel))
+					} else {
+						// Branch target too far for CBNZ (19-bit range).
+						// Use trampoline: CBZ skip; B target; skip:
+						g.emit(asm_cbz(Reg(8), 2)) // skip over next B instruction
+						g.emit(asm_b(rel - 1)) // adjust for the extra CBZ instruction
+					}
+				} else {
+					// Forward reference: use trampoline pattern to avoid 19-bit overflow.
+					// CBZ x8, skip; B target; skip:
+					g.emit(asm_cbz(Reg(8), 2)) // skip over next B instruction
+					g.record_pending_label(true_blk)
+					g.emit(asm_b(0))
+				}
+
+				if false_blk != g.next_blk {
+					if false_blk >= 0 && false_blk < g.block_offsets.len
+						&& g.block_offsets[false_blk] != -1 {
+						off := g.block_offsets[false_blk]
+						rel := (off - (g.macho.text_data.len - g.curr_offset)) / 4
+						g.emit(asm_b(rel))
+					} else {
+						g.record_pending_label(false_blk)
+						g.emit(asm_b(0))
+					}
 				}
 			}
 		}
@@ -2826,6 +3039,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 			} else {
 				g.mod.values[def_blk_val].index
 			}
+			g.emit_phi_copies(def_idx)
 			if def_idx >= 0 && def_idx < g.block_offsets.len && g.block_offsets[def_idx] != -1 {
 				off := g.block_offsets[def_idx]
 				rel := (off - (g.macho.text_data.len - g.curr_offset)) / 4
@@ -2845,7 +3059,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 					&& g.mod.values[val_id].typ < g.mod.type_store.types.len
 					&& g.mod.type_store.types[g.mod.values[val_id].typ].kind == .float_t
 				if src_is_float && dst_is_float {
-					dest_reg := if r := g.reg_map[val_id] { r } else { 8 }
+					dest_reg := g.get_dest_reg(val_id)
 					if instr.op == .trunc {
 						// f64 → f32: load f64 into d0, convert to s0, move bits to int reg
 						g.load_float_operand(instr.operands[0], 0)
@@ -2856,9 +3070,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 						g.load_float_operand(instr.operands[0], 0)
 						g.emit(asm_fmov_x_d(Reg(dest_reg), 0))
 					}
-					if val_id !in g.reg_map {
-						g.store_reg_to_val(dest_reg, val_id)
-					}
+					g.store_reg_to_val(dest_reg, val_id)
 				} else {
 					// Integer conversions: just copy (registers are 64-bit)
 					g.load_val_to_reg(8, instr.operands[0])
@@ -2947,8 +3159,8 @@ fn (mut g Gen) gen_instr(val_id int) {
 											}
 											if can_reinterpret_ptr {
 												src_is_null_ptr = g.is_effective_null_pointer_value(src_id)
-												if src_reg := g.reg_map[src_id] {
-													src_ptr_reg = src_reg
+												if src_id in g.reg_map {
+													src_ptr_reg = g.reg_map[src_id]
 												} else if src_off := g.stack_map[src_id] {
 													g.emit_ldr_reg_offset(src_ptr_reg,
 														29, src_off)
@@ -2974,9 +3186,9 @@ fn (mut g Gen) gen_instr(val_id int) {
 											g.emit_add_fp_imm(src_ptr_reg, src_off)
 										}
 										can_copy = true
-									} else if src_reg := g.reg_map[src_id] {
+									} else if src_id in g.reg_map {
 										if src_is_ptr_carried {
-											src_ptr_reg = src_reg
+											src_ptr_reg = g.reg_map[src_id]
 											can_copy = true
 										}
 									} else if src_id > 0 && src_id < g.mod.values.len {
@@ -3125,8 +3337,8 @@ fn (mut g Gen) gen_instr(val_id int) {
 										}
 										if can_use_ptr_source {
 											src_is_null_ptr = g.is_effective_null_pointer_value(src_id)
-											if src_reg := g.reg_map[src_id] {
-												src_ptr_reg = src_reg
+											if src_id in g.reg_map {
+												src_ptr_reg = g.reg_map[src_id]
 											} else if src_off := g.stack_map[src_id] {
 												g.emit_ldr_reg_offset(src_ptr_reg, 29,
 													src_off)
@@ -3157,9 +3369,9 @@ fn (mut g Gen) gen_instr(val_id int) {
 										g.emit_add_fp_imm(src_ptr_reg, src_off)
 									}
 									can_copy = true
-								} else if src_reg := g.reg_map[src_id] {
+								} else if src_id in g.reg_map {
 									if src_is_ptr_carried {
-										src_ptr_reg = src_reg
+										src_ptr_reg = g.reg_map[src_id]
 										can_copy = true
 									}
 								} else if src_id > 0 && src_id < g.mod.values.len {
@@ -3787,7 +3999,8 @@ fn (mut g Gen) gen_instr(val_id int) {
 						g.emit_ldr_reg_offset(8, 29, field_offset)
 						g.store_reg_to_val(8, val_id)
 					}
-				} else if reg := g.reg_map[tuple_id] {
+				} else if tuple_id in g.reg_map {
+					reg := g.reg_map[tuple_id]
 					// Large aggregates in registers are represented by their address.
 					if tuple_is_large_agg && idx >= 0 {
 						if field_elem_size > 8 {
@@ -3987,10 +4200,11 @@ fn (mut g Gen) gen_instr(val_id int) {
 							g.emit_str_reg_offset(10, 29, result_offset + field_off + w * 8)
 						}
 						copied_field = true
-					} else if src_reg := g.reg_map[field_id] {
+					} else if field_id in g.reg_map {
+						field_reg := g.reg_map[field_id]
 						if src_ptr_matches_field || src_is_ptr_carried {
 							for w in 0 .. copy_chunks {
-								g.emit(asm_ldr_imm(Reg(10), Reg(src_reg), u32(w)))
+								g.emit(asm_ldr_imm(Reg(10), Reg(field_reg), u32(w)))
 								g.emit_str_reg_offset(10, 29, result_offset + field_off + w * 8)
 							}
 							copied_field = true
@@ -4077,9 +4291,10 @@ fn (mut g Gen) gen_instr(val_id int) {
 						}
 					}
 					copied_tuple = true
-				} else if src_reg := g.reg_map[tuple_id] {
+				} else if tuple_id in g.reg_map {
+					tuple_reg := g.reg_map[tuple_id]
 					for i in 0 .. num_chunks {
-						g.emit(asm_ldr_imm(Reg(9), Reg(src_reg), u32(i)))
+						g.emit(asm_ldr_imm(Reg(9), Reg(tuple_reg), u32(i)))
 						g.emit_str_reg_offset(9, 29, result_offset + i * 8)
 					}
 					copied_tuple = true
@@ -4185,10 +4400,11 @@ fn (mut g Gen) gen_instr(val_id int) {
 						g.emit_str_reg_offset(10, 29, result_offset + elem_off + i * 8)
 					}
 					copied_elem = true
-				} else if src_reg := g.reg_map[elem_id] {
+				} else if elem_id in g.reg_map {
+					elem_reg := g.reg_map[elem_id]
 					if src_ptr_matches_elem || src_is_ptr_carried {
 						for i in 0 .. copy_chunks {
-							g.emit(asm_ldr_imm(Reg(10), Reg(src_reg), u32(i)))
+							g.emit(asm_ldr_imm(Reg(10), Reg(elem_reg), u32(i)))
 							g.emit_str_reg_offset(10, 29, result_offset + elem_off + i * 8)
 						}
 						copied_elem = true
@@ -4635,10 +4851,23 @@ fn (g &Gen) scalar_value_is_pointer_payload(val_id int, depth int) bool {
 	return false
 }
 
+fn (mut g Gen) get_dest_reg(val_id int) int {
+	if val_id in g.reg_map {
+		r := g.reg_map[val_id]
+		if r != 0xFF {
+			return r
+		}
+	}
+	return 8
+}
+
 fn (mut g Gen) get_operand_reg(val_id int, fallback int) int {
 	// If value is in a register, return it
-	if r := g.reg_map[val_id] {
-		return r
+	if val_id in g.reg_map {
+		r := g.reg_map[val_id]
+		if r != 0xFF {
+			return r
+		}
 	}
 	// Otherwise load it into fallback
 	g.load_val_to_reg(fallback, val_id)
@@ -5212,6 +5441,15 @@ fn (mut g Gen) get_const_int(val_id int) i64 {
 }
 
 fn (mut g Gen) load_val_to_reg(reg int, val_id int) {
+	if val_id in g.reg_map {
+		r := g.reg_map[val_id]
+		if r != 0xFF {
+			if r != reg {
+				g.emit_mov_reg(reg, r)
+			}
+			return
+		}
+	}
 	if val_id <= 0 || val_id >= g.mod.values.len {
 		g.emit_mov_imm64(reg, 0)
 		return
@@ -5422,7 +5660,8 @@ fn (mut g Gen) load_val_to_reg(reg int, val_id int) {
 			// Large structs/arrays can be materialized either by-value (slot contains bytes)
 			// or indirectly (slot contains a pointer to bytes). Preserve the producer's
 			// representation when loading from stack.
-			if reg_idx := g.reg_map[val_id] {
+			if val_id in g.reg_map {
+				reg_idx := g.reg_map[val_id]
 				if reg_idx != reg {
 					g.emit_mov_reg(reg, reg_idx)
 				}
@@ -5438,7 +5677,8 @@ fn (mut g Gen) load_val_to_reg(reg int, val_id int) {
 			} else {
 				g.emit_mov_imm64(reg, 0)
 			}
-		} else if reg_idx := g.reg_map[val_id] {
+		} else if val_id in g.reg_map {
+			reg_idx := g.reg_map[val_id]
 			if reg_idx != reg {
 				g.emit_mov_reg(reg, reg_idx)
 			}
@@ -5467,7 +5707,8 @@ fn (mut g Gen) load_fnptr_to_reg(reg int, val_id int) {
 		g.load_val_to_reg(reg, val_id)
 		return
 	}
-	if reg_idx := g.reg_map[val_id] {
+	if val_id in g.reg_map {
+		reg_idx := g.reg_map[val_id]
 		if reg_idx != reg {
 			g.emit_mov_reg(reg, reg_idx)
 		}
@@ -5484,11 +5725,14 @@ fn (mut g Gen) store_reg_to_val(reg int, val_id int) {
 	mut stored_reg := reg
 	trace_storeval := g.env_trace_storeval.len > 0
 		&& (g.env_trace_storeval == '*' || g.cur_func_name == g.env_trace_storeval)
-	if reg_idx := g.reg_map[val_id] {
-		if reg_idx != reg {
-			g.emit_mov_reg(reg_idx, reg)
+	if val_id in g.reg_map {
+		reg_idx := g.reg_map[val_id]
+		if reg_idx != 0xFF {
+			if reg_idx != reg {
+				g.emit_mov_reg(reg_idx, reg)
+			}
+			stored_reg = reg_idx
 		}
-		stored_reg = reg_idx
 	}
 	if offset := g.stack_map[val_id] {
 		if val_id > 0 && val_id < g.mod.values.len {
@@ -5513,9 +5757,9 @@ fn (mut g Gen) store_reg_to_val(reg int, val_id int) {
 				}
 			}
 		}
-		if val_id !in g.reg_map {
-			g.emit_str_reg_offset(stored_reg, 29, offset)
-		}
+		// Always store to stack even when value is register-allocated,
+		// to ensure correctness with the block-local interval approximation.
+		g.emit_str_reg_offset(stored_reg, 29, offset)
 	}
 }
 
@@ -5572,8 +5816,103 @@ fn (mut g Gen) emit_sub_sp(imm int) {
 	}
 }
 
+// block_has_phis returns true if the given block contains any phi instructions.
+fn (g Gen) block_has_phis(blk_id int) bool {
+	if blk_id < 0 || blk_id >= g.mod.blocks.len {
+		return false
+	}
+	blk := g.mod.blocks[blk_id]
+	for vid in blk.instrs {
+		v := g.mod.values[vid]
+		if v.kind != .instruction {
+			continue
+		}
+		if g.mod.instrs[v.index].op == .phi {
+			return true
+		}
+	}
+	return false
+}
+
+// emit_phi_copies emits register/stack copies for phi nodes in the target block.
+// Called before jmp/br to ensure phi values from the current predecessor block
+// are written to the phi output slots. In -O0 mode, phi nodes are not eliminated
+// by the optimizer, so the codegen must lower them directly.
+fn (mut g Gen) emit_phi_copies(target_blk_id int) {
+	if target_blk_id < 0 || target_blk_id >= g.mod.blocks.len {
+		return
+	}
+	target_blk := g.mod.blocks[target_blk_id]
+	cur_blk_id := g.cur_blk_id
+
+	for phi_val_id in target_blk.instrs {
+		phi_val := g.mod.values[phi_val_id]
+		if phi_val.kind != .instruction {
+			continue
+		}
+		phi_instr := g.mod.instrs[phi_val.index]
+		if phi_instr.op != .phi {
+			continue
+		}
+		// Phi operands are [value, block, value, block, ...]
+		// Find the operand pair matching our current block
+		for pi := 0; pi + 1 < phi_instr.operands.len; pi += 2 {
+			src_val_id := phi_instr.operands[pi]
+			blk_val_id := phi_instr.operands[pi + 1]
+			src_blk := if blk_val_id >= 0 && blk_val_id < g.val_to_block.len {
+				g.val_to_block[blk_val_id]
+			} else {
+				g.mod.values[blk_val_id].index
+			}
+			if src_blk != cur_blk_id {
+				continue
+			}
+			// Copy src_val_id → phi_val_id slot
+			phi_size := g.type_size(phi_val.typ)
+			if phi_size > 8 {
+				// Aggregate copy: load source address, copy bytes to dest slot
+				if src_off := g.stack_map[src_val_id] {
+					g.emit_add_fp_imm(9, src_off)
+					if dst_off := g.stack_map[phi_val_id] {
+						g.copy_ptr_to_fp_bytes(9, dst_off, phi_size)
+					}
+				}
+			} else {
+				g.load_val_to_reg(8, src_val_id)
+				g.store_reg_to_val(8, phi_val_id)
+			}
+			break
+		}
+	}
+}
+
 fn (mut g Gen) emit_add_fp_imm(rd int, imm int) {
-	val := -imm
+	val := -imm // val is the positive distance below FP
+	// SP-relative: fp - val = sp + (sp_base_offset - val)
+	// Only use SP-relative when it produces fewer instructions than FP-relative.
+	if !g.sp_adjusted && g.sp_base_offset > 0 {
+		sp_off := g.sp_base_offset - val
+		if sp_off >= 0 {
+			if sp_off <= 0xFFF {
+				// 1 instruction (vs 1-2 for FP) — always better or equal
+				g.emit(asm_add_imm(Reg(rd), sp, u32(sp_off)))
+				return
+			}
+			// 2-instruction SP path: only use when FP would need 2+ instructions
+			if val > 0xFFF {
+				sp_high := (sp_off >> 12) & 0xFFF
+				sp_low := sp_off & 0xFFF
+				if sp_high > 0 && sp_high <= 0xFFF && sp_low == 0 {
+					// 1 instruction: add rd, sp, #high, lsl #12
+					g.emit(asm_add_imm_lsl12(Reg(rd), sp, u32(sp_high)))
+					return
+				}
+				// FP would need 2 instructions (sub_lsl12 + sub).
+				// SP 2-instruction path (add_lsl12 + add) is equal.
+				// Only bother if sp_off fits cleanly.
+			}
+		}
+	}
 	if val <= 0xFFF {
 		g.emit(asm_sub_imm(Reg(rd), fp, u32(val)))
 	} else if val <= 0xFFFFFF {
@@ -5596,32 +5935,177 @@ fn (mut g Gen) emit_str_reg_offset(rt int, rn int, offset int) {
 }
 
 fn (mut g Gen) emit_str_reg_offset_sized(rt int, rn int, offset int, size int) {
+	// SP-relative addressing: convert fp-relative negative offsets to sp-relative positive.
+	if rn == 29 && offset < -255 && !g.sp_adjusted && g.sp_base_offset > 0 {
+		sp_off := g.sp_base_offset + offset
+		if sp_off >= 0 {
+			// Try 1-instruction: unsigned scaled immediate
+			scaled := match size {
+				8 {
+					if sp_off % 8 == 0 && sp_off / 8 < 4096 { sp_off / 8 } else { -1 }
+				}
+				4 {
+					if sp_off % 4 == 0 && sp_off / 4 < 4096 { sp_off / 4 } else { -1 }
+				}
+				2 {
+					if sp_off % 2 == 0 && sp_off / 2 < 4096 { sp_off / 2 } else { -1 }
+				}
+				1 {
+					if sp_off < 4096 { sp_off } else { -1 }
+				}
+				else {
+					-1
+				}
+			}
+			if scaled >= 0 {
+				match size {
+					1 { g.emit(asm_str_imm_b(Reg(rt), sp, u32(scaled))) }
+					2 { g.emit(asm_str_imm_h(Reg(rt), sp, u32(scaled))) }
+					4 { g.emit(asm_str_imm_w(Reg(rt), sp, u32(scaled))) }
+					else { g.emit(asm_str_imm(Reg(rt), sp, u32(scaled))) }
+				}
+				return
+			}
+			// Try 2-instruction: add scratch, sp, #imm; str rt, [scratch]
+			// Better than 3-instruction FP-relative for large offsets
+			neg := -offset
+			if neg > 0xFFF && sp_off <= 0xFFFFFF {
+				mut scratch := 11
+				if rt == scratch {
+					scratch = 12
+				}
+				sp_high := (sp_off >> 12) & 0xFFF
+				sp_low := sp_off & 0xFFF
+				if sp_low == 0 {
+					g.emit(asm_add_imm_lsl12(Reg(scratch), sp, u32(sp_high)))
+					match size {
+						1 { g.emit(asm_str_b(Reg(rt), Reg(scratch))) }
+						2 { g.emit(asm_str_h(Reg(rt), Reg(scratch))) }
+						4 { g.emit(asm_str_w(Reg(rt), Reg(scratch))) }
+						else { g.emit(asm_str(Reg(rt), Reg(scratch))) }
+					}
+					return
+				}
+				if sp_high > 0 && sp_low <= 255 {
+					g.emit(asm_add_imm_lsl12(Reg(scratch), sp, u32(sp_high)))
+					match size {
+						1 { g.emit(asm_stur_b(Reg(rt), Reg(scratch), sp_low)) }
+						2 { g.emit(asm_stur_h(Reg(rt), Reg(scratch), sp_low)) }
+						4 { g.emit(asm_stur_w(Reg(rt), Reg(scratch), sp_low)) }
+						else { g.emit(asm_stur(Reg(rt), Reg(scratch), sp_low)) }
+					}
+					return
+				}
+			}
+		}
+	}
 	if offset >= -255 && offset <= 255 {
+		// Case 1: stur with signed 9-bit offset (1 instruction)
 		match size {
 			1 { g.emit(asm_stur_b(Reg(rt), Reg(rn), offset)) }
 			2 { g.emit(asm_stur_h(Reg(rt), Reg(rn), offset)) }
 			4 { g.emit(asm_stur_w(Reg(rt), Reg(rn), offset)) }
 			else { g.emit(asm_stur(Reg(rt), Reg(rn), offset)) }
 		}
+	} else if offset > 0 {
+		// Positive offset: try unsigned scaled immediate (1 instruction)
+		scaled := match size {
+			8 {
+				if offset % 8 == 0 && offset / 8 < 4096 { offset / 8 } else { -1 }
+			}
+			4 {
+				if offset % 4 == 0 && offset / 4 < 4096 { offset / 4 } else { -1 }
+			}
+			2 {
+				if offset % 2 == 0 && offset / 2 < 4096 { offset / 2 } else { -1 }
+			}
+			1 {
+				if offset < 4096 { offset } else { -1 }
+			}
+			else {
+				-1
+			}
+		}
+		if scaled >= 0 {
+			match size {
+				1 { g.emit(asm_str_imm_b(Reg(rt), Reg(rn), u32(scaled))) }
+				2 { g.emit(asm_str_imm_h(Reg(rt), Reg(rn), u32(scaled))) }
+				4 { g.emit(asm_str_imm_w(Reg(rt), Reg(rn), u32(scaled))) }
+				else { g.emit(asm_str_imm(Reg(rt), Reg(rn), u32(scaled))) }
+			}
+		} else {
+			g.emit_str_reg_offset_sized_large(rt, rn, offset, size)
+		}
 	} else {
-		// Large offset: materialize effective address in a non-conflicting scratch register.
+		// Negative offset > 255: use sub_imm + str (2 instructions)
+		neg := -offset
 		mut scratch := 11
 		if rt == scratch || rn == scratch {
 			scratch = 12
 		}
-		if offset < 0 {
-			g.emit_mov_imm64(scratch, i64(-offset))
-			g.emit(asm_sub_reg(Reg(scratch), Reg(rn), Reg(scratch)))
+		if neg <= 0xFFF {
+			// sub scratch, rn, #neg; str rt, [scratch]
+			g.emit(asm_sub_imm(Reg(scratch), Reg(rn), u32(neg)))
+			match size {
+				1 { g.emit(asm_str_b(Reg(rt), Reg(scratch))) }
+				2 { g.emit(asm_str_h(Reg(rt), Reg(scratch))) }
+				4 { g.emit(asm_str_w(Reg(rt), Reg(scratch))) }
+				else { g.emit(asm_str(Reg(rt), Reg(scratch))) }
+			}
+		} else if neg <= 0xFFFFFF {
+			// Split into high (shifted by 12) and low parts
+			// sub scratch, rn, #high, lsl #12; sub scratch, scratch, #low; str rt, [scratch]
+			// Or better: sub scratch, rn, #high, lsl #12; str rt, [scratch, #-low] if low fits stur
+			high := (neg >> 12) & 0xFFF
+			low := neg & 0xFFF
+			g.emit(asm_sub_imm_lsl12(Reg(scratch), Reg(rn), u32(high)))
+			if low == 0 {
+				match size {
+					1 { g.emit(asm_str_b(Reg(rt), Reg(scratch))) }
+					2 { g.emit(asm_str_h(Reg(rt), Reg(scratch))) }
+					4 { g.emit(asm_str_w(Reg(rt), Reg(scratch))) }
+					else { g.emit(asm_str(Reg(rt), Reg(scratch))) }
+				}
+			} else if low <= 255 {
+				// Use stur with small negative offset from scratch
+				match size {
+					1 { g.emit(asm_stur_b(Reg(rt), Reg(scratch), -low)) }
+					2 { g.emit(asm_stur_h(Reg(rt), Reg(scratch), -low)) }
+					4 { g.emit(asm_stur_w(Reg(rt), Reg(scratch), -low)) }
+					else { g.emit(asm_stur(Reg(rt), Reg(scratch), -low)) }
+				}
+			} else {
+				g.emit(asm_sub_imm(Reg(scratch), Reg(scratch), u32(low)))
+				match size {
+					1 { g.emit(asm_str_b(Reg(rt), Reg(scratch))) }
+					2 { g.emit(asm_str_h(Reg(rt), Reg(scratch))) }
+					4 { g.emit(asm_str_w(Reg(rt), Reg(scratch))) }
+					else { g.emit(asm_str(Reg(rt), Reg(scratch))) }
+				}
+			}
 		} else {
-			g.emit_mov_imm64(scratch, i64(offset))
-			g.emit(asm_add_reg(Reg(scratch), Reg(rn), Reg(scratch)))
+			g.emit_str_reg_offset_sized_large(rt, rn, offset, size)
 		}
-		match size {
-			1 { g.emit(asm_str_b(Reg(rt), Reg(scratch))) }
-			2 { g.emit(asm_str_h(Reg(rt), Reg(scratch))) }
-			4 { g.emit(asm_str_w(Reg(rt), Reg(scratch))) }
-			else { g.emit(asm_str(Reg(rt), Reg(scratch))) }
-		}
+	}
+}
+
+fn (mut g Gen) emit_str_reg_offset_sized_large(rt int, rn int, offset int, size int) {
+	mut scratch := 11
+	if rt == scratch || rn == scratch {
+		scratch = 12
+	}
+	if offset < 0 {
+		g.emit_mov_imm64(scratch, i64(-offset))
+		g.emit(asm_sub_reg(Reg(scratch), Reg(rn), Reg(scratch)))
+	} else {
+		g.emit_mov_imm64(scratch, i64(offset))
+		g.emit(asm_add_reg(Reg(scratch), Reg(rn), Reg(scratch)))
+	}
+	match size {
+		1 { g.emit(asm_str_b(Reg(rt), Reg(scratch))) }
+		2 { g.emit(asm_str_h(Reg(rt), Reg(scratch))) }
+		4 { g.emit(asm_str_w(Reg(rt), Reg(scratch))) }
+		else { g.emit(asm_str(Reg(rt), Reg(scratch))) }
 	}
 }
 
@@ -5630,32 +6114,173 @@ fn (mut g Gen) emit_ldr_reg_offset(rt int, rn int, offset int) {
 }
 
 fn (mut g Gen) emit_ldr_reg_offset_sized(rt int, rn int, offset int, size int) {
+	// SP-relative addressing: convert fp-relative negative offsets to sp-relative positive.
+	if rn == 29 && offset < -255 && !g.sp_adjusted && g.sp_base_offset > 0 {
+		sp_off := g.sp_base_offset + offset
+		if sp_off >= 0 {
+			// Try 1-instruction: unsigned scaled immediate
+			scaled := match size {
+				8 {
+					if sp_off % 8 == 0 && sp_off / 8 < 4096 { sp_off / 8 } else { -1 }
+				}
+				4 {
+					if sp_off % 4 == 0 && sp_off / 4 < 4096 { sp_off / 4 } else { -1 }
+				}
+				2 {
+					if sp_off % 2 == 0 && sp_off / 2 < 4096 { sp_off / 2 } else { -1 }
+				}
+				1 {
+					if sp_off < 4096 { sp_off } else { -1 }
+				}
+				else {
+					-1
+				}
+			}
+			if scaled >= 0 {
+				match size {
+					1 { g.emit(asm_ldr_imm_b(Reg(rt), sp, u32(scaled))) }
+					2 { g.emit(asm_ldr_imm_h(Reg(rt), sp, u32(scaled))) }
+					4 { g.emit(asm_ldr_imm_w(Reg(rt), sp, u32(scaled))) }
+					else { g.emit(asm_ldr_imm(Reg(rt), sp, u32(scaled))) }
+				}
+				return
+			}
+			// Try 2-instruction: add scratch, sp, #imm; ldr rt, [scratch]
+			// Better than 3-instruction FP-relative for large offsets
+			neg := -offset
+			if neg > 0xFFF && sp_off <= 0xFFFFFF {
+				mut scratch := 11
+				if rt == scratch {
+					scratch = 12
+				}
+				sp_high := (sp_off >> 12) & 0xFFF
+				sp_low := sp_off & 0xFFF
+				if sp_low == 0 {
+					g.emit(asm_add_imm_lsl12(Reg(scratch), sp, u32(sp_high)))
+					match size {
+						1 { g.emit(asm_ldr_b(Reg(rt), Reg(scratch))) }
+						2 { g.emit(asm_ldr_h(Reg(rt), Reg(scratch))) }
+						4 { g.emit(asm_ldr_w(Reg(rt), Reg(scratch))) }
+						else { g.emit(asm_ldr(Reg(rt), Reg(scratch))) }
+					}
+					return
+				}
+				if sp_high > 0 && sp_low <= 255 {
+					g.emit(asm_add_imm_lsl12(Reg(scratch), sp, u32(sp_high)))
+					match size {
+						1 { g.emit(asm_ldur_b(Reg(rt), Reg(scratch), sp_low)) }
+						2 { g.emit(asm_ldur_h(Reg(rt), Reg(scratch), sp_low)) }
+						4 { g.emit(asm_ldur_w(Reg(rt), Reg(scratch), sp_low)) }
+						else { g.emit(asm_ldur(Reg(rt), Reg(scratch), sp_low)) }
+					}
+					return
+				}
+			}
+		}
+	}
 	if offset >= -255 && offset <= 255 {
+		// Case 1: ldur with signed 9-bit offset (1 instruction)
 		match size {
 			1 { g.emit(asm_ldur_b(Reg(rt), Reg(rn), offset)) }
 			2 { g.emit(asm_ldur_h(Reg(rt), Reg(rn), offset)) }
 			4 { g.emit(asm_ldur_w(Reg(rt), Reg(rn), offset)) }
 			else { g.emit(asm_ldur(Reg(rt), Reg(rn), offset)) }
 		}
+	} else if offset > 0 {
+		// Positive offset: try unsigned scaled immediate (1 instruction)
+		scaled := match size {
+			8 {
+				if offset % 8 == 0 && offset / 8 < 4096 { offset / 8 } else { -1 }
+			}
+			4 {
+				if offset % 4 == 0 && offset / 4 < 4096 { offset / 4 } else { -1 }
+			}
+			2 {
+				if offset % 2 == 0 && offset / 2 < 4096 { offset / 2 } else { -1 }
+			}
+			1 {
+				if offset < 4096 { offset } else { -1 }
+			}
+			else {
+				-1
+			}
+		}
+		if scaled >= 0 {
+			match size {
+				1 { g.emit(asm_ldr_imm_b(Reg(rt), Reg(rn), u32(scaled))) }
+				2 { g.emit(asm_ldr_imm_h(Reg(rt), Reg(rn), u32(scaled))) }
+				4 { g.emit(asm_ldr_imm_w(Reg(rt), Reg(rn), u32(scaled))) }
+				else { g.emit(asm_ldr_imm(Reg(rt), Reg(rn), u32(scaled))) }
+			}
+		} else {
+			g.emit_ldr_reg_offset_sized_large(rt, rn, offset, size)
+		}
 	} else {
-		// Large offset: materialize effective address in a non-conflicting scratch register.
+		// Negative offset > 255: use sub_imm + ldr (2 instructions)
+		neg := -offset
 		mut scratch := 11
 		if rt == scratch || rn == scratch {
 			scratch = 12
 		}
-		if offset < 0 {
-			g.emit_mov_imm64(scratch, i64(-offset))
-			g.emit(asm_sub_reg(Reg(scratch), Reg(rn), Reg(scratch)))
+		if neg <= 0xFFF {
+			// sub scratch, rn, #neg; ldr rt, [scratch]
+			g.emit(asm_sub_imm(Reg(scratch), Reg(rn), u32(neg)))
+			match size {
+				1 { g.emit(asm_ldr_b(Reg(rt), Reg(scratch))) }
+				2 { g.emit(asm_ldr_h(Reg(rt), Reg(scratch))) }
+				4 { g.emit(asm_ldr_w(Reg(rt), Reg(scratch))) }
+				else { g.emit(asm_ldr(Reg(rt), Reg(scratch))) }
+			}
+		} else if neg <= 0xFFFFFF {
+			high := (neg >> 12) & 0xFFF
+			low := neg & 0xFFF
+			g.emit(asm_sub_imm_lsl12(Reg(scratch), Reg(rn), u32(high)))
+			if low == 0 {
+				match size {
+					1 { g.emit(asm_ldr_b(Reg(rt), Reg(scratch))) }
+					2 { g.emit(asm_ldr_h(Reg(rt), Reg(scratch))) }
+					4 { g.emit(asm_ldr_w(Reg(rt), Reg(scratch))) }
+					else { g.emit(asm_ldr(Reg(rt), Reg(scratch))) }
+				}
+			} else if low <= 255 {
+				match size {
+					1 { g.emit(asm_ldur_b(Reg(rt), Reg(scratch), -low)) }
+					2 { g.emit(asm_ldur_h(Reg(rt), Reg(scratch), -low)) }
+					4 { g.emit(asm_ldur_w(Reg(rt), Reg(scratch), -low)) }
+					else { g.emit(asm_ldur(Reg(rt), Reg(scratch), -low)) }
+				}
+			} else {
+				g.emit(asm_sub_imm(Reg(scratch), Reg(scratch), u32(low)))
+				match size {
+					1 { g.emit(asm_ldr_b(Reg(rt), Reg(scratch))) }
+					2 { g.emit(asm_ldr_h(Reg(rt), Reg(scratch))) }
+					4 { g.emit(asm_ldr_w(Reg(rt), Reg(scratch))) }
+					else { g.emit(asm_ldr(Reg(rt), Reg(scratch))) }
+				}
+			}
 		} else {
-			g.emit_mov_imm64(scratch, i64(offset))
-			g.emit(asm_add_reg(Reg(scratch), Reg(rn), Reg(scratch)))
+			g.emit_ldr_reg_offset_sized_large(rt, rn, offset, size)
 		}
-		match size {
-			1 { g.emit(asm_ldr_b(Reg(rt), Reg(scratch))) }
-			2 { g.emit(asm_ldr_h(Reg(rt), Reg(scratch))) }
-			4 { g.emit(asm_ldr_w(Reg(rt), Reg(scratch))) }
-			else { g.emit(asm_ldr(Reg(rt), Reg(scratch))) }
-		}
+	}
+}
+
+fn (mut g Gen) emit_ldr_reg_offset_sized_large(rt int, rn int, offset int, size int) {
+	mut scratch := 11
+	if rt == scratch || rn == scratch {
+		scratch = 12
+	}
+	if offset < 0 {
+		g.emit_mov_imm64(scratch, i64(-offset))
+		g.emit(asm_sub_reg(Reg(scratch), Reg(rn), Reg(scratch)))
+	} else {
+		g.emit_mov_imm64(scratch, i64(offset))
+		g.emit(asm_add_reg(Reg(scratch), Reg(rn), Reg(scratch)))
+	}
+	match size {
+		1 { g.emit(asm_ldr_b(Reg(rt), Reg(scratch))) }
+		2 { g.emit(asm_ldr_h(Reg(rt), Reg(scratch))) }
+		4 { g.emit(asm_ldr_w(Reg(rt), Reg(scratch))) }
+		else { g.emit(asm_ldr(Reg(rt), Reg(scratch))) }
 	}
 }
 
@@ -5663,22 +6288,32 @@ fn (mut g Gen) zero_fp_bytes(dst_off int, size int) {
 	if size <= 0 {
 		return
 	}
-	g.emit_mov_reg(10, 31)
+	// Use stp xzr, xzr for 16-byte chunks when offset is stp-compatible
 	mut off := 0
-	for off + 8 <= size {
-		g.emit_str_reg_offset_sized(10, 29, dst_off + off, 8)
+	for off + 16 <= size {
+		simm7 := (dst_off + off) / 8
+		if (dst_off + off) % 8 == 0 && simm7 >= -64 && simm7 < 64 {
+			g.emit(asm_stp_offset(Reg(31), Reg(31), fp, simm7))
+		} else {
+			g.emit_str_reg_offset_sized(31, 29, dst_off + off, 8)
+			g.emit_str_reg_offset_sized(31, 29, dst_off + off + 8, 8)
+		}
+		off += 16
+	}
+	if off + 8 <= size {
+		g.emit_str_reg_offset_sized(31, 29, dst_off + off, 8)
 		off += 8
 	}
 	if off + 4 <= size {
-		g.emit_str_reg_offset_sized(10, 29, dst_off + off, 4)
+		g.emit_str_reg_offset_sized(31, 29, dst_off + off, 4)
 		off += 4
 	}
 	if off + 2 <= size {
-		g.emit_str_reg_offset_sized(10, 29, dst_off + off, 2)
+		g.emit_str_reg_offset_sized(31, 29, dst_off + off, 2)
 		off += 2
 	}
 	if off < size {
-		g.emit_str_reg_offset_sized(10, 29, dst_off + off, 1)
+		g.emit_str_reg_offset_sized(31, 29, dst_off + off, 1)
 	}
 }
 
@@ -5698,7 +6333,23 @@ fn (mut g Gen) copy_ptr_to_fp_bytes(src_reg int, dst_off int, size int) {
 	br_zero_off := g.macho.text_data.len
 	g.emit(asm_b_cond(cond_eq, 0))
 	mut off := 0
-	for off + 8 <= size {
+	// Use ldp/stp pairs for 16-byte chunks
+	for off + 16 <= size {
+		src_simm7 := off / 8
+		dst_simm7 := (dst_off + off) / 8
+		if off % 8 == 0 && src_simm7 >= -64 && src_simm7 < 64 && (dst_off + off) % 8 == 0
+			&& dst_simm7 >= -64 && dst_simm7 < 64 {
+			g.emit(asm_ldp_offset(Reg(10), Reg(14), Reg(sreg), src_simm7))
+			g.emit(asm_stp_offset(Reg(10), Reg(14), fp, dst_simm7))
+		} else {
+			g.emit_ldr_reg_offset_sized(10, sreg, off, 8)
+			g.emit_str_reg_offset_sized(10, 29, dst_off + off, 8)
+			g.emit_ldr_reg_offset_sized(14, sreg, off + 8, 8)
+			g.emit_str_reg_offset_sized(14, 29, dst_off + off + 8, 8)
+		}
+		off += 16
+	}
+	if off + 8 <= size {
 		g.emit_ldr_reg_offset_sized(10, sreg, off, 8)
 		g.emit_str_reg_offset_sized(10, 29, dst_off + off, 8)
 		off += 8
@@ -5743,7 +6394,23 @@ fn (mut g Gen) copy_ptr_offset_to_fp_bytes(src_reg int, src_off int, dst_off int
 	br_zero_off := g.macho.text_data.len
 	g.emit(asm_b_cond(cond_eq, 0))
 	mut off := 0
-	for off + 8 <= size {
+	// Use ldp/stp pairs for 16-byte chunks
+	for off + 16 <= size {
+		src_simm7 := (src_off + off) / 8
+		dst_simm7 := (dst_off + off) / 8
+		if (src_off + off) % 8 == 0 && src_simm7 >= -64 && src_simm7 < 64
+			&& (dst_off + off) % 8 == 0 && dst_simm7 >= -64 && dst_simm7 < 64 {
+			g.emit(asm_ldp_offset(Reg(10), Reg(14), Reg(sreg), src_simm7))
+			g.emit(asm_stp_offset(Reg(10), Reg(14), fp, dst_simm7))
+		} else {
+			g.emit_ldr_reg_offset_sized(10, sreg, src_off + off, 8)
+			g.emit_str_reg_offset_sized(10, 29, dst_off + off, 8)
+			g.emit_ldr_reg_offset_sized(14, sreg, src_off + off + 8, 8)
+			g.emit_str_reg_offset_sized(14, 29, dst_off + off + 8, 8)
+		}
+		off += 16
+	}
+	if off + 8 <= size {
 		g.emit_ldr_reg_offset_sized(10, sreg, src_off + off, 8)
 		g.emit_str_reg_offset_sized(10, 29, dst_off + off, 8)
 		off += 8
@@ -5777,22 +6444,32 @@ fn (mut g Gen) zero_ptr_bytes(dst_reg int, size int) {
 	if size <= 0 {
 		return
 	}
-	g.emit_mov_reg(10, 31)
 	mut off := 0
-	for off + 8 <= size {
-		g.emit_str_reg_offset_sized(10, dst_reg, off, 8)
+	// Use stp xzr, xzr for 16-byte chunks
+	for off + 16 <= size {
+		simm7 := off / 8
+		if off % 8 == 0 && simm7 >= 0 && simm7 < 64 {
+			g.emit(asm_stp_offset(Reg(31), Reg(31), Reg(dst_reg), simm7))
+		} else {
+			g.emit_str_reg_offset_sized(31, dst_reg, off, 8)
+			g.emit_str_reg_offset_sized(31, dst_reg, off + 8, 8)
+		}
+		off += 16
+	}
+	if off + 8 <= size {
+		g.emit_str_reg_offset_sized(31, dst_reg, off, 8)
 		off += 8
 	}
 	if off + 4 <= size {
-		g.emit_str_reg_offset_sized(10, dst_reg, off, 4)
+		g.emit_str_reg_offset_sized(31, dst_reg, off, 4)
 		off += 4
 	}
 	if off + 2 <= size {
-		g.emit_str_reg_offset_sized(10, dst_reg, off, 2)
+		g.emit_str_reg_offset_sized(31, dst_reg, off, 2)
 		off += 2
 	}
 	if off < size {
-		g.emit_str_reg_offset_sized(10, dst_reg, off, 1)
+		g.emit_str_reg_offset_sized(31, dst_reg, off, 1)
 	}
 }
 
@@ -6392,16 +7069,16 @@ fn (mut g Gen) type_size(typ_id ssa.TypeID) int {
 	if typ_id < 0 || typ_id >= g.mod.type_store.types.len {
 		return 8
 	}
-	if typ_id in g.type_size_cache {
-		return g.type_size_cache[typ_id]
+	// Flat array cache: check if already computed (cached values are offset by +1, 0 = not cached)
+	if typ_id < g.type_size_cache.len && g.type_size_cache[typ_id] != 0 {
+		return g.type_size_cache[typ_id] - 1
 	}
-	if typ_id in g.type_size_stack {
+	if typ_id < g.type_size_stack.len && g.type_size_stack[typ_id] {
 		// Break recursive layout cycles (e.g. malformed self-referential aggregates).
 		return 8
 	}
-	g.type_size_stack[typ_id] = true
-	defer {
-		g.type_size_stack.delete(typ_id)
+	if typ_id < g.type_size_stack.len {
+		g.type_size_stack[typ_id] = true
 	}
 	typ := g.mod.type_store.types[typ_id]
 	mut size := 0
@@ -6463,7 +7140,13 @@ fn (mut g Gen) type_size(typ_id ssa.TypeID) int {
 			size = 0
 		}
 	}
-	g.type_size_cache[typ_id] = size
+	if typ_id < g.type_size_stack.len {
+		g.type_size_stack[typ_id] = false
+	}
+	// Store size+1 so that 0 means "not cached" (size 0 is valid for void/label/metadata)
+	if typ_id < g.type_size_cache.len {
+		g.type_size_cache[typ_id] = size + 1
+	}
 	return size
 }
 
@@ -6471,15 +7154,15 @@ fn (mut g Gen) type_align(typ_id ssa.TypeID) int {
 	if typ_id <= 0 || typ_id >= g.mod.type_store.types.len {
 		return if typ_id == 0 { 1 } else { 8 }
 	}
-	if typ_id in g.type_align_cache {
-		return g.type_align_cache[typ_id]
+	// Flat array cache: cached values stored as align+1, 0 = not cached
+	if typ_id < g.type_align_cache.len && g.type_align_cache[typ_id] != 0 {
+		return g.type_align_cache[typ_id] - 1
 	}
-	if typ_id in g.type_align_stack {
+	if typ_id < g.type_align_stack.len && g.type_align_stack[typ_id] {
 		return 8
 	}
-	g.type_align_stack[typ_id] = true
-	defer {
-		g.type_align_stack.delete(typ_id)
+	if typ_id < g.type_align_stack.len {
+		g.type_align_stack[typ_id] = true
 	}
 	typ := g.mod.type_store.types[typ_id]
 	mut align := 1
@@ -6496,13 +7179,23 @@ fn (mut g Gen) type_align(typ_id ssa.TypeID) int {
 			align = 2
 		}
 	}
-	g.type_align_cache[typ_id] = align
+	if typ_id < g.type_align_stack.len {
+		g.type_align_stack[typ_id] = false
+	}
+	if typ_id < g.type_align_cache.len {
+		g.type_align_cache[typ_id] = align + 1
+	}
 	return align
 }
 
 fn (mut g Gen) struct_field_offset_bytes(struct_typ_id ssa.TypeID, field_idx int) int {
 	if struct_typ_id <= 0 || struct_typ_id >= g.mod.type_store.types.len {
 		return field_idx * 8
+	}
+	// Cache key: (typ_id << 16) | field_idx — supports up to 65535 fields per struct
+	cache_key := (struct_typ_id << 16) | field_idx
+	if cache_key in g.struct_field_offset_cache {
+		return g.struct_field_offset_cache[cache_key]
 	}
 	typ := g.mod.type_store.types[struct_typ_id]
 	if typ.kind != .struct_t || field_idx < 0 || field_idx >= typ.fields.len {
@@ -6519,6 +7212,7 @@ fn (mut g Gen) struct_field_offset_bytes(struct_typ_id ssa.TypeID, field_idx int
 			offset = (offset + align - 1) & ~(align - 1)
 		}
 		if i == field_idx {
+			g.struct_field_offset_cache[cache_key] = offset
 			return offset
 		}
 		field_size := g.type_size(field_typ)
@@ -7372,6 +8066,11 @@ fn (g &Gen) lookup_struct_from_env(name string) ?types.Struct {
 }
 
 fn (mut g Gen) allocate_registers(func mir.Function) {
+	if g.env_no_regalloc {
+		return
+	}
+	trace_ra := g.env_trace_regalloc.len > 0
+		&& (g.env_trace_regalloc == '*' || func.name == g.env_trace_regalloc)
 	mut intervals := map[int]&Interval{}
 	mut call_indices := []int{}
 	mut instr_idx := 0
@@ -7406,16 +8105,8 @@ fn (mut g Gen) allocate_registers(func mir.Function) {
 	mut block_start := map[int]int{}
 	mut block_end := map[int]int{}
 
-	for pid in func.params {
-		if pid in phi_related_vals {
-			continue
-		}
-		intervals[pid] = &Interval{
-			val_id: pid
-			start:  0
-			end:    0
-		}
-	}
+	// Don't register-allocate function parameters.
+	// Parameters have special spilling behavior managed by prologue code.
 
 	for blk_id in func.blocks {
 		blk := g.mod.blocks[blk_id]
@@ -7428,6 +8119,12 @@ fn (mut g Gen) allocate_registers(func mir.Function) {
 				mut skip_interval := val_id in phi_related_vals
 				if val.kind == .instruction {
 					instr := g.mod.instrs[val.index]
+					// Skip instructions that build results directly on the stack.
+					// These ops write to the stack slot without going through a register,
+					// so register-allocating them leaves the register uninitialized.
+					if instr.op in [.struct_init, .insertvalue, .inline_string_init, .call_sret] {
+						skip_interval = true
+					}
 					if instr.op in [.call, .call_indirect, .call_sret] {
 						result_typ := g.mod.type_store.types[val.typ]
 						if result_typ.kind == .struct_t {
@@ -7538,13 +8235,42 @@ fn (mut g Gen) allocate_registers(func mir.Function) {
 		}
 	}
 
-	mut sorted := []&Interval{cap: intervals.len}
-	for _, i in intervals {
-		sorted << i
+	// Flatten intervals into parallel arrays to avoid pointer-deref and map-access
+	// patterns that break in ARM64-compiled binaries (chained-access bug).
+	mut iv_val_ids := []int{cap: intervals.len}
+	mut iv_starts := []int{cap: intervals.len}
+	mut iv_ends := []int{cap: intervals.len}
+	mut iv_has_call := []bool{cap: intervals.len}
+	for vid, iv in intervals {
+		iv_val_ids << vid
+		iv_starts << iv.start
+		iv_ends << iv.end
+		iv_has_call << iv.has_call
 	}
-	sorted.sort(a.start < b.start)
 
-	mut active := []&Interval{cap: 32}
+	// Sort by start time using insertion sort (avoids closure-based sort issues)
+	for si in 1 .. iv_val_ids.len {
+		key_vid := iv_val_ids[si]
+		key_start := iv_starts[si]
+		key_end := iv_ends[si]
+		key_call := iv_has_call[si]
+		mut sj := si - 1
+		for sj >= 0 && iv_starts[sj] > key_start {
+			iv_val_ids[sj + 1] = iv_val_ids[sj]
+			iv_starts[sj + 1] = iv_starts[sj]
+			iv_ends[sj + 1] = iv_ends[sj]
+			iv_has_call[sj + 1] = iv_has_call[sj]
+			sj--
+		}
+		iv_val_ids[sj + 1] = key_vid
+		iv_starts[sj + 1] = key_start
+		iv_ends[sj + 1] = key_end
+		iv_has_call[sj + 1] = key_call
+	}
+
+	// Active list as parallel arrays (end time, assigned register)
+	mut act_ends := []int{cap: 32}
+	mut act_regs := []int{cap: 32}
 
 	// Registers
 	// Caller-saved (Temporaries): x9..x15
@@ -7552,22 +8278,25 @@ fn (mut g Gen) allocate_registers(func mir.Function) {
 	// Reserve x8/x9 as backend data path scratch registers.
 	// Reserve x10/x11/x12 for helper temporaries (large offset materialization,
 	// address arithmetic, and spill-free internal moves).
-	// Temporary conservative mode: keep values stack-resident for correctness.
-	// This avoids backend miscompilations caused by incomplete live interval
-	// modeling across complex CFG/aggregate paths.
 	short_regs := []int{}
-	long_regs := []int{}
+	long_regs := [19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
 
 	// Reusable arrays to avoid allocation in the hot loop
 	mut used := []bool{len: 32, init: false}
 	mut used_regs_set := []bool{len: 32, init: false}
 
-	for i in sorted {
+	for si2 in 0 .. iv_val_ids.len {
+		cur_vid := iv_val_ids[si2]
+		cur_start := iv_starts[si2]
+		cur_end := iv_ends[si2]
+		cur_has_call := iv_has_call[si2]
+
 		// Remove expired intervals from active list
 		mut j := 0
-		for j < active.len {
-			if active[j].end < i.start {
-				active.delete(j)
+		for j < act_ends.len {
+			if act_ends[j] < cur_start {
+				act_ends.delete(j)
+				act_regs.delete(j)
 			} else {
 				j++
 			}
@@ -7577,17 +8306,18 @@ fn (mut g Gen) allocate_registers(func mir.Function) {
 		for k in 0 .. 32 {
 			used[k] = false
 		}
-		for a in active {
-			used[g.reg_map[a.val_id]] = true
+		for ar in act_regs {
+			used[ar] = true
 		}
 
-		// Decide which pool to use (avoid clone)
-		pool := if i.has_call { long_regs } else { short_regs }
+		// Decide which pool to use
+		pool := if cur_has_call { long_regs } else { short_regs }
 
 		for r in pool {
 			if !used[r] {
-				g.reg_map[i.val_id] = r
-				active << i
+				g.reg_map[cur_vid] = r
+				act_ends << cur_end
+				act_regs << r
 				// Only track used callee-saved regs for prologue saving
 				if r >= 19 && r <= 28 && !used_regs_set[r] {
 					used_regs_set[r] = true
@@ -7597,5 +8327,14 @@ fn (mut g Gen) allocate_registers(func mir.Function) {
 			}
 		}
 	}
+
 	g.used_regs.sort()
+	if trace_ra {
+		eprintln('REGALLOC fn=${func.name} intervals=${iv_val_ids.len} calls=${call_indices.len} allocated=${g.reg_map.len} used_regs=${g.used_regs} total_instrs=${total_instrs}')
+		for val_id, reg in g.reg_map {
+			if mut iv := intervals[val_id] {
+				eprintln('  val=${val_id} -> x${reg} [${iv.start},${iv.end}] has_call=${iv.has_call}')
+			}
+		}
+	}
 }

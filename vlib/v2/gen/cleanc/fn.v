@@ -81,6 +81,15 @@ fn (g &Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
 	if decl.name == 'init' || decl.name == 'deinit' {
 		return true
 	}
+	// Methods on array types ([]T) and other types with unresolvable receivers
+	// may produce 'unknown' receiver in the markused key, causing them to be
+	// incorrectly pruned. Always emit methods whose receiver can't be resolved.
+	if decl.is_method {
+		key2 := markused.decl_key(module_name, decl, g.env)
+		if key2.contains('|unknown|') {
+			return true
+		}
+	}
 	// Check if this function was force-requested by generated code (e.g. map str functions).
 	if g.force_emit_fn_names.len > 0 && decl.name == 'str' && decl.is_method {
 		// Build the C function name for method str: ReceiverType__str
@@ -591,6 +600,12 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl) {
 	if node.name == 'main' {
 		g.write_indent()
 		g.sb.writeln('return 0;')
+	} else if g.cur_fn_ret_type.starts_with('_result_') {
+		g.write_indent()
+		g.sb.writeln('return (${g.cur_fn_ret_type}){0};')
+	} else if g.cur_fn_ret_type.starts_with('_option_') {
+		g.write_indent()
+		g.sb.writeln('return (${g.cur_fn_ret_type}){0};')
 	}
 
 	g.indent--

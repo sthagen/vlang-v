@@ -55,6 +55,7 @@ mut:
 	used_keys map[string]bool
 
 	module_names           map[string]bool
+	module_alias_to_real   map[string]string
 	type_names             map[string]bool
 	interface_type_names   map[string]bool
 	interface_method_names map[string][]string
@@ -129,6 +130,14 @@ fn (mut w Walker) collect_defs() {
 			w.add_module_name(imp.name)
 			if imp.alias != '' {
 				w.add_module_name(imp.alias)
+				// Map alias to real module name for correct symbol resolution.
+				// e.g., 'import v2.ssa.optimize as ssa_optimize' → 'ssa_optimize' → 'optimize'
+				real_name := if imp.name.contains('.') {
+					imp.name.all_after_last('.')
+				} else {
+					imp.name
+				}
+				w.module_alias_to_real[imp.alias] = real_name
 			}
 		}
 		for stmt in file.stmts {
@@ -282,6 +291,15 @@ fn type_name_candidates_from_type(mod_name string, typ types.Type) []string {
 		} else if mod_name != '' && mod_name != 'main' {
 			add_unique_string(mut out, '${mod_name}__${name}')
 		}
+		// For array types like []Attribute, also add Array_Attribute form.
+		if name.starts_with('[]') {
+			elem := name[2..]
+			add_unique_string(mut out, 'Array_${elem}')
+			add_unique_string(mut out, maybe_trim_module_prefix(mod_name, 'Array_${elem}'))
+			if mod_name != '' && mod_name != 'main' {
+				add_unique_string(mut out, 'Array_${mod_name}__${elem}')
+			}
+		}
 	}
 	return out
 }
@@ -308,6 +326,20 @@ fn receiver_names_from_decl(mod_name string, decl ast.FnDecl, env &types.Environ
 			}
 		}
 		else {}
+	}
+	// Method on []ElemType — receiver name is Array_ElemType.
+	// Use the string name which includes [] prefix for array types.
+	recv_name := decl.receiver.typ.name()
+	if recv_name.starts_with('[]') {
+		elem_name := recv_name[2..]
+		if elem_name.len > 0 {
+			arr_name := 'Array_${elem_name}'
+			add_unique_string(mut out, arr_name)
+			add_unique_string(mut out, maybe_trim_module_prefix(mod_name, arr_name))
+			if mod_name != '' && mod_name != 'main' {
+				add_unique_string(mut out, 'Array_${mod_name}__${elem_name}')
+			}
+		}
 	}
 	pos := decl.receiver.typ.pos()
 	if env != unsafe { nil } && pos.is_valid() {
@@ -807,7 +839,10 @@ fn (w &Walker) resolve_call_lhs(lhs ast.Expr, mod_name string) []int {
 					return w.resolve_fn_name(method_name, mod_name)
 				}
 				if left_name in w.module_names {
-					return w.resolve_fn_name('${left_name}__${method_name}', mod_name)
+					// Resolve import aliases (e.g., 'ssa_optimize' → 'optimize')
+					// so lookup finds 'optimize__func' not 'ssa_optimize__func'.
+					real_mod := w.module_alias_to_real[left_name] or { left_name }
+					return w.resolve_fn_name('${real_mod}__${method_name}', mod_name)
 				}
 				if left_name in w.type_names {
 					return w.resolve_method_name(method_name, [left_name,
