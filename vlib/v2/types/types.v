@@ -84,6 +84,7 @@ pub:
 }
 
 struct Channel {
+pub:
 	elem_type ?Type
 }
 
@@ -173,6 +174,15 @@ pub fn (f &FnType) get_param_names() []string {
 // is_variadic_fn reports whether this function type was declared variadic.
 pub fn (f &FnType) is_variadic_fn() bool {
 	return f.is_variadic
+}
+
+// get_generic_types returns the concrete generic instantiations inferred for this function.
+pub fn (f &FnType) get_generic_types() []map[string]Type {
+	mut out := []map[string]Type{cap: f.generic_types.len}
+	for generic_types in f.generic_types {
+		out << generic_types.clone()
+	}
+	return out
 }
 
 pub struct Interface {
@@ -299,6 +309,31 @@ pub fn (t Type) base_type() Type {
 	}
 }
 
+pub fn (t Type) channel_elem_type() ?Type {
+	mut cur := t
+	for {
+		match cur {
+			Alias {
+				cur = Type(cur).base_type()
+			}
+			Pointer {
+				cur = Type(cur).base_type()
+			}
+			Channel {
+				channel_type := cur as Channel
+				if elem_type := channel_type.elem_type {
+					return elem_type
+				}
+				return none
+			}
+			else {
+				return none
+			}
+		}
+	}
+	return none
+}
+
 fn type_data_ptr_is_nil(t Type) bool {
 	p := unsafe { &u8(&t) + 8 }
 	return unsafe { *(&voidptr(p)) } == unsafe { nil }
@@ -381,6 +416,9 @@ fn value_type_with_depth(t Type, depth int) Type {
 				return string_
 			}
 			return value_type_with_depth(t.base_type, depth + 1)
+		}
+		Struct {
+			return Type(t)
 		}
 		String {
 			return u8_
@@ -467,6 +505,9 @@ fn (t Type) is_float() bool {
 }
 
 fn (t Type) is_integer() bool {
+	if t is Char || t is Rune || t is ISize || t is USize {
+		return true
+	}
 	if t is Primitive {
 		return t.is_integer()
 	}
@@ -474,7 +515,7 @@ fn (t Type) is_integer() bool {
 }
 
 fn (t Type) is_number() bool {
-	if t is ISize {
+	if t is Char || t is Rune || t is ISize || t is USize {
 		return true
 	}
 	if t is Primitive {

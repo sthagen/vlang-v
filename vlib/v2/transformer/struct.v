@@ -137,13 +137,19 @@ fn (mut t Transformer) apply_smartcast_field_access_ctx(sumtype_expr ast.Expr, f
 	// variant (short name) is used for union member access
 	// variant_full (full name) is used for type cast
 	variant_short := ctx.variant
-	// Extract simple variant name for _data._ accessor (strip module prefix)
-	// But preserve composite type prefixes like Array_, Map_, Array_fixed_
+	// Extract simple variant name for _data._ accessor
+	// Union fields use: _Null (same-module Ident), _time__Time (cross-module SelectorExpr),
+	// _Array_json2__Any (composite). Only strip module prefix for same-module types.
 	variant_simple := if variant_short.starts_with('Array_') || variant_short.starts_with('Map_') {
 		// For composite types, use the short name to match union member
 		variant_short
 	} else if variant_short.contains('__') {
-		variant_short.all_after_last('__')
+		mod_prefix := variant_short.all_before_last('__')
+		if mod_prefix == t.cur_module {
+			variant_short.all_after_last('__')
+		} else {
+			variant_short
+		}
 	} else {
 		variant_short
 	}
@@ -169,6 +175,20 @@ fn (mut t Transformer) apply_smartcast_field_access_ctx(sumtype_expr ast.Expr, f
 	// Already concretely casted to this variant by an outer smartcast context.
 	if t.expr_is_casted_to_type(transformed_base, mangled_variant) {
 		return t.synth_selector_from_struct(transformed_base, field_name, mangled_variant)
+	}
+	// For interface smartcasts, use _object instead of _data
+	is_interface_ctx := ctx.sumtype.starts_with('__iface__')
+	if is_interface_ctx {
+		object_access := t.synth_selector(transformed_base, '_object', types.Type(types.voidptr_))
+		cast_expr := ast.CastExpr{
+			typ:  ast.Ident{
+				name: '${mangled_variant}*'
+			}
+			expr: object_access
+		}
+		return t.synth_selector_from_struct(ast.ParenExpr{
+			expr: cast_expr
+		}, field_name, mangled_variant)
 	}
 	// Create data access.
 	// For native backends (arm64/x64): _data is a plain i64 (void pointer) in the SSA struct.
@@ -1120,13 +1140,23 @@ fn (mut t Transformer) transform_init_expr(expr ast.InitExpr) ast.Expr {
 				// Transform array elements with sumtype wrapping if needed.
 				elem_sumtype := t.get_field_array_elem_sumtype_name(struct_type_name,
 					field.name)
+				elem_interface_typ := t.get_field_array_elem_interface_type(struct_type_name,
+					field.name)
 				mut new_exprs := []ast.Expr{cap: arr_value.exprs.len}
 				for e in arr_value.exprs {
-					transformed := t.transform_expr(e)
+					mut transformed := t.transform_expr(e)
 					if elem_sumtype != '' {
 						if wrapped := t.wrap_sumtype_value_transformed(transformed, elem_sumtype) {
 							new_exprs << wrapped
 							continue
+						}
+					}
+					if iface_typ := elem_interface_typ {
+						if !t.is_interface_cast(transformed) {
+							transformed = ast.Expr(ast.CallOrCastExpr{
+								lhs:  t.type_to_ast_type_expr(iface_typ)
+								expr: transformed
+							})
 						}
 					}
 					new_exprs << transformed
@@ -1420,6 +1450,77 @@ fn (mut t Transformer) add_missing_struct_field_defaults(struct_name string, fie
 				value: ast.StringLiteral{
 					kind:  .v
 					value: "''"
+				}
+			}
+		}
+	}
+	// Also fill defaults for fields from embedded structs.
+	for emb in struct_info.embedded {
+		for struct_field in emb.fields {
+			if struct_field.name in existing {
+				continue
+			}
+			if struct_field.default_expr !is ast.EmptyExpr
+				&& t.is_supported_struct_default_expr(struct_field.default_expr) {
+				mut emb_struct_name := struct_name
+				if emb.name.contains('__') {
+					emb_struct_name = emb.name
+				}
+				resolved_default := t.resolve_expr_with_expected_type(struct_field.default_expr,
+					struct_field.typ)
+				out << ast.FieldInit{
+					name:  struct_field.name
+					value: t.transform_struct_field_default_expr(emb_struct_name, resolved_default)
+				}
+				continue
+			}
+			field_type := t.unwrap_alias_and_pointer_type(struct_field.typ)
+			if field_type is types.Map {
+				map_init := ast.Expr(ast.MapInitExpr{
+					typ: t.type_to_ast_type_expr(field_type)
+				})
+				out << ast.FieldInit{
+					name:  struct_field.name
+					value: t.transform_expr(map_init)
+				}
+				continue
+			}
+			if field_type is types.Array {
+				array_init := ast.Expr(ast.ArrayInitExpr{
+					typ: t.type_to_ast_type_expr(field_type)
+				})
+				out << ast.FieldInit{
+					name:  struct_field.name
+					value: t.transform_expr(array_init)
+				}
+				continue
+			}
+			if field_type is types.OptionType {
+				option_none := ast.Expr(ast.InitExpr{
+					typ:    t.type_to_ast_type_expr(field_type)
+					fields: [
+						ast.FieldInit{
+							name:  'state'
+							value: ast.BasicLiteral{
+								kind:  token.Token.number
+								value: '2'
+							}
+						},
+					]
+				})
+				out << ast.FieldInit{
+					name:  struct_field.name
+					value: t.transform_expr(option_none)
+				}
+				continue
+			}
+			if field_type is types.String {
+				out << ast.FieldInit{
+					name:  struct_field.name
+					value: ast.StringLiteral{
+						kind:  .v
+						value: "''"
+					}
 				}
 			}
 		}
@@ -1748,6 +1849,34 @@ fn (t &Transformer) get_field_array_elem_sumtype_name(struct_name string, field_
 		}
 	}
 	return ''
+}
+
+fn (t &Transformer) get_field_array_elem_interface_type(struct_name string, field_name string) ?types.Type {
+	field_typ := t.lookup_struct_field_type(struct_name, field_name) or { return none }
+	match field_typ {
+		types.Array {
+			if field_typ.elem_type is types.Interface {
+				return field_typ.elem_type
+			}
+			if field_typ.elem_type is types.Alias
+				&& field_typ.elem_type.base_type is types.Interface {
+				return field_typ.elem_type
+			}
+		}
+		types.Alias {
+			if field_typ.base_type is types.Array {
+				if field_typ.base_type.elem_type is types.Interface {
+					return field_typ.base_type.elem_type
+				}
+				if field_typ.base_type.elem_type is types.Alias
+					&& field_typ.base_type.elem_type.base_type is types.Interface {
+					return field_typ.base_type.elem_type
+				}
+			}
+		}
+		else {}
+	}
+	return none
 }
 
 // get_field_array_elem_c_name returns the C type name for the element type of an array field

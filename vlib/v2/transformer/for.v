@@ -48,6 +48,39 @@ fn (t &Transformer) iter_expr_needs_deref(expr ast.Expr) bool {
 	return false
 }
 
+fn string_iter_value_type() types.Type {
+	return types.Type(types.Primitive{
+		props: .integer | .unsigned
+		size:  8
+	})
+}
+
+fn (t &Transformer) is_string_iterable_type(iter_type types.Type) bool {
+	mut cur := iter_type
+	for {
+		if cur is types.Pointer {
+			cur = (cur as types.Pointer).base_type
+			continue
+		}
+		if cur is types.Alias {
+			cur = (cur as types.Alias).base_type
+			continue
+		}
+		break
+	}
+	if cur is types.String {
+		return true
+	}
+	return cur is types.Struct && (cur as types.Struct).name == 'string'
+}
+
+fn (t &Transformer) for_in_value_type(iter_type types.Type) types.Type {
+	if t.is_string_iterable_type(iter_type) {
+		return string_iter_value_type()
+	}
+	return iter_type.value_type()
+}
+
 fn (mut t Transformer) iter_value_expr(orig ast.Expr, transformed ast.Expr, pos token.Pos, value_type types.Type) ast.Expr {
 	t.register_synth_type(pos, value_type)
 	base_expr := ast.Expr(ast.ParenExpr{
@@ -403,6 +436,25 @@ fn (mut t Transformer) transform_for_stmt(stmt ast.ForStmt) ast.ForStmt {
 				return result
 			}
 		}
+		// Check if the for-in expression is smartcast to a specific type
+		// (e.g., `match size { []f64 { for v in size { ... } } }`)
+		if sc := t.find_smartcast_for_expr(t.expr_to_string(for_in.expr)) {
+			if orig_type := t.get_expr_type(for_in.expr) {
+				if orig_type is types.SumType {
+					for variant in orig_type.variants {
+						variant_name := t.type_to_c_name(variant)
+						if variant_name == sc.variant_full || variant_name == sc.variant {
+							if variant is types.Array || variant is types.String {
+								result := t.transform_array_for_in(stmt, for_in, variant)
+								t.close_scope()
+								return result
+							}
+							break
+						}
+					}
+				}
+			}
+		}
 		if iter_type := t.get_expr_type(for_in.expr) {
 			// Normalize pointer/alias wrappers so for-in lowering works for
 			// method receivers like `mut a []T` and aliased array types.
@@ -435,14 +487,14 @@ fn (mut t Transformer) transform_for_stmt(stmt ast.ForStmt) ast.ForStmt {
 				t.close_scope()
 				return result
 			}
-			if iter_base_type is types.String {
+			if iter_base_type is types.String || t.is_string_iterable_type(iter_base_type) {
 				result := t.transform_array_for_in(stmt, for_in, iter_base_type)
 				t.close_scope()
 				return result
 			}
 			// Other iterable types (maps, channels, etc): keep the ForInStmt form.
 			// The untyped indexed lowering below is only valid for array-like iterables.
-			value_type := iter_type.value_type()
+			value_type := t.for_in_value_type(iter_type)
 			if for_in.value is ast.Ident {
 				value_name := (for_in.value as ast.Ident).name
 				if value_name != '' && value_name != '_' {
@@ -688,7 +740,7 @@ fn (mut t Transformer) transform_array_for_in(stmt ast.ForStmt, for_in ast.ForIn
 
 	// Register loop variables in scope
 	key_type := iter_type.key_type()
-	value_type := iter_type.value_type()
+	value_type := t.for_in_value_type(iter_type)
 	t.scope.insert(key_name, key_type)
 	t.scope.insert(value_name, value_type)
 	t.register_synth_type(idx_pos, key_type)
@@ -706,7 +758,11 @@ fn (mut t Transformer) transform_array_for_in(stmt ast.ForStmt, for_in ast.ForIn
 		expr: key_ident
 		pos:  index_pos
 	})
-	value_rhs := if is_mut_value {
+	// For mut loop variables: take address for in-place mutation.
+	// But when the element type is already a pointer (e.g., []&MenuItem),
+	// the pointer itself allows mutation — don't add another & level.
+	value_is_ptr := value_type is types.Pointer
+	value_rhs := if is_mut_value && !value_is_ptr {
 		ptr_pos := t.next_synth_pos()
 		t.register_synth_type(ptr_pos, types.Type(types.Pointer{
 			base_type: value_type

@@ -81,14 +81,46 @@ fn (mut g Gen) gen_decl_if_expr_branch(name string, stmts []ast.Stmt) {
 					continue
 				}
 			}
-			g.write_indent()
-			g.sb.write_string('${name} = ')
-			g.expr(stmt.expr)
-			g.sb.writeln(';')
+			// When the last expression is a void call (e.g. array__push from <<),
+			// emit it as a standalone statement without assigning to the temp var.
+			if g.expr_is_void_call(stmt.expr) {
+				g.write_indent()
+				g.expr(stmt.expr)
+				g.sb.writeln(';')
+			} else {
+				g.write_indent()
+				g.sb.write_string('${name} = ')
+				g.expr(stmt.expr)
+				g.sb.writeln(';')
+			}
 		} else {
 			g.gen_stmt(stmt)
 		}
 	}
+}
+
+// expr_is_void_call checks if the expression is a function call that returns void.
+// Used to prevent assigning void results to temp variables in if-expression branches.
+fn (mut g Gen) expr_is_void_call(expr ast.Expr) bool {
+	if expr is ast.CallExpr {
+		if ret := g.get_call_return_type(expr.lhs, expr.args) {
+			return ret == 'void'
+		}
+		// Check resolved name
+		c_name := g.resolve_call_name(expr.lhs, expr.args.len)
+		if c_name != '' {
+			if ret := g.fn_return_types[c_name] {
+				return ret == 'void'
+			}
+		}
+		// panic/v_panic always returns void (noreturn)
+		if expr.lhs is ast.Ident {
+			if expr.lhs.name in ['panic', 'v_panic'] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 fn (mut g Gen) gen_decl_if_expr(name string, if_expr &ast.IfExpr) {
@@ -258,6 +290,33 @@ fn (g &Gen) extract_if_expr(expr ast.Expr) ?ast.IfExpr {
 	}
 }
 
+fn (mut g Gen) branch_result_type(stmts []ast.Stmt) string {
+	if stmts.len == 0 {
+		return ''
+	}
+	last := stmts[stmts.len - 1]
+	match last {
+		ast.BlockStmt {
+			return g.branch_result_type(last.stmts)
+		}
+		ast.ExprStmt {
+			if nested := g.extract_if_expr(last.expr) {
+				return g.get_if_expr_type(&nested)
+			}
+			mut typ := g.get_expr_type(last.expr)
+			if typ == '' || typ == 'int' {
+				if raw := g.get_raw_type(last.expr) {
+					typ = g.types_type_to_c(raw)
+				}
+			}
+			return typ
+		}
+		else {
+			return ''
+		}
+	}
+}
+
 fn (mut g Gen) gen_if_expr_stmt(node &ast.IfExpr) {
 	// Skip empty conditions (pure else blocks shouldn't appear at top level)
 	if node.cond is ast.EmptyExpr {
@@ -378,12 +437,9 @@ fn (mut g Gen) get_if_expr_type(node &ast.IfExpr) string {
 			return t
 		}
 	}
-	if node.stmts.len == 1 && node.stmts[0] is ast.ExprStmt {
-		stmt := node.stmts[0] as ast.ExprStmt
-		t := g.get_expr_type(stmt.expr)
-		if t != '' && t != 'int' {
-			return t
-		}
+	branch_type := g.branch_result_type(node.stmts)
+	if branch_type != '' && branch_type != 'int' {
+		return branch_type
 	}
 	if node.else_expr is ast.IfExpr {
 		else_if := node.else_expr as ast.IfExpr
@@ -392,7 +448,17 @@ fn (mut g Gen) get_if_expr_type(node &ast.IfExpr) string {
 			return t
 		}
 	} else if node.else_expr !is ast.EmptyExpr {
-		t := g.get_expr_type(node.else_expr)
+		mut t := ''
+		if nested := g.extract_if_expr(node.else_expr) {
+			t = g.get_if_expr_type(&nested)
+		} else {
+			t = g.get_expr_type(node.else_expr)
+			if t == '' || t == 'int' {
+				if raw := g.get_raw_type(node.else_expr) {
+					t = g.types_type_to_c(raw)
+				}
+			}
+		}
 		if t != '' {
 			return t
 		}

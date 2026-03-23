@@ -3,9 +3,11 @@
 // that can be found in the LICENSE file.
 module transformer
 
+import strconv
 import v2.ast
 import v2.token
 import v2.types
+import strings
 
 // register_synth_type registers a type for a synthesized node position.
 // Accumulates in synth_types map for deferred application (thread-safe).
@@ -31,12 +33,35 @@ fn (t &Transformer) lookup_method_cached(type_name string, method_name string) ?
 // lookup_fn_cached looks up a function by module and name
 // using cached_scopes (lock-free) instead of env.lookup_fn.
 fn (t &Transformer) lookup_fn_cached(module_name string, fn_name string) ?types.FnType {
-	scope := t.cached_scopes[module_name] or { return none }
-	obj := scope.objects[fn_name] or { return none }
-	if obj is types.Fn {
-		typ := obj.get_typ()
-		if typ is types.FnType {
-			return typ
+	if scope := t.cached_scopes[module_name] {
+		obj := scope.objects[fn_name] or { return none }
+		if obj is types.Fn {
+			typ := obj.get_typ()
+			if typ is types.FnType {
+				return typ
+			}
+		}
+		return none
+	}
+	if module_name != '' {
+		for key, scope in t.cached_scopes {
+			short_key := if key.contains('.') {
+				key.all_after_last('.')
+			} else if key.contains('__') {
+				key.all_after_last('__')
+			} else {
+				key
+			}
+			if short_key != module_name {
+				continue
+			}
+			obj := scope.objects[fn_name] or { continue }
+			if obj is types.Fn {
+				typ := obj.get_typ()
+				if typ is types.FnType {
+					return typ
+				}
+			}
 		}
 	}
 	return none
@@ -73,7 +98,7 @@ fn (t &Transformer) c_name_to_type(name string) ?types.Type {
 			elem_type := t.c_name_to_type(elem_name) or { return none }
 			return types.ArrayFixed{
 				elem_type: elem_type
-				len:       len_str.int()
+				len:       int(strconv.parse_int(len_str, 0, 64) or { 0 })
 			}
 		}
 		return none
@@ -83,6 +108,15 @@ fn (t &Transformer) c_name_to_type(name string) ?types.Type {
 		elem_type := t.c_name_to_type(elem_name) or { return none }
 		return types.Array{
 			elem_type: elem_type
+		}
+	}
+	// Handle Map_KEY_VALUE prefix (e.g. Map_string_json2__Any)
+	if name.starts_with('Map_string_') {
+		value_name := name['Map_string_'.len..]
+		value_type := t.c_name_to_type(value_name) or { return none }
+		return types.Map{
+			key_type:   types.string_
+			value_type: value_type
 		}
 	}
 	// Primitives and well-known types
@@ -296,6 +330,73 @@ fn (t &Transformer) is_flag_enum(type_name string) bool {
 		return typ.is_flag
 	}
 	return false
+}
+
+// type_expr_to_variant_name converts a type AST expression (like []Any or
+// map[string]Any) to the mangled variant name used in sum type definitions
+// (e.g. Array_json2__Any, Map_string_json2__Any).
+fn (t &Transformer) type_expr_to_variant_name(e ast.Expr) string {
+	if e is ast.Type {
+		return t.type_to_variant_name(e)
+	}
+	if e is ast.Ident {
+		name := (e as ast.Ident).name
+		if t.cur_module != '' && t.cur_module != 'main' && t.cur_module != 'builtin'
+			&& !name.contains('__') && !t.is_builtin_type_name(name) {
+			return '${t.cur_module}__${name}'
+		}
+		return name
+	}
+	if e is ast.SelectorExpr {
+		sel := e as ast.SelectorExpr
+		if sel.lhs is ast.Ident {
+			return '${(sel.lhs as ast.Ident).name}__${sel.rhs.name}'
+		}
+	}
+	return ''
+}
+
+fn (t &Transformer) is_builtin_type_name(name string) bool {
+	return name in ['string', 'int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32',
+		'f64', 'bool', 'rune', 'usize', 'isize', 'voidptr', 'byteptr', 'charptr']
+}
+
+// variant_name_to_c converts V-style variant names to C-style for union member access.
+// e.g. "[]json2__Any" → "Array_json2__Any", "map[string]json2__Any" → "Map_string_json2__Any"
+fn (t &Transformer) variant_name_to_c(name string) string {
+	if name.starts_with('[]') {
+		return 'Array_${name[2..]}'
+	}
+	if name.starts_with('map[') {
+		// "map[K]V" → "Map_K_V"
+		bracket_end := name.index_u8(`]`)
+		if bracket_end > 0 {
+			key := name[4..bracket_end]
+			val := name[bracket_end + 1..]
+			return 'Map_${key}_${val}'
+		}
+	}
+	return name
+}
+
+fn (t &Transformer) type_to_variant_name(e ast.Type) string {
+	match e {
+		ast.ArrayType {
+			elem := t.type_expr_to_variant_name(e.elem_type)
+			if elem != '' {
+				return '[]${elem}'
+			}
+		}
+		ast.MapType {
+			key := t.type_expr_to_variant_name(e.key_type)
+			val := t.type_expr_to_variant_name(e.value_type)
+			if key != '' && val != '' {
+				return 'map[${key}]${val}'
+			}
+		}
+		else {}
+	}
+	return ''
 }
 
 // get_sum_type_variants returns the variants for a sum type
@@ -900,6 +1001,42 @@ fn (t &Transformer) resolve_expr_with_expected_type(expr ast.Expr, expected type
 					pos:    expr.pos
 				}
 			}
+		}
+		else {}
+	}
+	match expected {
+		types.OptionType, types.ResultType {
+			match expr {
+				ast.Keyword {
+					if expr.tok == .key_none {
+						return expr
+					}
+				}
+				ast.Ident {
+					if expr.name == 'none' {
+						return expr
+					}
+				}
+				ast.Type {
+					if expr is ast.NoneType {
+						return ast.Expr(ast.Type(expr))
+					}
+				}
+				else {}
+			}
+			if expr_type := t.get_expr_type(expr) {
+				if expected is types.OptionType && expr_type is types.OptionType {
+					return expr
+				}
+				if expected is types.ResultType && expr_type is types.ResultType {
+					return expr
+				}
+			}
+			return ast.Expr(ast.CastExpr{
+				typ:  t.type_to_ast_type_expr(expected)
+				expr: expr
+				pos:  expr.pos()
+			})
 		}
 		else {}
 	}
@@ -1684,13 +1821,7 @@ fn (t &Transformer) get_expr_type(expr ast.Expr) ?types.Type {
 				return typ
 			}
 		}
-		if expr.lhs is ast.Ident {
-			if typ := t.get_fn_return_type(expr.lhs.name) {
-				return typ
-			}
-			return none
-		}
-		if typ := t.get_method_return_type(expr) {
+		if typ := t.resolve_call_return_type(expr) {
 			return typ
 		}
 		return none
@@ -1702,13 +1833,7 @@ fn (t &Transformer) get_expr_type(expr ast.Expr) ?types.Type {
 				return typ
 			}
 		}
-		if expr.lhs is ast.Ident {
-			if typ := t.get_fn_return_type(expr.lhs.name) {
-				return typ
-			}
-			return none
-		}
-		if typ := t.get_method_return_type(expr) {
+		if typ := t.resolve_call_return_type(expr) {
 			return typ
 		}
 		return none
@@ -1723,8 +1848,125 @@ fn (t &Transformer) get_expr_type(expr ast.Expr) ?types.Type {
 		if typ := t.env.get_expr_type(pos.id) {
 			return typ
 		}
+		// Check synth_types for types registered during the current transform pass
+		// (they haven't been applied to env yet).
+		if typ := t.synth_types[pos.id] {
+			return typ
+		}
 	}
 	return none
+}
+
+fn sanitize_generic_token_part(name string) string {
+	if name == '' {
+		return 'Type'
+	}
+	mut out := strings.new_builder(name.len)
+	mut wrote_sep := false
+	for ch in name {
+		if (ch >= `a` && ch <= `z`) || (ch >= `A` && ch <= `Z`) || (ch >= `0` && ch <= `9`) {
+			out.write_u8(ch)
+			wrote_sep = false
+		} else if !wrote_sep {
+			out.write_u8(`_`)
+			wrote_sep = true
+		}
+	}
+	mut tok := out.str().trim('_')
+	if tok == '' {
+		tok = 'Type'
+	}
+	return tok
+}
+
+fn (t &Transformer) generic_specialization_token_from_type(typ types.Type) string {
+	match typ {
+		types.Array {
+			return 'Array_' + t.generic_specialization_token_from_type(typ.elem_type)
+		}
+		types.ArrayFixed {
+			return 'Array_fixed_' + t.generic_specialization_token_from_type(typ.elem_type) + '_' +
+				typ.len.str()
+		}
+		types.Map {
+			return 'Map_' + t.generic_specialization_token_from_type(typ.key_type) + '_' +
+				t.generic_specialization_token_from_type(typ.value_type)
+		}
+		types.OptionType {
+			return 'Option_' + t.generic_specialization_token_from_type(typ.base_type)
+		}
+		types.ResultType {
+			return 'Result_' + t.generic_specialization_token_from_type(typ.base_type)
+		}
+		types.Pointer {
+			return t.generic_specialization_token_from_type(typ.base_type) + 'ptr'
+		}
+		types.Alias {
+			if typ.name != '' {
+				return sanitize_generic_token_part(typ.name)
+			}
+			return t.generic_specialization_token_from_type(typ.base_type)
+		}
+		else {
+			type_name := typ.name()
+			if type_name == '' {
+				return 'Type'
+			}
+			return sanitize_generic_token_part(type_name)
+		}
+	}
+}
+
+fn (t &Transformer) generic_specialization_token(expr ast.Expr) string {
+	if concrete := t.get_expr_type(expr) {
+		return t.generic_specialization_token_from_type(concrete)
+	}
+	match expr {
+		ast.Ident {
+			return sanitize_generic_token_part(expr.name)
+		}
+		ast.SelectorExpr {
+			return sanitize_generic_token_part(expr.name())
+		}
+		ast.Type {
+			return sanitize_generic_token_part(expr.name())
+		}
+		else {
+			return sanitize_generic_token_part(expr.name())
+		}
+	}
+}
+
+fn (mut t Transformer) specialize_generic_callable_expr(lhs ast.Expr, args []ast.Expr, pos token.Pos) ast.Expr {
+	mut parts := []string{cap: args.len}
+	for arg in args {
+		parts << t.generic_specialization_token(arg)
+	}
+	suffix := if parts.len > 0 { '_' + parts.join('_') } else { '' }
+	match lhs {
+		ast.Ident {
+			return ast.Expr(ast.Ident{
+				name: lhs.name + suffix
+				pos:  pos
+			})
+		}
+		ast.SelectorExpr {
+			return ast.Expr(ast.SelectorExpr{
+				lhs: t.transform_expr(lhs.lhs)
+				rhs: ast.Ident{
+					name: lhs.rhs.name + suffix
+					pos:  lhs.rhs.pos
+				}
+				pos: pos
+			})
+		}
+		else {
+			return ast.Expr(ast.Ident{
+				name: lhs.name() + suffix
+				pos:  pos
+			})
+		}
+	}
 }
 
 // get_receiver_type_name extracts the type name from a receiver type AST expression
@@ -1974,6 +2216,29 @@ fn (t &Transformer) array_elem_types_compatible(lhs_elem string, rhs_elem string
 fn (t &Transformer) array_value_elem_type(expr ast.Expr) ?string {
 	if elem_type := t.get_array_elem_type_str(expr) {
 		return elem_type
+	}
+	// PostfixExpr `!` or `?` (error/option propagation) unwraps the inner expression.
+	// e.g., `parse_ipv4(address)!` → inner `parse_ipv4(address)` returns `![]u8`,
+	// so the unwrapped result is `[]u8`.
+	if expr is ast.PostfixExpr && expr.op in [.not, .question] {
+		// Try direct recursion (checker may annotate the inner expr with the array type)
+		if elem := t.array_value_elem_type(expr.expr) {
+			return elem
+		}
+		// For calls returning Result/Option, the call return type is _result_Array_T.
+		// Strip the wrapper prefix to get the underlying array type.
+		if expr.expr is ast.CallExpr || expr.expr is ast.CallOrCastExpr {
+			ret_type := t.get_call_return_type(expr.expr)
+			mut base := ret_type
+			if base.starts_with('_result_') {
+				base = base['_result_'.len..]
+			} else if base.starts_with('_option_') {
+				base = base['_option_'.len..]
+			}
+			if base.starts_with('Array_') {
+				return base['Array_'.len..]
+			}
+		}
 	}
 	if expr is ast.CallExpr || expr is ast.CallOrCastExpr {
 		ret_type := t.get_call_return_type(expr)
@@ -2244,6 +2509,9 @@ fn (t &Transformer) type_to_c_name(typ types.Type) string {
 		types.Enum {
 			return t.qualify_type_name(typ.name)
 		}
+		types.Interface {
+			return t.qualify_type_name(typ.name)
+		}
 		types.SumType {
 			return t.qualify_type_name(types.sum_type_name(typ))
 		}
@@ -2281,6 +2549,9 @@ fn (t &Transformer) type_to_c_name(typ types.Type) string {
 			// For other pointer types, use mangled ptr suffix for type names
 			// (This is used in map type names like Map_int_Intervalptr)
 			return '${base_name}ptr'
+		}
+		types.Channel {
+			return 'chan'
 		}
 		types.FnType {
 			return 'voidptr'
@@ -2324,7 +2595,8 @@ fn (t &Transformer) get_enum_type_name(expr ast.Expr) string {
 	// Check scope for variable type
 	if expr is ast.Ident {
 		type_name := t.get_var_type_name(expr.name)
-		if type_name != '' && type_name != 'int' && type_name != 'string' && type_name != 'bool' {
+		if type_name != ''
+			&& type_name !in ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64', 'string', 'bool', 'rune', 'voidptr', 'byteptr', 'charptr', 'nil'] {
 			return type_name
 		}
 	}
