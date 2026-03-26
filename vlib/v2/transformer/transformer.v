@@ -494,21 +494,25 @@ fn (mut t Transformer) transform_embed_file_comptime_expr(expr ast.ComptimeExpr,
 
 // push_smartcast adds a new smartcast context to the stack
 fn (mut t Transformer) push_smartcast(expr string, variant string, sumtype string) {
+	qualified_sumtype := t.qualify_type_name(sumtype)
 	t.smartcast_stack << SmartcastContext{
 		expr:         expr
 		variant:      variant
 		variant_full: variant // Default to same as variant
-		sumtype:      sumtype
+		sumtype:      qualified_sumtype
 	}
 }
 
 // push_smartcast_full adds a smartcast context with separate short and full variant names
 fn (mut t Transformer) push_smartcast_full(expr string, variant string, variant_full string, sumtype string) {
+	// Qualify the sumtype name so apply_smartcast_* can determine the module
+	// the sumtype lives in. e.g. 'Stmt' → 'ast__Stmt' when in builder module.
+	qualified_sumtype := t.qualify_type_name(sumtype)
 	t.smartcast_stack << SmartcastContext{
 		expr:         expr
 		variant:      variant
 		variant_full: variant_full
-		sumtype:      sumtype
+		sumtype:      qualified_sumtype
 	}
 }
 
@@ -1804,8 +1808,20 @@ fn (mut t Transformer) transform_stmt(stmt ast.Stmt) ast.Stmt {
 			}
 		}
 		ast.ComptimeStmt {
-			// Unwrap ComptimeStmt - the inner stmt is transformed directly
-			t.transform_stmt(stmt.stmt)
+			// Keep ComptimeStmt wrapper for $for — cleanc handles it at codegen time
+			if stmt.stmt is ast.ForStmt {
+				for_stmt := stmt.stmt as ast.ForStmt
+				ast.Stmt(ast.ComptimeStmt{
+					stmt: ast.Stmt(ast.ForStmt{
+						init:  for_stmt.init
+						cond:  for_stmt.cond
+						post:  for_stmt.post
+						stmts: t.transform_stmts(for_stmt.stmts)
+					})
+				})
+			} else {
+				t.transform_stmt(stmt.stmt)
+			}
 		}
 		ast.DeferStmt {
 			ast.DeferStmt{
@@ -1886,7 +1902,12 @@ fn (mut t Transformer) transform_stmts(stmts []ast.Stmt) []ast.Stmt {
 			if stmt.rhs.len == 1 && stmt.rhs[0] is ast.ComptimeExpr {
 				comptime_expr := stmt.rhs[0] as ast.ComptimeExpr
 				if comptime_expr.expr is ast.IfExpr {
-					selected := t.resolve_comptime_if_stmts(comptime_expr.expr as ast.IfExpr)
+					comptime_if := comptime_expr.expr as ast.IfExpr
+					if !t.can_eval_comptime_cond(comptime_if.cond) {
+						t.append_transformed_stmt(mut result, stmt)
+						continue
+					}
+					selected := t.resolve_comptime_if_stmts(comptime_if)
 					if selected.len > 0 {
 						// Inline all but the last statement
 						for i := 0; i < selected.len - 1; i++ {
@@ -2024,12 +2045,22 @@ fn (mut t Transformer) transform_stmts(stmts []ast.Stmt) []ast.Stmt {
 		if stmt is ast.ExprStmt {
 			if stmt.expr is ast.ComptimeExpr {
 				if stmt.expr.expr is ast.IfExpr {
-					selected := t.resolve_comptime_if_stmts(stmt.expr.expr)
-					// Process through transform_stmts to handle nested $if blocks
-					transformed := t.transform_stmts(selected)
-					for s in transformed {
-						result << s
+					if t.can_eval_comptime_cond(stmt.expr.expr.cond) {
+						selected := t.resolve_comptime_if_stmts(stmt.expr.expr)
+						// Process through transform_stmts to handle nested $if blocks
+						transformed := t.transform_stmts(selected)
+						for s in transformed {
+							result << s
+						}
+						continue
 					}
+					// Can't evaluate — transform body stmts and keep the comptime wrapper
+					transformed_comptime := t.transform_comptime_if_bodies(stmt.expr.expr)
+					result << ast.Stmt(ast.ExprStmt{
+						expr: ast.Expr(ast.ComptimeExpr{
+							expr: ast.Expr(transformed_comptime)
+						})
+					})
 					continue
 				}
 			}
@@ -4613,22 +4644,31 @@ fn (mut t Transformer) extract_or_expr(expr ast.Expr, mut prefix_stmts []ast.Stm
 		}
 		ast.CallOrCastExpr {
 			// When the single argument is directly an OrExpr and the lhs is a function
-			// call (not a type cast), the `or {}` belongs to the call result, not to
-			// the argument. Lift it: `f(x or {z})` → `f(x) or {z}`.
+			// call (not a type cast), the `or {}` MAY belong to the call result.
+			// Lift it only when the call itself returns option/result:
+			//   `f(x or {z})` → `f(x) or {z}`    (when f returns ?T / !T)
+			// When f returns a plain type, the `or {}` belongs to the argument:
+			//   `f(map[key] or {z})` → `tmp := map[key] or {z}; f(tmp)`
 			// For type casts like `i8(call() or { 0 })`, keep the OrExpr inside so
 			// the cast applies to the unwrapped data, not the Result.
 			if expr.expr is ast.OrExpr && !t.call_or_cast_lhs_is_type(expr.lhs) {
 				or_inner := expr.expr as ast.OrExpr
-				lifted := ast.OrExpr{
-					expr:  ast.Expr(ast.CallOrCastExpr{
-						lhs:  expr.lhs
-						expr: or_inner.expr
-						pos:  expr.pos
-					})
-					stmts: or_inner.stmts
-					pos:   or_inner.pos
+				// Build the hypothetical lifted call to check if it returns option/result
+				lifted_call := ast.Expr(ast.CallOrCastExpr{
+					lhs:  expr.lhs
+					expr: or_inner.expr
+					pos:  expr.pos
+				})
+				if t.expr_returns_option(lifted_call) || t.expr_returns_result(lifted_call) {
+					lifted := ast.OrExpr{
+						expr:  lifted_call
+						stmts: or_inner.stmts
+						pos:   or_inner.pos
+					}
+					return t.expand_single_or_expr(lifted, mut prefix_stmts)
 				}
-				return t.expand_single_or_expr(lifted, mut prefix_stmts)
+				// The call does NOT return option/result — the `or {}` belongs to the
+				// argument.  Recurse into the inner expression to expand it there.
 			}
 			new_inner := t.extract_or_expr(expr.expr, mut prefix_stmts)
 			return ast.CallOrCastExpr{
@@ -6888,13 +6928,22 @@ fn (mut t Transformer) apply_smartcast_direct_ctx(original_expr ast.Expr, ctx Sm
 	// Extract simple variant name for _data._ accessor
 	// Union fields use: _Null (same-module Ident), _time__Time (cross-module SelectorExpr),
 	// _Array_json2__Any (composite). Only strip module prefix for same-module types.
+	// Union fields use the name as seen from the declaring module:
+	// same-module Ident → _Null, cross-module SelectorExpr → _time__Time.
+	// Strip module prefix when the variant's module matches the sumtype's module,
+	// because those variants were declared as Idents (no module prefix in the union).
+	sumtype_module := if ctx.sumtype.contains('__') {
+		ctx.sumtype.all_before_last('__')
+	} else {
+		''
+	}
 	variant_simple := if variant_short.starts_with('Array_') || variant_short.starts_with('Map_') {
 		// For composite types (arrays, maps), use the short name to match union member
 		variant_short
 	} else if variant_short.contains('__') {
 		mod_prefix := variant_short.all_before_last('__')
-		if mod_prefix == t.cur_module {
-			// Same module: union field uses short name (e.g., _Null for json2__Null)
+		if mod_prefix == sumtype_module {
+			// Same module as sumtype: union field uses short name (e.g., _Null for json2__Null)
 			variant_short.all_after_last('__')
 		} else {
 			// Cross-module: union field keeps module prefix (e.g., _time__Time)
@@ -7015,12 +7064,20 @@ fn (mut t Transformer) apply_smartcast_receiver_ctx(sumtype_expr ast.Expr, ctx S
 	// Extract simple variant name for _data._ accessor
 	// Union fields use: _Null (same-module Ident), _time__Time (cross-module SelectorExpr),
 	// _Array_json2__Any (composite). Only strip module prefix for same-module types.
+	// Union fields use the name as seen from the declaring module:
+	// same-module Ident → _Null, cross-module SelectorExpr → _time__Time.
+	// Strip module prefix when the variant's module matches the sumtype's module.
+	sumtype_module := if ctx.sumtype.contains('__') {
+		ctx.sumtype.all_before_last('__')
+	} else {
+		''
+	}
 	variant_simple := if variant_short.starts_with('Array_') || variant_short.starts_with('Map_') {
 		// For composite types, use the short name to match union member
 		variant_short
 	} else if variant_short.contains('__') {
 		mod_prefix := variant_short.all_before_last('__')
-		if mod_prefix == t.cur_module {
+		if mod_prefix == sumtype_module {
 			variant_short.all_after_last('__')
 		} else {
 			variant_short
