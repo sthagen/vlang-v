@@ -2035,7 +2035,7 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 		left_sym := g.table.sym(node.left_type)
 		if node.is_field {
 			if field := g.table.find_field_with_embeds(left_sym, node.name) {
-				fn_typ = field.typ
+				fn_typ = g.unwrap_generic(field.typ)
 			}
 			if node.is_unwrapped_fn_selector {
 				fn_typ = fn_typ.clear_option_and_result()
@@ -2576,6 +2576,33 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 			}
 		}
 	}
+	if node.is_field && node.concrete_types.len == 0 && g.cur_fn != unsafe { nil }
+		&& g.cur_fn.generic_names.len > 0 && g.cur_concrete_types.len > 0 {
+		left_sym := g.table.sym(node.left_type)
+		if field := g.table.find_field_with_embeds(left_sym, node.name) {
+			field_sym := g.table.sym(g.unwrap_generic(field.typ))
+			if field_sym.kind == .function {
+				if field_sym.info is ast.FnType {
+					info := field_sym.info
+					for i in 0 .. expected_types.len {
+						if i < info.func.params.len {
+							mut param_typ := info.func.params[i].typ
+							if param_typ.has_flag(.generic) {
+								if utyp := g.table.convert_generic_type(param_typ, g.cur_fn.generic_names,
+									g.cur_concrete_types)
+								{
+									param_typ = utyp
+								}
+							}
+							if expected_types[i] != param_typ {
+								expected_types[i] = param_typ
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	if node.is_method {
 		left_sym := g.table.sym(node.left_type)
 		if left_sym.info is ast.Struct && left_sym.info.generic_types.len > 0
@@ -2847,8 +2874,8 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 						}
 					}
 				} else {
-					// passing variadic arg to another call which expects same array type
-					if variadic_count == 1
+					// passing the current variadic arg to another call which expects the same array type
+					if variadic_count == 1 && g.is_forwarded_variadic_arg(args[arg_nr])
 						&& ((args[arg_nr].typ.has_flag(.variadic) && args[arg_nr].typ == varg_type)
 						|| (varg_type.has_flag(.variadic)
 						&& args[arg_nr].typ == varg_type.clear_flag(.variadic)
@@ -2886,6 +2913,18 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 			}
 		}
 	}
+}
+
+fn (g &Gen) is_forwarded_variadic_arg(arg ast.CallArg) bool {
+	if arg.typ.has_flag(.variadic) {
+		return true
+	}
+	if arg.expr is ast.Ident && g.cur_fn != unsafe { nil } && g.cur_fn.is_variadic
+		&& g.cur_fn.params.len > 0 && arg.expr.obj is ast.Var {
+		var_obj := arg.expr.obj as ast.Var
+		return var_obj.is_arg && arg.expr.name == g.cur_fn.params.last().name
+	}
+	return false
 }
 
 // similar to `autofree_call_pregen()` but only to to handle [keep_args_alive] for C functions
