@@ -1229,11 +1229,11 @@ pub fn (mut g Gen) write_typeof_functions() {
 				continue
 			}
 			already_generated_ifaces[sym.cname] = true
-			g.definitions.writeln('${g.static_non_parallel}char * v_typeof_interface_${sym.cname}(u32 sidx);')
+			g.definitions.writeln('${g.static_non_parallel}string v_typeof_interface_${sym.cname}(u32 sidx);')
 			if g.pref.parallel_cc {
-				g.extern_out.writeln('extern char * v_typeof_interface_${sym.cname}(u32 sidx);')
+				g.extern_out.writeln('extern string v_typeof_interface_${sym.cname}(u32 sidx);')
 			}
-			g.writeln('${g.static_non_parallel}char * v_typeof_interface_${sym.cname}(u32 sidx) {')
+			g.writeln('${g.static_non_parallel}string v_typeof_interface_${sym.cname}(u32 sidx) {')
 			for t in inter_info.types {
 				sub_sym := g.table.sym(ast.mktyp(t))
 				if sub_sym.info is ast.Struct && sub_sym.info.is_unresolved_generic() {
@@ -1243,9 +1243,9 @@ pub fn (mut g Gen) write_typeof_functions() {
 					&& sub_sym.idx !in g.table.used_features.used_syms {
 					continue
 				}
-				g.writeln('\tif (sidx == _${sym.cname}_${sub_sym.cname}_index) return "${util.strip_main_name(sub_sym.name)}";')
+				g.writeln('\tif (sidx == _${sym.cname}_${sub_sym.cname}_index) return _S("${util.strip_main_name(sub_sym.name)}");')
 			}
-			g.writeln2('\treturn "unknown ${util.strip_main_name(sym.name)}";', '}')
+			g.writeln2('\treturn _S("unknown ${util.strip_main_name(sym.name)}");', '}')
 			// Avoid duplicate symbol '_v_typeof_interface_idx_IError' when using -usecache
 			if g.pref.build_mode != .build_module {
 				g.definitions.writeln('u32 v_typeof_interface_idx_${sym.cname}(u32 sidx);')
@@ -3312,6 +3312,28 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 			g.call_cfn_for_casting_expr(fname, expr, expected_type, got_type, exp_styp,
 				got_is_ptr, false, got_styp)
 		}
+		return
+	}
+	if got_sym.info is ast.Interface && exp_sym.info is ast.Interface
+		&& got_type.idx() != expected_type.idx() && !got_type.has_flag(.shared_f)
+		&& !expected_type.has_flag(.shared_f) {
+		g.write('I_${got_sym.cname}_as_I_${exp_sym.cname}(')
+		if got_type.is_ptr() {
+			g.write('*')
+		}
+		g.expr(expr)
+		g.write(')')
+
+		mut got_interface_sym := g.table.sym(got_type)
+		mut info := got_interface_sym.info as ast.Interface
+		lock info.conversions {
+			if expected_type !in info.conversions {
+				left_variants := g.table.iface_types[got_sym.name]
+				right_variants := g.table.iface_types[exp_sym.name]
+				info.conversions[expected_type] = left_variants.filter(it in right_variants)
+			}
+		}
+		got_interface_sym.info = info
 		return
 	}
 	// cast to sum type
@@ -6157,10 +6179,11 @@ fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 	} else {
 		&ast.HashStmtNode(&node)
 	}
+	is_objc_target := is_objc_hash_target(node.kind, node.main)
 
 	match node.kind {
 		'include', 'insert', 'define' {
-			if node.main.contains('.m') {
+			if is_objc_target {
 				// Objective C code import, include it after V types, so that e.g. `string` is
 				// available there
 				if the_node !in g.definition_nodes {
@@ -6173,7 +6196,7 @@ fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 			}
 		}
 		'preinclude' {
-			if node.main.contains('.m') {
+			if is_objc_target {
 				// Objective C code import, include it after V types, so that e.g. `string` is
 				// available there
 				if the_node !in g.definition_nodes {
@@ -6192,6 +6215,18 @@ fn (mut g Gen) hash_stmt(node ast.HashStmt) {
 		}
 		else {}
 	}
+}
+
+fn is_objc_hash_target(kind string, raw_target string) bool {
+	if kind !in ['include', 'preinclude'] {
+		return false
+	}
+	mut target := raw_target.trim_space()
+	if target.len >= 2 && ((target.starts_with('"') && target.ends_with('"'))
+		|| (target.starts_with('<') && target.ends_with('>'))) {
+		target = target[1..target.len - 1]
+	}
+	return os.file_name(target).ends_with('.m')
 }
 
 fn (mut g Gen) gen_hash_stmts(mut sb strings.Builder, node &ast.HashStmtNode, section string) {
@@ -6250,12 +6285,13 @@ fn (mut g Gen) gen_hash_stmts(mut sb strings.Builder, node &ast.HashStmtNode, se
 			// #inlude,#define,#insert          => `includes` section
 			// #postinclude                     => `postincludes` section
 			// '*.m' in #include or #preinclude => `definitions` section
+			is_objc_target := is_objc_hash_target(node.kind, node.main)
 			need_gen_stmt := match section {
 				'preincludes' {
-					if node.kind == 'preinclude' && !node.main.contains('.m') { true } else { false }
+					if node.kind == 'preinclude' && !is_objc_target { true } else { false }
 				}
 				'includes' {
-					if node.kind in ['include', 'define', 'insert'] && !node.main.contains('.m') {
+					if node.kind in ['include', 'define', 'insert'] && !is_objc_target {
 						true
 					} else {
 						false
@@ -6264,7 +6300,7 @@ fn (mut g Gen) gen_hash_stmts(mut sb strings.Builder, node &ast.HashStmtNode, se
 				'definitions' {
 					// Objective C code import, include it after V types, so that e.g. `string` is
 					// available there
-					if node.kind in ['include', 'preinclude'] && node.main.contains('.m') {
+					if node.kind in ['include', 'preinclude'] && is_objc_target {
 						true
 					} else {
 						false
@@ -8717,7 +8753,7 @@ return ${cast_shared_struct_str};
 				variant_sym := g.table.sym(variant)
 				conversion_functions.writeln('\tif (x._typ == _${interface_name}_${variant_sym.cname}_index) return I_${variant_sym.cname}_to_Interface_${vsym.cname}(x._${variant_sym.cname});')
 			}
-			pmessage := 'builtin__string__plus(builtin__string__plus(builtin__tos3("`as_cast`: cannot convert "), builtin__tos3(v_typeof_interface_${interface_name}(x._typ))), builtin__tos3(" to ${util.strip_main_name(vsym.name)}"))'
+			pmessage := 'builtin__string__plus(builtin__string__plus(_S("`as_cast`: cannot convert "), v_typeof_interface_${interface_name}(x._typ)), _S(" to ${util.strip_main_name(vsym.name)}"))'
 			if g.pref.is_debug {
 				// TODO: actually return a valid position here
 				conversion_functions.write_string2('\tbuiltin__panic_debug(1, builtin__tos3("builtin.v"), builtin__tos3("builtin"), builtin__tos3("__as_cast"), ',
