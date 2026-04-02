@@ -10,6 +10,7 @@ import v.util
 pub type FnBackend = fn (mut b Builder)
 
 pub fn compile(command string, pref_ &pref.Preferences, backend_cb FnBackend) {
+	check_if_input_file_exists(pref_)
 	check_if_output_folder_is_writable(pref_)
 	// Construct the V object from command line arguments
 	mut b := new_builder(pref_)
@@ -22,7 +23,22 @@ pub fn compile(command string, pref_ &pref.Preferences, backend_cb FnBackend) {
 	b.run_compiled_executable_and_exit()
 }
 
+fn check_if_input_file_exists(pref_ &pref.Preferences) {
+	if pref_.path == '' || pref_.path == '-' {
+		return
+	}
+	if pref_.path.ends_with('.v') || pref_.path.ends_with('.vsh') || pref_.path.ends_with('.vv') {
+		if !os.exists(pref_.path) {
+			verror("${pref_.path} doesn't exist")
+		}
+	}
+}
+
 fn check_if_output_folder_is_writable(pref_ &pref.Preferences) {
+	if pref_.should_output_to_stdout() || pref_.check_only || pref_.only_check_syntax
+		|| pref_.backend == .interpret {
+		return
+	}
 	odir := os.dir(pref_.out_name)
 	// When pref.out_name is just the name of an executable, i.e. `./v -o executable main.v`
 	// without a folder component, just use the current folder instead:
@@ -30,6 +46,7 @@ fn check_if_output_folder_is_writable(pref_ &pref.Preferences) {
 	if odir.len == pref_.out_name.len {
 		output_folder = os.getwd()
 	}
+	os.mkdir_all(output_folder) or { verror(err.msg()) }
 	os.ensure_folder_is_writable(output_folder) or {
 		// An early error here, is better than an unclear C error later:
 		verror(err.msg())
@@ -215,12 +232,24 @@ pub fn (mut v Builder) set_module_lookup_paths() {
 		v.module_search_paths << os.dir(v.compiled_dir) // pdir of _test.v
 	}
 	v.module_search_paths << v.compiled_dir
+	mut source_root := ''
+	src_root := os.join_path(v.compiled_dir, 'src')
+	if os.exists(src_root) && !v.pref.is_vsh {
+		root_files := os.ls(v.compiled_dir) or { []string{} }
+		if v.pref.should_compile_filtered_files(v.compiled_dir, root_files).len == 0 {
+			source_root = src_root
+			v.module_search_paths << source_root
+		}
+	}
 	x := os.join_path(v.compiled_dir, 'modules')
 	if v.pref.is_verbose {
 		println('x: "${x}"')
 	}
 
-	if os.exists(os.join_path(v.compiled_dir, 'src/modules')) {
+	if source_root != '' && os.exists(os.join_path(source_root, 'modules')) {
+		v.module_search_paths << os.join_path(source_root, 'modules')
+	}
+	if source_root == '' && os.exists(os.join_path(v.compiled_dir, 'src/modules')) {
 		v.module_search_paths << os.join_path(v.compiled_dir, 'src/modules')
 	}
 	if os.exists(os.join_path(v.compiled_dir, 'modules')) {

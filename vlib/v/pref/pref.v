@@ -202,6 +202,7 @@ pub mut:
 	vmodules_paths   []string // absolute paths to the vmodules folders, by default ['/home/user/.vmodules'], can be overridden by setting VMODULES
 	out_name_c       string   // full os.real_path to the generated .tmp.c file; set by builder.
 	out_name         string
+	out_name_is_dir  bool   // true when `-o`/`-output` was passed with a trailing path separator
 	path             string // Path to file/folder to compile
 	line_info        string // `-line-info="file.v:28"`: for "mini VLS" (shows information about objects on provided line)
 	linfo            LineInfo
@@ -286,7 +287,7 @@ fn detect_musl(mut res Preferences) {
 @[noreturn]
 fn run_code_in_tmp_vfile_and_exit(args []string, mut res Preferences, option_name string, extension string,
 	content string) {
-	tmp_file_path := rand.ulid()
+	tmp_file_path := os.join_path(os.vtmp_dir(), rand.ulid())
 	mut tmp_exe_file_path := res.out_name
 	mut output_option := ''
 	if tmp_exe_file_path == '' {
@@ -928,7 +929,9 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 				i++
 			}
 			'-o', '-output' {
-				res.out_name = cmdline.option(args[i..], arg, '')
+				raw_out_name := cmdline.option(args[i..], arg, '')
+				res.out_name_is_dir = raw_out_name.ends_with('/') || raw_out_name.ends_with('\\')
+				res.out_name = raw_out_name
 				if !os.is_abs_path(res.out_name) {
 					res.out_name = os.join_path(os.getwd(), res.out_name)
 				}

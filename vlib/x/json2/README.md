@@ -59,6 +59,8 @@ fn main() {
 decode[T] is smart and can auto-convert the types of struct fields - this means
 examples below will have the same result
 
+Embedded struct fields are decoded from the surrounding object, including reference fields.
+
 ```v ignore
 json2.decode[Person]('{"name": "Bob", "age": 20, "birthday": "2022-03-11T13:54:25.000Z"}')!
 json2.decode[Person]('{"name": "Bob", "age": 20, "birthday": "2022-03-11 13:54:25.000"}')!
@@ -77,6 +79,57 @@ fn main() {
 
 	// This returns an Any type
 	raw_product := json2.decode[json2.Any](resp.body)!
+}
+```
+
+#### iterative token scanning
+
+`x.json2` now exposes low-level scanners that let you process JSON token by
+token instead of materializing the whole tree first.
+
+Use `new_scanner()` for in-memory strings:
+
+```v
+import x.json2
+
+fn main() {
+	mut scanner := json2.new_scanner('{"items":[1,2,3]}')
+	for {
+		token := scanner.next()!
+		if token.is_eof() {
+			break
+		}
+		println('${token.kind}: ${token.literal()}')
+	}
+}
+```
+
+Use `new_reader_scanner()` to stream tokens from a file or any `io.Reader`:
+
+```v
+import os
+import x.json2
+
+fn main() {
+	mut file := os.open('huge.json')!
+	defer {
+		file.close()
+	}
+
+	mut scanner := json2.new_reader_scanner(reader: file)
+	defer {
+		scanner.free()
+	}
+
+	for {
+		token := scanner.next()!
+		if token.is_eof() {
+			break
+		}
+		if token.kind == .str && token.literal() == 'id' {
+			println('found an id key')
+		}
+	}
 }
 ```
 

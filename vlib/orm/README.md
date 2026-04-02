@@ -6,7 +6,8 @@ regardless of the DB driver you decide to use.
 ## Nullable
 
 For a nullable column, use an option field. If the field is non-option, the column will be defined
-with `NOT NULL` at table creation.
+with `NOT NULL` at table creation, except scalar foreign keys declared with `@[references]`, which
+default to nullable so omitted relations can be stored as `NULL`.
 
 ```v ignore
 struct Foo {
@@ -33,6 +34,7 @@ struct Foo {
 - `[serial]` or `[sql: serial]` lets the DB backend choose a column type for an auto-increment field
 - `[sql: 'name']` sets a custom column name for the field
 - `[sql_type: 'SQL TYPE']` explicitly sets the type in SQL
+- `[sql_select: 'SQL expression']` uses a custom expression in `SELECT` for the field
 - `[default: 'raw_sql']` inserts `raw_sql` verbatim in a "DEFAULT" clause when
   creating a new table, allowing for SQL functions like `CURRENT_TIME`. For raw strings,
   surround `raw_sql` with backticks (\`).
@@ -66,6 +68,12 @@ struct Child {
     parent_id int
     name      string
 }
+```
+
+`sql_select` is useful for backend-specific read transformations such as:
+
+```v ignore
+geom string @[sql_type: 'geometry'; sql_select: 'ST_AsEWKT(geom)']
 ```
 
 To use the ORM, there is a special interface that lets you use the structs and V itself in queries.

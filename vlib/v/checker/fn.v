@@ -522,6 +522,14 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 					} else if node.return_type != ast.bool_type && node.name in ['<', '=='] {
 						c.error('operator comparison methods should return `bool`', node.pos)
 					} else if parent_sym.is_primitive() {
+						if node.return_type.has_option_or_result() {
+							c.error('return type cannot be Option or Result', node.return_type_pos)
+						} else if node.name in ['+', '-', '*', '%', '/']
+							&& node.return_type != receiver_type {
+							srtype := c.table.type_to_str(receiver_type)
+							c.error('operator `${node.name}` methods on primitive aliases should return `${srtype}`',
+								node.return_type_pos)
+						}
 						// aliases of primitive types are explicitly allowed
 					} else if receiver_type != param_type {
 						srtype := c.table.type_to_str(receiver_type)
@@ -1605,7 +1613,7 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 			&& c.table.cur_fn.generic_names.len > 0
 			&& c.table.cur_fn.generic_names.len == c.table.cur_concrete_types.len {
 			mut unwrapped := param
-			unwrapped.typ = c.table.unwrap_generic_type(param.typ, c.table.cur_fn.generic_names,
+			unwrapped.typ = c.table.unwrap_generic_param_type(param, c.table.cur_fn.generic_names,
 				c.table.cur_concrete_types)
 			param = unwrapped
 		}
@@ -2009,7 +2017,7 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 				func.params[i]
 			}
 			if param.typ.has_flag(.generic) {
-				if unwrap_typ := c.table.convert_generic_type(param.typ, func.generic_names,
+				if unwrap_typ := c.table.convert_generic_param_type(param, func.generic_names,
 					concrete_types)
 				{
 					c.expected_type = unwrap_typ
@@ -2026,7 +2034,7 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 			})
 
 			if param.typ.has_flag(.generic) && func.generic_names.len == node.concrete_types.len {
-				if unwrap_typ := c.table.convert_generic_type(param.typ, func.generic_names,
+				if unwrap_typ := c.table.convert_generic_param_type(param, func.generic_names,
 					concrete_types)
 				{
 					utyp := c.unwrap_generic(typ)
@@ -2190,6 +2198,52 @@ fn (mut c Checker) check_type_and_visibility(name string, type_idx int, expected
 		return false
 	}
 	return true
+}
+
+fn (c &Checker) is_valid_os_file_struct_io_type(typ ast.Type) bool {
+	if typ.nr_muls() > 0 || typ.has_option_or_result() {
+		return false
+	}
+	mut current_typ := typ
+	mut sym := c.table.sym(current_typ)
+	for {
+		if sym.info !is ast.Alias {
+			break
+		}
+		alias_info := sym.info as ast.Alias
+		current_typ = alias_info.parent_type
+		if current_typ.nr_muls() > 0 || current_typ.has_option_or_result() {
+			return false
+		}
+		sym = c.table.sym(current_typ)
+	}
+	return sym.kind == .struct
+}
+
+fn (mut c Checker) check_os_file_struct_io_method_call(node &ast.CallExpr, method ast.Fn, concrete_types []ast.Type) {
+	if method.name !in ['read_struct', 'read_struct_at', 'write_struct', 'write_struct_at'] {
+		return
+	}
+	if method.params.len == 0 || concrete_types.len != 1 {
+		return
+	}
+	receiver_sym := c.table.final_sym(method.params[0].typ)
+	if receiver_sym.name != 'os.File' {
+		return
+	}
+	concrete_type := concrete_types[0]
+	if concrete_type.has_flag(.generic) || c.is_valid_os_file_struct_io_type(concrete_type) {
+		return
+	}
+	err_pos := if node.raw_concrete_types.len > 0 {
+		node.concrete_list_pos
+	} else if node.args.len > 0 {
+		node.args[0].pos
+	} else {
+		node.pos
+	}
+	c.error('`${receiver_sym.name}.${method.name}` expects a struct type, but got `${c.table.type_to_str(concrete_type)}`',
+		err_pos)
 }
 
 fn (mut c Checker) method_call(mut node ast.CallExpr, mut continue_check &bool) ast.Type {
@@ -2755,7 +2809,7 @@ fn (mut c Checker) method_call(mut node ast.CallExpr, mut continue_check &bool) 
 			} else {
 				concrete_types
 			}
-			if exp_utyp := c.table.convert_generic_type(exp_arg_typ, method.generic_names,
+			if exp_utyp := c.table.convert_generic_param_type(param, method.generic_names,
 				method_concrete_types)
 			{
 				exp_arg_typ = exp_utyp
@@ -2894,6 +2948,7 @@ fn (mut c Checker) method_call(mut node ast.CallExpr, mut continue_check &bool) 
 			c.need_recheck_generic_fns = true
 		}
 	}
+	c.check_os_file_struct_io_method_call(node, method, concrete_types)
 
 	if node.concrete_types.len > 0 && method_generic_names_len == 0 {
 		c.error('a non generic function called like a generic one', node.concrete_list_pos)
@@ -3127,8 +3182,11 @@ fn (mut c Checker) check_expected_arg_count(mut node ast.CallExpr, f &ast.Fn) ! 
 				if is_params {
 					// allow empty trailing struct syntax arg (`f()` where `f` is `fn(ConfigStruct)`)
 					node.args << ast.CallArg{
+						pos:  node.pos
 						expr: ast.StructInit{
-							typ: last_typ
+							typ:      last_typ
+							pos:      node.pos
+							name_pos: node.name_pos
 						}
 					}
 					return

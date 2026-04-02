@@ -142,6 +142,11 @@ ${dec_fn_dec} {
 		enc.writeln('
 ${enc_fn_dec} {
 \tcJSON *o;')
+		if utyp.is_ptr() && !utyp.has_flag(.option) {
+			enc.writeln('\tif (val == 0) {')
+			enc.writeln('\t\treturn cJSON_CreateNull();')
+			enc.writeln('\t}')
+		}
 		if is_js_prim(sym.name) && utyp.is_ptr() {
 			g.gen_prim_enc_dec(utyp, mut enc, mut dec)
 		} else if sym.kind in [.array, .array_fixed] {

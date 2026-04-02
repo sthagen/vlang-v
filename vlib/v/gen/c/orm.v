@@ -660,6 +660,9 @@ fn (mut g Gen) write_orm_expr_to_primitive(expr ast.Expr) {
 		ast.CallExpr {
 			g.write_orm_primitive(expr.return_type, expr)
 		}
+		ast.Nil {
+			g.write_orm_primitive(ast.none_type, expr)
+		}
 		ast.None {
 			g.write_orm_primitive(ast.none_type, expr)
 		}
@@ -849,12 +852,22 @@ fn (mut g Gen) write_orm_where_expr(expr ast.Expr, mut fields []string, mut pare
 			g.sql_side = .left
 			g.write_orm_where_expr(expr.left, mut fields, mut parentheses, mut kinds, mut
 				data, mut is_and)
+			is_nil_comparison := expr.right is ast.Nil && expr.op in [.eq, .ne]
+			mut ignore_rhs := expr.op in [.key_is, .not_is] || is_nil_comparison
 			mut kind := match expr.op {
 				.ne {
-					'orm__OperationKind__neq'
+					if is_nil_comparison {
+						'orm__OperationKind__is_not_null'
+					} else {
+						'orm__OperationKind__neq'
+					}
 				}
 				.eq {
-					'orm__OperationKind__eq'
+					if is_nil_comparison {
+						'orm__OperationKind__is_null'
+					} else {
+						'orm__OperationKind__eq'
+					}
 				}
 				.lt {
 					'orm__OperationKind__lt'
@@ -902,7 +915,7 @@ fn (mut g Gen) write_orm_where_expr(expr ast.Expr, mut fields []string, mut pare
 			if expr.left !is ast.InfixExpr && expr.right !is ast.InfixExpr && kind != '' {
 				kinds << kind
 			}
-			if expr.op !in [.key_is, .not_is] { // ignore rhs for unary ops
+			if !ignore_rhs { // ignore rhs for unary ops and SQL NULL equality
 				g.sql_side = .right
 				g.write_orm_where_expr(expr.right, mut fields, mut parentheses, mut kinds, mut
 					data, mut is_and)
@@ -1030,11 +1043,14 @@ fn (mut g Gen) write_orm_select(node ast.SqlExpr, connection_var_name string, re
 	g.writeln('.fields = builtin__new_array_from_c_array(${select_fields.len}, ${select_fields.len}, sizeof(string),')
 	g.indent++
 	mut types := []string{}
+	mut select_exprs := []string{}
 	if select_fields.len > 0 {
 		g.writeln('_MOV((string[${select_fields.len}]){')
 		g.indent++
 		for field in select_fields {
-			g.writeln('_S("${g.get_orm_column_name_from_struct_field(field)}"),')
+			column_name := g.get_orm_column_name_from_struct_field(field)
+			g.writeln('_S("${column_name}"),')
+			select_exprs << g.get_orm_select_expr_from_struct_field(field)
 			mut final_field_typ := g.table.final_type(field.typ.clear_flag(.option))
 			if node.aggregate_kind == .avg {
 				final_field_typ = ast.f64_type
@@ -1054,6 +1070,23 @@ fn (mut g Gen) write_orm_select(node ast.SqlExpr, connection_var_name string, re
 				continue
 			}
 			types << final_field_typ.idx().str()
+		}
+		g.indent--
+		g.writeln('})')
+	} else {
+		g.writeln('NULL')
+	}
+	g.indent--
+	g.writeln2('),', '.select_exprs = builtin__new_array_from_c_array(${select_exprs.len}, ${select_exprs.len}, sizeof(string),')
+	g.indent++
+
+	if select_exprs.len > 0 {
+		g.writeln('_MOV((string[${select_exprs.len}]){')
+		g.indent++
+		for select_expr in select_exprs {
+			expr1 := util.smart_quote(select_expr, false)
+			expr := cescape_nonascii(expr1)
+			g.writeln('_S("${expr}"),')
 		}
 		g.indent--
 		g.writeln('})')
@@ -1462,6 +1495,19 @@ fn (g &Gen) get_orm_column_name_from_struct_field(field ast.StructField) string 
 	}
 
 	return name
+}
+
+// get_orm_select_expr_from_struct_field returns the SQL expression used in a SELECT list.
+fn (g &Gen) get_orm_select_expr_from_struct_field(field ast.StructField) string {
+	if attr := field.attrs.find_first('sql_select') {
+		arg := attr.arg.trim_space()
+		if arg.len >= 2 && ((arg.starts_with("'") && arg.ends_with("'"))
+			|| (arg.starts_with('"') && arg.ends_with('"'))) {
+			return arg[1..arg.len - 1].trim_space()
+		}
+		return arg
+	}
+	return g.get_orm_column_name_from_struct_field(field)
 }
 
 // get_orm_struct_primary_field returns the table's primary column field.

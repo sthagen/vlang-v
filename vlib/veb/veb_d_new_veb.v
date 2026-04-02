@@ -26,6 +26,10 @@ pub fn run_new[A, X](mut global_app A, params RunParams) ! {
 	if params.port <= 0 || params.port > 65535 {
 		return error('invalid port number `${params.port}`, it should be between 1 and 65535')
 	}
+	if ssl_enabled(params) {
+		run_at_with_ssl[A, X](mut global_app, params)!
+		return
+	}
 
 	// Generate routes and controllers just like the original run() function.
 	routes := generate_routes[A, X](global_app)!
@@ -50,7 +54,7 @@ pub fn run_new[A, X](mut global_app A, params RunParams) ! {
 		eprintln('Failed to create server: ${err}')
 		return
 	}
-	println('[veb] Running multi-threaded app on http://localhost:${params.port}/')
+	println('[veb] Running multi-threaded app on ${server_protocol(params)}://${startup_host(params)}:${params.port}/')
 	flush_stdout()
 	server.run() or { panic(err) }
 }

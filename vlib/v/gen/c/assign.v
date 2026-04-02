@@ -7,6 +7,20 @@ import v.ast
 import v.util
 import v.token
 
+fn (mut g Gen) gen_self_recursing_anon_fn_capture_patch(left ast.Expr, anon_fn ast.AnonFn) {
+	if left !is ast.Ident || anon_fn.inherited_vars.len == 0 {
+		return
+	}
+	ident := left as ast.Ident
+	if ident.name !in anon_fn.inherited_vars.map(it.name) {
+		return
+	}
+	concrete_types := g.get_anon_fn_concrete_types(anon_fn)
+	ctx_struct := g.closure_ctx(anon_fn.decl, concrete_types)
+	left_expr := g.expr_string(left)
+	g.writeln('((${ctx_struct}*)builtin__closure__closure_data(${left_expr}))->${c_name(ident.name)} = ${left_expr};')
+}
+
 fn (mut g Gen) expr_with_opt_or_block(expr ast.Expr, expr_typ ast.Type, var_expr ast.Expr, ret_typ ast.Type,
 	in_heap bool) {
 	gen_or := expr is ast.Ident && expr.or_expr.kind != .absent
@@ -432,9 +446,10 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 						}
 					} else if val is ast.InfixExpr && val.op in [.plus, .minus, .mul, .div, .mod]
 						&& val.left_ct_expr {
-						ctyp := g.type_resolver.promote_type(g.unwrap_generic(g.type_resolver.get_type(val.left)),
-							g.unwrap_generic(g.type_resolver.get_type_or_default(val.right,
-							val.right_type)))
+						left_ctyp := g.type_resolver.get_type_or_default(val.left, val.left_type)
+						right_ctyp := g.type_resolver.get_type_or_default(val.right, val.right_type)
+						ctyp := g.type_resolver.promote_type(g.unwrap_generic(left_ctyp),
+							g.unwrap_generic(right_ctyp))
 						if ctyp != ast.void_type {
 							ct_type_var := g.comptime.get_ct_type_var(val.left)
 							if ct_type_var in [.key_var, .value_var] {
@@ -538,6 +553,7 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 					}
 					g.expr(val)
 					g.writeln(';')
+					g.gen_self_recursing_anon_fn_capture_patch(left, val)
 					if blank_assign {
 						g.write('}')
 					}

@@ -86,6 +86,39 @@ or for data that you want to share between different routes.
 A new `Context` struct is created every time a request is received,
 so it can contain different data for each request.
 
+## HTTPS
+
+To serve HTTPS directly from `veb`, pass an `mbedtls.SSLConnectConfig` in `RunParams`:
+
+```v
+module main
+
+import net.mbedtls
+import veb
+
+pub struct Context {
+	veb.Context
+}
+
+pub struct App {}
+
+pub fn (app &App) index(mut ctx Context) veb.Result {
+	return ctx.text('Hello over HTTPS')
+}
+
+fn main() {
+	mut app := &App{}
+	veb.run_at[App, Context](mut app,
+		host:       '0.0.0.0'
+		port:       8443
+		ssl_config: mbedtls.SSLConnectConfig{
+			cert:     'certs/server.crt'
+			cert_key: 'certs/server.key'
+		}
+	) or { panic(err) }
+}
+```
+
 ## Defining endpoints
 
 To add endpoints to your web server, you must extend the `App` struct.
@@ -434,7 +467,7 @@ over gzip when the client supports both.
 **How it works:**
 
 1. **Manual pre-compression**: If you create `.zst` or `.gz` files manually, veb will serve
-   them in zero-copy streaming mode for maximum performance.
+   them in zero-copy streaming mode for maximum performance when the MIME type is allowed.
 2. **Lazy compression cache**: Files smaller than the threshold are automatically compressed
    on first request and cached as `.zst` or `.gz` files on disk (zstd preferred when client
    supports it).
@@ -471,7 +504,9 @@ fn main() {
 	// Enable static file compression (zstd/gzip, disabled by default)
 	// Use enable_static_zstd and enable_static_gzip for specific compression
 	app.enable_static_compression = true
-	app.static_compression_max_size = 524288 // Maximum file size for auto-compression is 512 KB (default: 1MB)
+	// Maximum file size for auto-compression is 512 KB (default: 1MB)
+	app.static_compression_max_size = 524288
+	app.static_compression_mime_types = [veb.mime_types['.css'], veb.mime_types['.js']]
 
 	// Serve files from the 'static' directory
 	app.handle_static('static', true)!
@@ -484,6 +519,10 @@ fn main() {
 	veb.run[App, Context](mut app, 8080)
 }
 ```
+
+Set `app.static_compression_mime_types` when you only want to compress specific static MIME
+types. Leave it empty to keep the current behavior and allow compression for any static file
+type.
 
 **Setup and testing:**
 

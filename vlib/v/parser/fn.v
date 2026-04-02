@@ -1332,7 +1332,9 @@ fn (mut p Parser) fn_params() ([]ast.Param, bool, bool, bool) {
 			if is_mut {
 				p.next()
 			}
-			if p.fn_language == .c && p.tok.kind == .name
+			if p.fn_language == .c && (is_ident_name(p.tok.lit) || (p.tok.lit.len > 1
+				&& p.tok.lit[0] == `@` && is_ident_name(p.tok.lit[1..])))
+				&& p.tok.kind !in [.key_fn, .key_struct]
 				&& p.peek_tok.kind !in [.comma, .rpar, .dot] {
 				name = p.tok.lit
 				p.next()
@@ -1351,6 +1353,7 @@ fn (mut p Parser) fn_params() ([]ast.Param, bool, bool, bool) {
 			p.inside_fn_param = true
 			mut param_type := p.parse_type()
 			p.inside_fn_param = prev_inside_fn_param
+			orig_param_type := param_type
 			type_pos := pos.extend(p.prev_tok.pos())
 			if param_type == 0 {
 				// error is added in parse_type
@@ -1416,6 +1419,7 @@ fn (mut p Parser) fn_params() ([]ast.Param, bool, bool, bool) {
 				pos:        pos
 				name:       name
 				is_mut:     is_mut
+				orig_typ:   orig_param_type
 				typ:        param_type
 				type_pos:   type_pos
 				on_newline: prev_param_newline != pos.line_nr
@@ -1488,6 +1492,7 @@ fn (mut p Parser) fn_params() ([]ast.Param, bool, bool, bool) {
 			p.inside_fn_param = true
 			mut typ := p.parse_type()
 			p.inside_fn_param = prev_inside_fn_param
+			orig_typ := typ
 			type_pos[0] = pos.extend(p.prev_tok.pos())
 			if typ == 0 {
 				// error is added in parse_type
@@ -1545,6 +1550,7 @@ fn (mut p Parser) fn_params() ([]ast.Param, bool, bool, bool) {
 					is_mut:     is_mut
 					is_atomic:  is_atomic
 					is_shared:  is_shared
+					orig_typ:   orig_typ
 					typ:        typ
 					type_pos:   type_pos[i]
 					on_newline: prev_param_newline != param_pos[i].line_nr

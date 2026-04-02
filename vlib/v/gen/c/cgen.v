@@ -3133,8 +3133,8 @@ fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp ast.Ty
 		is_cast_fixed_array_init := expr is ast.CastExpr
 			&& (expr.expr is ast.ArrayInit && expr.expr.is_fixed)
 
-		is_primitive_to_interface := fname.contains('_to_Interface_') && expr is ast.Ident
-			&& g.table.sym(got).kind in [.i8, .i16, .i32, .int, .i64, .isize, .u8, .u16, .u32, .u64, .usize, .f32, .f64, .bool, .rune]
+		is_value_to_interface_needing_heap := fname.contains('_to_Interface_') && expr is ast.Ident
+			&& g.table.sym(got).kind in [.i8, .i16, .i32, .int, .i64, .isize, .u8, .u16, .u32, .u64, .usize, .f32, .f64, .bool, .rune, .string]
 
 		// Check if the expression is a function argument (local variable) that needs heap allocation
 		is_fn_arg := if expr is ast.Ident && expr.obj is ast.Var {
@@ -3142,11 +3142,10 @@ fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp ast.Ty
 		} else {
 			false
 		}
-
 		if !is_cast_fixed_array_init && (is_comptime_variant || !expr.is_lvalue()
 			|| (expr is ast.Ident && (expr.obj.is_simple_define_const()
 			|| (expr.obj is ast.Var && expr.obj.is_index_var)))
-			|| is_primitive_to_interface || is_fn_arg) {
+			|| is_value_to_interface_needing_heap || is_fn_arg) {
 			// Note: the `_to_sumtype_` family of functions do call memdup internally, making
 			// another duplicate with the HEAP macro is redundant, so use ADDR instead:
 			if expr.is_as_cast() {
@@ -3191,6 +3190,26 @@ fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp ast.Ty
 	} else {
 		g.write(')'.repeat(rparen_n))
 	}
+}
+
+fn (g &Gen) single_pointer_sumtype_nil_variant(expected_type ast.Type, expr ast.Expr, got_type ast.Type) ast.Type {
+	if !expr.is_nil() && got_type != ast.nil_type {
+		return 0
+	}
+	expected_sym := g.table.final_sym(expected_type)
+	if expected_sym.kind != .sum_type {
+		return 0
+	}
+	mut variant := ast.Type(0)
+	for sumtype_variant in (expected_sym.info as ast.SumType).variants {
+		if g.table.unaliased_type(sumtype_variant).is_any_kind_of_pointer() {
+			if variant != 0 {
+				return 0
+			}
+			variant = sumtype_variant
+		}
+	}
+	return variant
 }
 
 // use instead of expr() when you need a var to use as reference
@@ -3250,6 +3269,27 @@ fn (mut g Gen) expr_with_fixed_array(expr ast.Expr, got_type_raw ast.Type, expec
 	}
 	g.write(stmt_str)
 	return tmp_var
+}
+
+fn (mut g Gen) gen_interface_to_interface_conversion(expr ast.Expr, expr_type ast.Type, to_type ast.Type) {
+	mut expr_type_sym := g.table.sym(expr_type)
+	to_sym := g.table.sym(to_type)
+	g.write('I_${expr_type_sym.cname}_as_I_${to_sym.cname}(')
+	if expr_type.is_ptr() {
+		g.write('*')
+	}
+	g.expr(expr)
+	g.write(')')
+
+	mut info := expr_type_sym.info as ast.Interface
+	lock info.conversions {
+		if to_type !in info.conversions {
+			left_variants := g.table.iface_types[expr_type_sym.name]
+			right_variants := g.table.iface_types[to_sym.name]
+			info.conversions[to_type] = left_variants.filter(it in right_variants)
+		}
+	}
+	expr_type_sym.info = info
 }
 
 // use instead of expr() when you need to cast to a different type
@@ -3317,23 +3357,7 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 	if got_sym.info is ast.Interface && exp_sym.info is ast.Interface
 		&& got_type.idx() != expected_type.idx() && !got_type.has_flag(.shared_f)
 		&& !expected_type.has_flag(.shared_f) {
-		g.write('I_${got_sym.cname}_as_I_${exp_sym.cname}(')
-		if got_type.is_ptr() {
-			g.write('*')
-		}
-		g.expr(expr)
-		g.write(')')
-
-		mut got_interface_sym := g.table.sym(got_type)
-		mut info := got_interface_sym.info as ast.Interface
-		lock info.conversions {
-			if expected_type !in info.conversions {
-				left_variants := g.table.iface_types[got_sym.name]
-				right_variants := g.table.iface_types[exp_sym.name]
-				info.conversions[expected_type] = left_variants.filter(it in right_variants)
-			}
-		}
-		got_interface_sym.info = info
+		g.gen_interface_to_interface_conversion(expr, got_type, expected_type)
 		return
 	}
 	// cast to sum type
@@ -3351,14 +3375,33 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 		unwrapped_exp_sym := g.table.sym(unwrapped_expected_type)
 		mut unwrapped_got_type := g.unwrap_generic(got_type)
 		mut unwrapped_got_sym := g.table.sym(unwrapped_got_type)
+		mut sumtype_got_type := unwrapped_got_type
+		mut sumtype_got_sym := unwrapped_got_sym
+		mut sumtype_got_styp := got_styp
+		mut sumtype_got_is_fn := got_is_fn
+		mut sumtype_got_is_ptr := got_is_ptr
+		nil_sumtype_variant := g.single_pointer_sumtype_nil_variant(unwrapped_expected_type,
+			expr, got_type)
+		if nil_sumtype_variant != 0 {
+			sumtype_got_type = nil_sumtype_variant
+			sumtype_got_sym = g.table.sym(sumtype_got_type)
+			sumtype_got_styp = g.styp(sumtype_got_type)
+			sumtype_got_is_fn = sumtype_got_sym.kind == .function
+			sumtype_got_is_ptr = sumtype_got_type.is_ptr()
+		}
 
 		expected_deref_type := if expected_is_ptr {
 			unwrapped_expected_type.deref()
 		} else {
 			unwrapped_expected_type
 		}
-		got_deref_type := if got_is_ptr { unwrapped_got_type.deref() } else { unwrapped_got_type }
-		if g.table.sumtype_has_variant(expected_deref_type, got_deref_type, false) {
+		got_deref_type := if sumtype_got_is_ptr {
+			sumtype_got_type.deref()
+		} else {
+			sumtype_got_type
+		}
+		if nil_sumtype_variant != 0
+			|| g.table.sumtype_has_variant(expected_deref_type, got_deref_type, false) {
 			mut is_already_sum_type := false
 			scope := g.file.scope.innermost(expr.pos().pos)
 			if expr is ast.Ident {
@@ -3380,12 +3423,15 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 				g.prevent_sum_type_unwrapping_once = true
 				g.expr(expr)
 			} else {
-				if mut unwrapped_got_sym.info is ast.Aggregate {
-					unwrapped_got_type = unwrapped_got_sym.info.types[g.aggregate_type_idx]
-					unwrapped_got_sym = g.table.sym(unwrapped_got_type)
+				if mut sumtype_got_sym.info is ast.Aggregate {
+					sumtype_got_type = sumtype_got_sym.info.types[g.aggregate_type_idx]
+					sumtype_got_sym = g.table.sym(sumtype_got_type)
+					sumtype_got_styp = g.styp(sumtype_got_type)
+					sumtype_got_is_fn = sumtype_got_sym.kind == .function
+					sumtype_got_is_ptr = sumtype_got_type.is_ptr()
 				}
 
-				fname := g.get_sumtype_casting_fn(unwrapped_got_type, unwrapped_expected_type)
+				fname := g.get_sumtype_casting_fn(sumtype_got_type, unwrapped_expected_type)
 				if expr is ast.ArrayInit && got_sym.kind == .array_fixed {
 					stmt_str := g.go_before_last_stmt().trim_space()
 					g.empty_line = true
@@ -3397,8 +3443,9 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 					g.write('${fname}(&${tmp_var}, ${unwrapped_expected_type.is_ptr()})')
 					return
 				} else {
-					g.call_cfn_for_casting_expr(fname, expr, expected_type, got_type,
-						unwrapped_exp_sym.cname, got_is_ptr, got_is_fn, got_styp)
+					g.call_cfn_for_casting_expr(fname, expr, expected_type, sumtype_got_type,
+						unwrapped_exp_sym.cname, sumtype_got_is_ptr, sumtype_got_is_fn,
+						sumtype_got_styp)
 				}
 			}
 			return
@@ -4422,8 +4469,62 @@ fn (mut g Gen) type_name(raw_type ast.Type) {
 	g.write('_S("${util.strip_main_name(s)}")')
 }
 
+fn (mut g Gen) resolve_typeof_expr_type(expr ast.Expr, default_type ast.Type) ast.Type {
+	match expr {
+		ast.Ident {
+			if expr.obj is ast.Var {
+				if expr.obj.smartcasts.len > 0 {
+					mut typ := g.unwrap_generic(expr.obj.smartcasts.last())
+					cast_sym := g.table.sym(typ)
+					if cast_sym.info is ast.Aggregate {
+						typ = cast_sym.info.types[g.aggregate_type_idx]
+					} else if expr.obj.ct_type_var == .smartcast {
+						typ = g.unwrap_generic(g.type_resolver.get_type(expr))
+					}
+					return typ
+				}
+				if expr.obj.ct_type_var == .smartcast {
+					typ := g.unwrap_generic(g.type_resolver.get_type(expr))
+					if typ != ast.void_type {
+						return typ
+					}
+				}
+				obj_typ := expr.obj.typ
+				obj_sym := g.table.final_sym(g.unwrap_generic(obj_typ))
+				if obj_sym.kind in [.interface, .sum_type] {
+					return default_type
+				}
+				return g.type_resolver.get_type_or_default(expr, obj_typ)
+			}
+		}
+		ast.CallExpr {
+			resolved_type := g.resolve_return_type(expr)
+			if resolved_type != ast.void_type {
+				return resolved_type
+			}
+			if expr.return_type != 0 {
+				return expr.return_type
+			}
+		}
+		ast.SelectorExpr {
+			if expr.typ != 0 {
+				resolved_type := g.type_resolver.typeof_type(expr, expr.typ)
+				if resolved_type != ast.void_type {
+					return resolved_type
+				}
+			}
+		}
+		else {}
+	}
+	return default_type
+}
+
 fn (mut g Gen) typeof_expr(node ast.TypeOf) {
-	typ := g.type_resolver.typeof_type(node.expr, g.get_type(node.typ))
+	mut default_type := g.get_type(node.typ)
+	if !node.is_type {
+		default_type = g.resolve_typeof_expr_type(node.expr, default_type)
+	}
+	typ := g.type_resolver.typeof_type(node.expr, default_type)
 	sym := g.table.sym(typ)
 	if sym.kind == .sum_type {
 		// When encountering a .sum_type, typeof() should be done at runtime,
@@ -4476,9 +4577,20 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 					// typeof(expr).name
 					mut name_type := node.name_type
 					if node.expr is ast.TypeOf {
-						name_type = g.type_resolver.typeof_type(node.expr.expr, name_type)
+						name_type = g.type_resolver.typeof_type(node.expr.expr, g.resolve_typeof_expr_type(node.expr.expr,
+							name_type))
 						if name_type == ast.void_type_idx {
 							name_type = node.name_type
+						}
+						// For mut params, typeof_type strips the pointer for comptime,
+						// but typeof(x).name should show the actual pointer type.
+						if node.expr.expr is ast.Ident {
+							if node.expr.expr.obj is ast.Var {
+								if node.expr.expr.obj.is_auto_deref
+									&& node.expr.expr.obj.typ.is_ptr() {
+									name_type = name_type.ref()
+								}
+							}
 						}
 					}
 					g.type_name(name_type)
@@ -4488,7 +4600,16 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 					mut name_type := node.name_type
 					if node.expr is ast.TypeOf {
 						name_type = g.type_resolver.typeof_field_type(g.type_resolver.typeof_type(node.expr.expr,
-							name_type), node.field_name)
+							g.resolve_typeof_expr_type(node.expr.expr, name_type)), node.field_name)
+						// For mut params (auto_deref), strip pointer so that
+						// typeof(mut_param).idx == typeof(val_param).idx
+						if node.expr.expr is ast.Ident {
+							if node.expr.expr.obj is ast.Var {
+								if node.expr.expr.obj.is_auto_deref && name_type.is_ptr() {
+									name_type = name_type.deref()
+								}
+							}
+						}
 						g.write(int(name_type).str())
 					} else {
 						g.write(int(g.unwrap_generic(name_type)).str())
@@ -4498,13 +4619,14 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 					// `T.<field_name>`, `typeof(expr).<field_name>`
 					mut name_type := node.name_type
 					name_type = g.type_resolver.typeof_field_type(g.type_resolver.typeof_type(node.expr,
-						name_type), node.field_name)
+						g.resolve_typeof_expr_type(node.expr, name_type)), node.field_name)
 					g.write(int(name_type).str())
 					return
 				} else if node.field_name == 'indirections' {
 					mut name_type := node.name_type
 					if node.expr is ast.TypeOf {
-						name_type = g.type_resolver.typeof_type(node.expr.expr, name_type)
+						name_type = g.type_resolver.typeof_type(node.expr.expr, g.resolve_typeof_expr_type(node.expr.expr,
+							name_type))
 					}
 					// `typeof(expr).indirections`
 					g.write(int(g.unwrap_generic(name_type).nr_muls()).str())
@@ -4994,6 +5116,14 @@ fn (mut g Gen) check_var_scope(obj ast.Var, node_pos int) bool {
 	return true
 }
 
+@[inline]
+fn (g &Gen) debugger_var_cname(obj ast.Var) string {
+	if obj.is_inherited {
+		return '${closure_ctx}->${c_name(obj.name)}'
+	}
+	return c_name(obj.name)
+}
+
 // debugger_stmt writes the call to V debugger REPL
 fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 	paline, pafile, pamod, pafn := g.panic_debug_info(node.pos)
@@ -5018,6 +5148,7 @@ fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 				continue
 			}
 			if obj is ast.Var && g.check_var_scope(obj, node.pos.pos) {
+				cobj_name := g.debugger_var_cname(obj)
 				keys.write_string('_S("${obj.name}")')
 				var_typ := if obj.ct_type_var != .no_comptime {
 					g.type_resolver.get_type(ast.Ident{ obj: obj })
@@ -5068,24 +5199,24 @@ fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 					if obj.ct_type_var == .smartcast {
 						cur_variant_sym := g.table.sym(g.unwrap_generic(g.type_resolver.get_ct_type_or_default('${g.comptime.comptime_for_variant_var}.typ',
 							ast.void_type)))
-						param_var.write_string('${obj.name}${dot}_${cur_variant_sym.cname}')
+						param_var.write_string('${cobj_name}${dot}_${cur_variant_sym.cname}')
 					} else if cast_sym.info is ast.Aggregate {
 						sym := g.table.sym(cast_sym.info.types[g.aggregate_type_idx])
 						func = g.get_str_fn(cast_sym.info.types[g.aggregate_type_idx])
-						param_var.write_string('${obj.name}${dot}_${sym.cname}')
+						param_var.write_string('${cobj_name}${dot}_${sym.cname}')
 					} else if obj_sym.kind == .interface && cast_sym.kind == .interface {
 						ptr := '*'.repeat(obj.typ.nr_muls())
-						param_var.write_string('I_${obj_sym.cname}_as_I_${cast_sym.cname}(${ptr}${obj.name})')
+						param_var.write_string('I_${obj_sym.cname}_as_I_${cast_sym.cname}(${ptr}${cobj_name})')
 					} else if obj_sym.kind in [.sum_type, .interface] {
-						param_var.write_string('${obj.name}')
+						param_var.write_string('${cobj_name}')
 						if opt_cast {
 							param_var.write_string('.data)')
 						}
 						param_var.write_string('${dot}_${cast_sym.cname}')
 					} else if is_option && !var_typ_is_option {
-						param_var.write_string('${obj.name}.data')
+						param_var.write_string('${cobj_name}.data')
 					} else {
-						param_var.write_string('${obj.name}')
+						param_var.write_string('${cobj_name}')
 					}
 					param_var.write_string(')')
 
@@ -5095,7 +5226,7 @@ fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 					if is_option && !var_typ_is_option {
 						// option unwrap
 						base_typ := g.base_type(obj.typ)
-						values.write_string('${func}(*(${base_typ}*)${obj.name}.data)}')
+						values.write_string('${func}(*(${base_typ}*)${cobj_name}.data)}')
 					} else {
 						_, str_method_expects_ptr, _ := cast_sym.str_method_info()
 
@@ -5121,7 +5252,7 @@ fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 						} else {
 							''
 						}
-						values.write_string('${func}(${deref}${obj.name})}')
+						values.write_string('${func}(${deref}${cobj_name})}')
 					}
 				}
 				vars << obj.name
@@ -5992,6 +6123,9 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 			}
 		}
 	} else {
+		if g.write_array_data_ptr_cast(node, node_typ) {
+			return
+		}
 		styp := g.styp(node_typ)
 		if (g.pref.translated || g.file.is_translated) && sym.kind == .function {
 			// TODO: handle the type in fn casts, not just exprs
@@ -6081,6 +6215,28 @@ fn (mut g Gen) cast_expr(node ast.CastExpr) {
 			}
 		}
 	}
+}
+
+fn (mut g Gen) write_array_data_ptr_cast(node ast.CastExpr, node_typ ast.Type) bool {
+	if !node_typ.is_ptr() || node_typ.is_voidptr() || node.expr !is ast.PrefixExpr {
+		return false
+	}
+	prefix := node.expr as ast.PrefixExpr
+	if prefix.op != .amp {
+		return false
+	}
+	final_node_sym := g.table.final_sym(node_typ)
+	if final_node_sym.kind == .array || node_typ.deref().idx() == ast.array_type_idx
+		|| final_node_sym.name == 'array' {
+		return false
+	}
+	if g.table.final_sym(prefix.right_type).kind != .array {
+		return false
+	}
+	g.write('(${g.styp(node_typ)})((')
+	g.expr(prefix.right)
+	g.write(').data)')
+	return true
 }
 
 fn (mut g Gen) concat_expr(node ast.ConcatExpr) {
@@ -7729,6 +7885,7 @@ fn (mut g Gen) or_block(var_name string, or_block ast.OrExpr, return_type ast.Ty
 			g.writeln('if (${cvar_name}${tmp_op}state != 0) {')
 		}
 	}
+	g.write_v_source_line_info_pos(or_block.pos)
 	if or_block.kind == .block {
 		g.or_expr_return_type = return_type.clear_option_and_result()
 		if or_block.err_used
@@ -8246,22 +8403,7 @@ fn (mut g Gen) as_cast(node ast.AsCast) {
 			g.as_cast_type_names[idx] = variant_sym.name
 		}
 	} else if expr_type_sym.kind == .interface && sym.kind == .interface {
-		g.write('I_${expr_type_sym.cname}_as_I_${sym.cname}(')
-		if node.expr_type.is_ptr() {
-			g.write('*')
-		}
-		g.expr(node.expr)
-		g.write(')')
-
-		mut info := expr_type_sym.info as ast.Interface
-		lock info.conversions {
-			if node.typ !in info.conversions {
-				left_variants := g.table.iface_types[expr_type_sym.name]
-				right_variants := g.table.iface_types[sym.name]
-				info.conversions[node.typ] = left_variants.filter(it in right_variants)
-			}
-		}
-		expr_type_sym.info = info
+		g.gen_interface_to_interface_conversion(node.expr, node.expr_type, node.typ)
 	} else if mut expr_type_sym.info is ast.Interface && node.expr_type != node.typ {
 		dot := if node.expr_type.is_ptr() { '->' } else { '.' }
 		if node.expr.has_fn_call() && !g.is_cc_msvc {

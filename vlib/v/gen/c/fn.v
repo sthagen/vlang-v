@@ -108,6 +108,7 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 	g.gen_attrs(node.attrs)
 	mut skip := false
 	pos := g.out.len
+	defs_pos := g.definitions.len
 	should_bundle_module := util.should_bundle_module(node.mod)
 	if g.pref.build_mode == .build_module {
 		// TODO: true for not just "builtin"
@@ -157,6 +158,9 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 	g.fn_decl = keep_fn_decl
 	if skip {
 		g.go_back_to(pos)
+		if g.pref.build_mode != .build_module && !g.pref.use_cache {
+			g.definitions.go_back_to(defs_pos)
+		}
 	}
 	if !g.pref.skip_unused {
 		if node.language != .c {
@@ -501,6 +505,11 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 		// Adding the mutex lock/unlock inside the body of the implementation
 		// function is not reliable, because the implementation function can do
 		// an early exit, which will leave the mutex locked.
+		live_mutex_ptr_type := if g.pref.os == .windows {
+			'HANDLE*'
+		} else {
+			'pthread_mutex_t*'
+		}
 		mut fn_args_list := []string{}
 		for ia, fa in fargs {
 			fn_args_list << '${fargtypes[ia]} ${fa}'
@@ -516,9 +525,10 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 		}
 		g.definitions.writeln('${type_name} ${name}(' + fn_args_list.join(', ') + ');')
 		g.hotcode_definitions.writeln('${type_name} ${name}(' + fn_args_list.join(', ') + '){')
-		g.hotcode_definitions.writeln('  pthread_mutex_lock(&live_fn_mutex);')
+		g.hotcode_definitions.writeln('  ${live_mutex_ptr_type} live_fn_mutex_ptr = v_live_fn_mutex_ptr();')
+		g.hotcode_definitions.writeln('  pthread_mutex_lock(live_fn_mutex_ptr);')
 		g.hotcode_definitions.writeln('  ${live_fncall}')
-		g.hotcode_definitions.writeln('  pthread_mutex_unlock(&live_fn_mutex);')
+		g.hotcode_definitions.writeln('  pthread_mutex_unlock(live_fn_mutex_ptr);')
 		g.hotcode_definitions.writeln('  ${live_fnreturn}')
 		g.hotcode_definitions.writeln('}')
 	}
@@ -874,6 +884,18 @@ fn (mut g Gen) fn_decl_params(params []ast.Param, scope &ast.Scope, is_variadic 
 			typ = g.table.sym(typ).array_info().elem_type.set_flag(.variadic)
 		}
 		param_type_sym := g.table.sym(typ)
+		if param.is_mut && param.orig_typ != 0 && param.orig_typ.has_flag(.generic)
+			&& param.typ.has_flag(.generic) {
+			mut surface_typ := g.unwrap_generic(param.orig_typ)
+			typ = if surface_typ.is_ptr() && g.table.sym(surface_typ).kind == .struct {
+				surface_typ.ref()
+			} else {
+				surface_typ.set_nr_muls(1)
+			}
+			if typ.has_flag(.option) {
+				typ = typ.set_flag(.option_mut_param_t)
+			}
+		}
 		if param.is_mut && param.typ.has_flag(.generic) && typ.has_flag(.option) {
 			typ = typ.set_flag(.option_mut_param_t).set_nr_muls(param.typ.nr_muls() - 1)
 		}
@@ -2990,6 +3012,12 @@ fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type_ ast.Type, lang a
 	exp_sym := g.table.sym(expected_type)
 	mut needs_closing := false
 	old_inside_smartcast := g.inside_smartcast
+	if arg.is_mut && arg.expr.is_auto_deref_var() && arg_typ.is_ptr() && expected_type.is_ptr() {
+		g.arg_no_auto_deref = true
+		g.expr_with_cast(arg.expr, arg_typ, expected_type)
+		g.arg_no_auto_deref = false
+		return
+	}
 	if arg.is_mut && !exp_is_ptr {
 		g.write('&/*mut*/')
 	} else if arg.is_mut && arg_typ.is_ptr() && expected_type.is_ptr()

@@ -52,6 +52,35 @@ fn test_cross_compile_keeps_explicit_cc() {
 	assert second.ccompiler == custom_cc
 }
 
+fn new_wasm_preferences() pref.Preferences {
+	return pref.Preferences{
+		backend: .wasm
+		os:      .browser
+		arch:    .wasm32
+	}
+}
+
+fn test_wasm_backend_filters_backend_specific_files() {
+	prefs := new_wasm_preferences()
+	dir := os.join_path(os.vtmp_dir(), 'wasm_backend_filters')
+	filtered := prefs.should_compile_filtered_files(dir, [
+		'mod.c.v',
+		'mod.js.v',
+		'mod.v',
+		'mod.wasm.v',
+	])
+	assert filtered == [
+		os.join_path(dir, 'mod.v'),
+		os.join_path(dir, 'mod.wasm.v'),
+	]
+}
+
+fn test_wasm_backend_skips_modules_with_only_c_and_js_variants() {
+	prefs := new_wasm_preferences()
+	filtered := prefs.should_compile_filtered_files('sus', ['sus.c.v', 'sus.js.v'])
+	assert filtered.len == 0
+}
+
 fn test_v_cmds_and_flags() {
 	build_cmd_res := os.execute('${vexe} build ${vroot}/examples/hello_world.v')
 	assert build_cmd_res.output.trim_space() == 'Use `v ${vroot}/examples/hello_world.v` instead.'
@@ -136,4 +165,22 @@ fn test_generate_c_project_creates_build_files() {
 	assert build_command.contains('cJSON.c')
 	assert !build_command.contains('.tmp.c')
 	assert !build_command.contains('.module.')
+}
+
+fn test_output_flag_accepts_directory_path() {
+	output_dir := os.join_path(os.vtmp_dir(), 'v_output_flag_directory')
+	os.rmdir_all(output_dir) or {}
+	defer {
+		os.rmdir_all(output_dir) or {}
+	}
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	output_arg := output_dir + os.path_separator
+	res := os.execute('${os.quoted_path(vexe)} -o ${os.quoted_path(output_arg)} ${os.quoted_path(target)}')
+	assert res.exit_code == 0, res.output
+	assert os.is_dir(output_dir)
+	mut expected_output := os.join_path(output_dir, 'hello_world')
+	$if windows {
+		expected_output += '.exe'
+	}
+	assert os.is_file(expected_output)
 }

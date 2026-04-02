@@ -1721,6 +1721,30 @@ pub fn (mut t Table) bitsize_to_type(bit_size int) Type {
 	}
 }
 
+pub fn (t &Table) interface_inherits_interface(typ Type, inter_typ Type) bool {
+	if typ.idx() == inter_typ.idx() {
+		return true
+	}
+	sym := t.sym(typ)
+	if sym.kind != .interface || sym.info !is Interface {
+		return false
+	}
+	info := sym.info as Interface
+	for embed in info.embeds {
+		if embed.idx() == inter_typ.idx() || t.interface_inherits_interface(embed, inter_typ) {
+			return true
+		}
+	}
+	if info.parent_type != 0 && info.parent_type.idx() != 0 && info.parent_type != typ {
+		parent_sym := t.sym(info.parent_type)
+		if parent_sym.kind == .interface
+			&& t.interface_inherits_interface(info.parent_type, inter_typ) {
+			return true
+		}
+	}
+	return false
+}
+
 pub fn (t &Table) does_type_implement_interface(typ Type, inter_typ Type) bool {
 	if typ.idx() == inter_typ.idx() {
 		// same type -> already casted to the interface
@@ -1741,7 +1765,8 @@ pub fn (t &Table) does_type_implement_interface(typ Type, inter_typ Type) bool {
 		}
 	}
 	mut inter_sym := t.sym(inter_typ)
-	if sym.kind == .interface && inter_sym.kind == .interface {
+	is_interface_upcast := sym.kind == .interface && inter_sym.kind == .interface
+	if is_interface_upcast && !t.interface_inherits_interface(typ, inter_typ) {
 		return false
 	}
 	if mut inter_sym.info is Interface {
@@ -1801,7 +1826,7 @@ pub fn (t &Table) does_type_implement_interface(typ Type, inter_typ Type) bool {
 			}
 			return false
 		}
-		if typ != voidptr_type && typ != nil_type && typ != none_type
+		if !is_interface_upcast && typ != voidptr_type && typ != nil_type && typ != none_type
 			&& !inter_sym.info.types.contains(typ) {
 			inter_sym.info.types << typ
 		}
@@ -1919,11 +1944,16 @@ pub fn (mut t Table) convert_generic_type(generic_type Type, generic_names []str
 			func.params = func.params.clone()
 			for mut param in func.params {
 				if param.typ.has_flag(.generic) {
-					if typ := t.convert_generic_type(param.typ, generic_names, to_types) {
+					if typ := t.convert_generic_param_type(param, generic_names, to_types) {
 						param.typ = typ
 						if typ.has_flag(.generic) {
 							has_generic = true
 						}
+					}
+				}
+				if param.orig_typ.has_flag(.generic) {
+					if otyp := t.convert_generic_type(param.orig_typ, generic_names, to_types) {
+						param.orig_typ = otyp
 					}
 				}
 			}
@@ -2107,6 +2137,67 @@ pub fn (mut t Table) convert_generic_type(generic_type Type, generic_names []str
 	return none
 }
 
+fn (mut t Table) lower_mut_param_type(typ Type) Type {
+	mut lowered := if typ.is_ptr() && t.sym(typ).kind == .struct {
+		typ.ref()
+	} else {
+		typ.set_nr_muls(1)
+	}
+	if lowered.has_flag(.option) {
+		lowered = lowered.set_flag(.option_mut_param_t)
+	}
+	return lowered
+}
+
+pub fn (mut t Table) convert_generic_param_type(param Param, generic_names []string, to_types []Type) ?Type {
+	if param.is_mut && param.orig_typ != 0 && param.orig_typ.has_flag(.generic)
+		&& to_types.all(!it.has_flag(.generic)) {
+		if typ := t.convert_generic_type(param.orig_typ, generic_names, to_types) {
+			return t.lower_mut_param_type(typ)
+		}
+	}
+	return t.convert_generic_type(param.typ, generic_names, to_types)
+}
+
+// type_contains_placeholder returns true if the given type or any of its inner
+// generic types resolves to a placeholder (i.e., an undefined/unknown type).
+pub fn (t &Table) type_contains_placeholder(typ Type) bool {
+	sym := t.sym(typ)
+	if sym.kind == .placeholder {
+		return true
+	}
+	return match sym.info {
+		Array {
+			t.type_contains_placeholder(sym.info.elem_type)
+		}
+		ArrayFixed {
+			t.type_contains_placeholder(sym.info.elem_type)
+		}
+		Map {
+			t.type_contains_placeholder(sym.info.key_type)
+				|| t.type_contains_placeholder(sym.info.value_type)
+		}
+		SumType {
+			sym.info.concrete_types.any(t.type_contains_placeholder(it))
+		}
+		Struct {
+			sym.info.concrete_types.any(t.type_contains_placeholder(it))
+		}
+		else {
+			false
+		}
+	}
+}
+
+pub fn (mut t Table) unwrap_generic_param_type(param Param, generic_names []string, concrete_types []Type) Type {
+	if param.is_mut && param.orig_typ != 0 && param.orig_typ.has_flag(.generic)
+		&& concrete_types.all(!it.has_flag(.generic)) {
+		return t.lower_mut_param_type(t.unwrap_generic_type(param.orig_typ, generic_names,
+			concrete_types))
+	}
+	return t.unwrap_generic_type(param.typ, generic_names, concrete_types)
+}
+
 fn generic_names_push_with_filter(mut to_names []string, from_names []string) {
 	for name in from_names {
 		if name !in to_names {
@@ -2215,9 +2306,13 @@ pub fn (mut t Table) unwrap_generic_type_ex(typ Type, generic_names []string, co
 			mut has_generic := false
 			for i, param in unwrapped_fn.params {
 				if param.typ.has_flag(.generic) {
-					unwrapped_fn.params[i].typ = t.unwrap_generic_type_ex(param.typ, generic_names,
-						concrete_types, recheck_concrete_types)
+					unwrapped_fn.params[i].typ = t.unwrap_generic_param_type(param, generic_names,
+						concrete_types)
 					has_generic = true
+				}
+				if param.orig_typ.has_flag(.generic) {
+					unwrapped_fn.params[i].orig_typ = t.unwrap_generic_type(param.orig_typ,
+						generic_names, concrete_types)
 				}
 			}
 			if unwrapped_fn.return_type.has_flag(.generic) {
@@ -2447,7 +2542,7 @@ pub fn (mut t Table) unwrap_generic_type_ex(typ Type, generic_names []string, co
 					method.return_type = unwrap_typ
 				}
 				for mut param in method.params {
-					if unwrap_typ := t.convert_generic_type(param.typ, gn_names, concrete_types) {
+					if unwrap_typ := t.convert_generic_param_type(param, gn_names, concrete_types) {
 						param.typ = unwrap_typ
 					}
 				}
@@ -2611,7 +2706,7 @@ pub fn (mut t Table) generic_insts_to_concrete() {
 							}
 							method.params = method.params.clone()
 							for mut param in method.params {
-								if pt := t.convert_generic_type(param.typ, generic_names,
+								if pt := t.convert_generic_param_type(param, generic_names,
 									info.concrete_types)
 								{
 									param.typ = pt
@@ -2694,10 +2789,17 @@ pub fn (mut t Table) generic_insts_to_concrete() {
 					function.params = function.params.clone()
 					for mut param in function.params {
 						if param.typ.has_flag(.generic) {
-							if t_typ := t.convert_generic_type(param.typ, function.generic_names,
+							if t_typ := t.convert_generic_param_type(param, function.generic_names,
 								info.concrete_types)
 							{
 								param.typ = t_typ
+							}
+						}
+						if param.orig_typ.has_flag(.generic) {
+							if t_typ := t.convert_generic_type(param.orig_typ, function.generic_names,
+								info.concrete_types)
+							{
+								param.orig_typ = t_typ
 							}
 						}
 					}
