@@ -88,8 +88,13 @@ static inline void vgc_set_cache_idx(int idx) { _vgc_cache_idx = idx; }
   static inline void vgc_os_decommit(void* ptr, size_t size) {
       VirtualFree(ptr, size, MEM_DECOMMIT);
   }
+  static inline int vgc_num_cpus(void) {
+      DWORD count = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+      return count > 0 ? (int)count : 1;
+  }
 #else
   #include <sys/mman.h>
+  #include <unistd.h>
   static inline void* vgc_os_alloc(size_t size) {
       void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       return (p == MAP_FAILED) ? NULL : p;
@@ -99,6 +104,10 @@ static inline void vgc_set_cache_idx(int idx) { _vgc_cache_idx = idx; }
   }
   static inline void vgc_os_decommit(void* ptr, size_t size) {
       madvise(ptr, size, MADV_DONTNEED);
+  }
+  static inline int vgc_num_cpus(void) {
+      long count = sysconf(_SC_NPROCESSORS_ONLN);
+      return count > 0 ? (int)count : 1;
   }
 #endif
 
@@ -110,6 +119,59 @@ static inline void vgc_set_cache_idx(int idx) { _vgc_cache_idx = idx; }
   static inline void* vgc_get_sp(void) { return _AddressOfReturnAddress(); }
 #else
   static inline void* vgc_get_sp(void) { return __builtin_frame_address(0); }
+#endif
+
+// ============================================================
+// Stack bounds
+// ============================================================
+#if defined(__APPLE__)
+  #include <pthread.h>
+  static inline int vgc_get_stack_bounds(uintptr_t* lo, uintptr_t* hi) {
+      void* stack_hi = pthread_get_stackaddr_np(pthread_self());
+      size_t stack_size = pthread_get_stacksize_np(pthread_self());
+      if (stack_hi == NULL || stack_size == 0) return 0;
+      *hi = (uintptr_t)stack_hi;
+      *lo = *hi - stack_size;
+      return 1;
+  }
+#elif defined(__linux__) || defined(__ANDROID__)
+  #include <pthread.h>
+  static inline int vgc_get_stack_bounds(uintptr_t* lo, uintptr_t* hi) {
+      pthread_attr_t attr;
+      if (pthread_getattr_np(pthread_self(), &attr) != 0) return 0;
+      void* stack_lo = NULL;
+      size_t stack_size = 0;
+      int ok = pthread_attr_getstack(&attr, &stack_lo, &stack_size) == 0 && stack_lo != NULL && stack_size != 0;
+      pthread_attr_destroy(&attr);
+      if (!ok) return 0;
+      *lo = (uintptr_t)stack_lo;
+      *hi = *lo + stack_size;
+      return 1;
+  }
+#elif defined(__FreeBSD__) || defined(__DragonFly__) || defined(__NetBSD__) || defined(__OpenBSD__)
+  #include <pthread.h>
+  static inline int vgc_get_stack_bounds(uintptr_t* lo, uintptr_t* hi) {
+      pthread_attr_t attr;
+      if (pthread_attr_init(&attr) != 0) return 0;
+      if (pthread_attr_get_np(pthread_self(), &attr) != 0) {
+          pthread_attr_destroy(&attr);
+          return 0;
+      }
+      void* stack_lo = NULL;
+      size_t stack_size = 0;
+      int ok = pthread_attr_getstack(&attr, &stack_lo, &stack_size) == 0 && stack_lo != NULL && stack_size != 0;
+      pthread_attr_destroy(&attr);
+      if (!ok) return 0;
+      *lo = (uintptr_t)stack_lo;
+      *hi = *lo + stack_size;
+      return 1;
+  }
+#else
+  static inline int vgc_get_stack_bounds(uintptr_t* lo, uintptr_t* hi) {
+      (void)lo;
+      (void)hi;
+      return 0;
+  }
 #endif
 
 // ============================================================
