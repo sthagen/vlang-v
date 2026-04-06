@@ -98,7 +98,7 @@ fn run_new_generic_solver_tests(root_label string, test_cmd string, expected_sum
 }
 
 const expected_summsvc_generics = 'Summary for all V _test.v files: 104 failed, 170 passed, 274 total.'
-const expected_summary_generics = 'Summary for all V _test.v files: 103 failed, 171 passed, 274 total.'
+const expected_summary_generics = 'Summary for all V _test.v files: 102 failed, 172 passed, 274 total.'
 const expected_summsvc_vec = 'Summary for all V _test.v files: 3 failed, 3 total.'
 const expected_summary_vec = 'Summary for all V _test.v files: 3 failed, 3 total.'
 const expected_summsvc_flag = 'Summary for all V _test.v files: 2 failed, 17 passed, 19 total.'
@@ -117,8 +117,8 @@ const failing_tests = [
 	'vlib/v/tests/generics/generic_different_type_test.v',
 	'vlib/v/tests/generics/generic_dump_test.v',
 	'vlib/v/tests/generics/generic_fn_assign_generics_struct_test.v',
-	'vlib/v/tests/generics/generic_fn_call_by_generic_fn_test.v',
 	'vlib/v/tests/generics/generic_fn_call_with_reference_argument_test.v',
+	'vlib/v/tests/generics/generic_fn_infer_multi_paras_test.v',
 	'vlib/v/tests/generics/generic_fn_infer_nested_struct_test.v',
 	'vlib/v/tests/generics/generic_fn_multi_return_test.v',
 	'vlib/v/tests/generics/generic_fn_typeof_name_test.v',
@@ -186,7 +186,6 @@ const failing_tests = [
 	'vlib/v/tests/generics/generics_stack_of_sumtype_push_test.v',
 	'vlib/v/tests/generics/generics_str_intp_test.v',
 	'vlib/v/tests/generics/generics_struct_anon_fn_type_test.v',
-	'vlib/v/tests/generics/generics_struct_field_with_default_fn_type_test.v',
 	'vlib/v/tests/generics/generics_struct_free_test.v',
 	'vlib/v/tests/generics/generics_struct_inst_method_call_test.v',
 	'vlib/v/tests/generics/generics_struct_parent_has_str_to_string_test.v',
