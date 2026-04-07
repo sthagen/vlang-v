@@ -2076,7 +2076,7 @@ fn (mut c Checker) check_expr_option_or_result_call(expr ast.Expr, ret_type ast.
 						expr)
 					c.cur_or_expr = last_cur_or_expr
 				}
-				return ret_type.clear_flag(.result)
+				return ret_type.clear_option_and_result()
 			} else if expr.left is ast.SelectorExpr && expr.left_type.has_option_or_result() {
 				with_modifier_kind := if expr.left_type.has_flag(.option) {
 					'an Option'
@@ -4741,7 +4741,8 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 		type_name := c.table.type_to_str(to_type)
 		c.error('cannot cast `none` to `${type_name}`', node.pos)
 	} else if !from_type.has_option_or_result() && from_sym.kind == .struct && !from_type.is_ptr() {
-		if (final_to_is_ptr || to_sym.kind !in [.sum_type, .interface]) && !c.is_builtin_mod {
+		if (final_to_is_ptr || to_sym.kind !in [.sum_type, .interface]) && !c.is_builtin_mod
+			&& !(to_type.is_any_kind_of_pointer() && node.expr.is_auto_deref_var()) {
 			from_type_name := c.table.type_to_str(from_type)
 			type_name := c.table.type_to_str(to_type)
 			c.error('cannot cast struct `${from_type_name}` to `${type_name}`', node.pos)
