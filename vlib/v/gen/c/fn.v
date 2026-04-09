@@ -3314,6 +3314,18 @@ fn (mut g Gen) unwrap_receiver_type(node ast.CallExpr) (ast.Type, &ast.TypeSymbo
 		if resolved_left_type != 0 {
 			left_type = resolved_left_type
 		}
+	} else if node.left is ast.StructInit {
+		if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 {
+			si_typ := if node.left.generic_typ != 0 {
+				node.left.generic_typ
+			} else {
+				node.left.typ
+			}
+			resolved := g.unwrap_generic(si_typ)
+			if resolved != 0 && !resolved.has_flag(.generic) {
+				left_type = resolved
+			}
+		}
 	}
 	if left_type == g.unwrap_generic(node.left_type) {
 		resolved_left_type := g.type_resolver.get_type_or_default(node.left, node.left_type)
@@ -3459,6 +3471,22 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 				resolved := g.resolved_expr_type(node.left, node.left_type)
 				if resolved != 0 && resolved != left_type {
 					left_type = g.unwrap_generic(resolved)
+				}
+			}
+		}
+		ast.StructInit {
+			// In generic contexts, node.left_type may be stale from a previous
+			// checker instantiation (the checker overwrites AST types on each pass).
+			// Use the struct init's own .typ which preserves the generic flag.
+			if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 {
+				si_typ := if node.left.generic_typ != 0 {
+					node.left.generic_typ
+				} else {
+					node.left.typ
+				}
+				resolved := g.unwrap_generic(si_typ)
+				if resolved != 0 && !resolved.has_flag(.generic) {
+					left_type = resolved
 				}
 			}
 		}
@@ -5654,6 +5682,20 @@ fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type_ ast.Type, lang a
 		g.expected_arg_mut = old_expected_arg_mut
 	}
 	exp_sym := g.table.sym(expected_type)
+	// Cast function pointer arguments when the expected and actual types differ.
+	// V's checker allows coercing function types (e.g. Renderer* → voidptr in callbacks),
+	// but C compilers with -Werror=incompatible-pointer-types reject the mismatch.
+	// Only cast for V language calls with named function type aliases (not anonymous fn types).
+	if exp_sym.kind == .function && arg_sym.kind == .function && !arg.is_mut && lang == .v
+		&& !exp_sym.name.starts_with('fn ') {
+		exp_styp := g.styp(expected_type)
+		arg_styp := g.styp(arg_typ)
+		if exp_styp != arg_styp {
+			g.write('(${exp_styp})')
+			g.expr(arg.expr)
+			return
+		}
+	}
 	if arg.is_mut && exp_sym.kind in [.interface, .sum_type] {
 		expected_wrap_type := if expected_type.is_ptr() {
 			expected_type.deref()
