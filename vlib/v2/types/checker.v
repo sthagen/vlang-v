@@ -372,6 +372,20 @@ mut:
 	// Temporary recursion guard for debugging expression cycles.
 	expr_depth int
 	expr_stack []string
+	// Ownership tracking: variables that hold owned values (from .to_owned())
+	owned_vars map[string]token.Pos // var name -> position where it became owned
+	// Variables that have been moved (assigned to another variable)
+	moved_vars map[string]MovedVar // var name -> info about the move
+	// Functions that return owned values (detected from return statements)
+	ownership_fns map[string]bool // fn name -> returns ownership
+	// Function parameters that received owned values at call sites
+	ownership_fn_params map[string]bool // "fn_name__param_N" -> true
+	// Functions that return a specific parameter (index stored, -1 = not set)
+	ownership_fn_returns_param map[string]int // fn_name -> parameter index
+	// Current function name for ownership tracking
+	ownership_cur_fn string
+	// Borrow tracking: variables currently borrowed via &
+	borrowed_vars map[string][]BorrowInfo // var name -> list of active borrows
 }
 
 pub fn Checker.new(prefs &pref.Preferences, file_set &token.FileSet, env &Environment) &Checker {
@@ -518,6 +532,9 @@ pub fn (mut c Checker) check_files(files []ast.File) {
 		c.check_file(file)
 	}
 	c.process_pending_const_fields()
+	$if ownership ? {
+		c.ownership_prescan_fn_bodies()
+	}
 	c.process_pending_fn_bodies()
 	c.check_struct_field_defaults(files)
 	c.check_enum_field_values(files)
@@ -1222,6 +1239,12 @@ fn (mut c Checker) infix_expr(expr ast.InfixExpr) Type {
 	expected_type := c.expected_type
 	c.set_infix_expected_type(expr, lhs_type)
 	rhs_type := c.infix_rhs_type(expr)
+	$if ownership ? {
+		lhs_base := lhs_type.base_type()
+		if expr.op == .left_shift && (lhs_type is Array || lhs_base is Array) {
+			c.ownership_consume_expr(expr.rhs, expr.rhs.pos(), "array append")
+		}
+	}
 	c.expected_type = expected_type
 	if expr.op.is_comparison() {
 		return bool_
@@ -1273,6 +1296,9 @@ fn (mut c Checker) init_expr(expr ast.InitExpr) Type {
 					}
 				}
 				c.expr(field.value)
+				$if ownership ? {
+					c.ownership_consume_expr(field.value, field.value.pos(), "struct field")
+				}
 				c.expected_type = expected_type_prev
 			}
 		}
@@ -1280,6 +1306,9 @@ fn (mut c Checker) init_expr(expr ast.InitExpr) Type {
 		for field in expr.fields {
 			if field.value !is ast.EmptyExpr {
 				c.expr(field.value)
+				$if ownership ? {
+					c.ownership_consume_expr(field.value, field.value.pos(), "struct field")
+				}
 			}
 		}
 	}
@@ -1354,6 +1383,10 @@ fn (mut c Checker) map_init_expr(expr ast.MapInitExpr) Type {
 	if !has_map_type {
 		map_key_type = c.expr(expr.keys[0]).typed_default()
 		map_value_type = c.expr(expr.vals[0]).typed_default()
+		$if ownership ? {
+			c.ownership_consume_expr(expr.keys[0], expr.keys[0].pos(), "map key")
+			c.ownership_consume_expr(expr.vals[0], expr.vals[0].pos(), "map value")
+		}
 		has_map_type = true
 		inferred_from_first_entry = true
 	}
@@ -1367,6 +1400,10 @@ fn (mut c Checker) map_init_expr(expr ast.MapInitExpr) Type {
 		key_type := c.expr(key_expr).typed_default()
 		c.expected_type = to_optional_type(map_value_type)
 		val_type := c.expr(val_expr).typed_default()
+		$if ownership ? {
+			c.ownership_consume_expr(key_expr, key_expr.pos(), "map key")
+			c.ownership_consume_expr(val_expr, val_expr.pos(), "map value")
+		}
 		if !c.check_types(map_key_type, key_type) {
 			c.error_with_pos('invalid map key: expecting ${map_key_type.name()}, got ${key_type.name()}',
 				key_expr.pos())
@@ -1502,6 +1539,9 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 				is_fixed := !is_empty_expr(expr.len)
 				// TODO: check all exprs
 				first_elem_type := c.expr(expr.exprs.first())
+				$if ownership ? {
+					c.ownership_consume_expr(expr.exprs.first(), expr.exprs.first().pos(), "array element")
+				}
 				// NOTE: why did I have this shortcut here?
 				// if expr.exprs.len == 1 {
 				// 	if first_elem_type.is_number_literal() {
@@ -1528,6 +1568,9 @@ fn (mut c Checker) expr_impl(expr ast.Expr) Type {
 						continue
 					}
 					mut elem_type := c.expr(elem_expr)
+					$if ownership ? {
+						c.ownership_consume_expr(elem_expr, elem_expr.pos(), "array element")
+					}
 					// TODO: best way to handle this?
 					if elem_type.is_number_literal() && first_elem_type.is_number() {
 						elem_type = first_elem_type
@@ -2166,6 +2209,9 @@ fn (mut c Checker) stmt(stmt ast.Stmt) {
 			for expr in stmt.exprs {
 				c.expr(expr)
 			}
+			$if ownership ? {
+				c.ownership_check_return(stmt)
+			}
 		}
 		ast.ComptimeStmt {
 			c.stmt(stmt.stmt)
@@ -2516,7 +2562,22 @@ fn (mut c Checker) check_pending_fn_body(pending PendingFnBody) {
 		}
 		expected_type := c.expected_type
 		c.expected_type = pending.typ.return_type
+		// Ownership: save/restore per-function state
+		mut prev_ownership_fn := ''
+		mut prev_owned := map[string]token.Pos{}
+		mut prev_moved := map[string]MovedVar{}
+		mut prev_borrowed := map[string][]BorrowInfo{}
+		$if ownership ? {
+			prev_ownership_fn = c.ownership_cur_fn
+			prev_owned = c.owned_vars.clone()
+			prev_moved = c.moved_vars.clone()
+			prev_borrowed = c.borrowed_vars.clone()
+			c.ownership_enter_fn(pending.decl.name, pending.decl)
+		}
 		c.stmt_list(pending.decl.stmts)
+		$if ownership ? {
+			c.ownership_leave_fn(prev_ownership_fn, prev_owned, prev_moved, prev_borrowed)
+		}
 		c.expected_type = expected_type
 		c.generic_params = prev_generic_params
 		c.fn_root_scope = prev_fn_root_scope
@@ -2579,6 +2640,9 @@ fn (mut c Checker) check_struct_field_defaults(files []ast.File) {
 						prev_expected := c.expected_type
 						c.expected_type = to_optional_type(field_typ)
 						c.expr(field.value)
+						$if ownership ? {
+							c.ownership_consume_expr(field.value, field.value.pos(), "struct field")
+						}
 						c.expected_type = prev_expected
 					}
 				}
@@ -2633,6 +2697,9 @@ pub fn (mut c Checker) process_struct_deferred() {
 pub fn (mut c Checker) process_all_deferred() {
 	c.process_struct_deferred()
 	c.process_pending_const_fields()
+	$if ownership ? {
+		c.ownership_prescan_fn_bodies()
+	}
 	c.process_pending_fn_bodies()
 }
 
@@ -2755,6 +2822,33 @@ fn (mut c Checker) assign_stmt(stmt ast.AssignStmt, unwrap_optional bool) {
 			lx_mod_pos := lx.pos
 			if lx_mod_pos.is_valid() {
 				c.env.set_expr_type(lx_mod_pos.id, expr_type)
+			}
+		}
+		// Ownership: track owned variables and moves
+		$if ownership ? {
+			lhs_name := if lx_unwrapped is ast.Ident {
+				lx_unwrapped.name
+			} else {
+				''
+			}
+			if lhs_name.len > 0 {
+				if stmt.op == .decl_assign {
+					// Check if RHS is a .to_owned() call or ownership-returning function
+					if !c.ownership_mark_from_call(lhs_name, rx, stmt.pos) {
+						// Check if RHS is an owned variable (triggers move)
+						c.ownership_check_assign(lhs_name, rx, stmt.pos)
+					}
+				} else if stmt.op == .assign {
+					// Reassignment: check if LHS is currently borrowed
+					c.ownership_check_reassign(lhs_name, stmt.pos)
+					// Also check if new value is owned (via .to_owned() or fn return)
+					c.ownership_mark_from_call(lhs_name, rx, stmt.pos)
+				} else if stmt.op in [.left_shift, .left_shift_assign] {
+					lhs_base := lhs_type.base_type()
+					if lhs_type is Array || lhs_base is Array {
+						c.ownership_consume_expr(rx, rx.pos(), "array append")
+					}
+				}
 			}
 		}
 	}
@@ -4053,6 +4147,10 @@ fn (mut c Checker) call_expr(expr ast.CallExpr) Type {
 			}
 			c.expected_type = prev_expected
 		}
+		// Ownership: check if any owned variables are passed as arguments (moves them)
+		$if ownership ? {
+			c.ownership_check_call_args(expr)
+		}
 		// TODO/FIXME: is FnType.return_type goin to stay optional
 		// or not and just use void in case of returning nothing
 		if return_type := fn_.return_type {
@@ -4235,6 +4333,10 @@ fn (mut c Checker) fn_type_with_insert_params(fn_type ast.FnType, attributes FnT
 }
 
 fn (mut c Checker) ident(ident ast.Ident) Object {
+	// Ownership: check for use of moved variable
+	$if ownership ? {
+		c.ownership_check_ident(ident.name, ident.pos)
+	}
 	obj := c.scope.lookup_parent(ident.name, 0) or {
 		if ident.name == '_' {
 			c.error_with_pos('cannot use _ as value or type', ident.pos)
