@@ -124,7 +124,7 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 			c.error('cannot use `none` in `unsafe` blocks', right.expr.pos)
 		}
 		if mut right is ast.AnonFn {
-			if right.decl.generic_names.len > 0 {
+			if right.decl.generic_names.len > 0 && right.inherited_vars.len == 0 {
 				c.error('cannot assign generic function to a variable', right.decl.pos)
 			}
 		}
@@ -189,6 +189,12 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 		return
 	}
 	for i, mut left in node.left {
+		if !is_decl {
+			if left is ast.Ident {
+				ident := left as ast.Ident
+				c.clear_assert_autocast(ident.scope, ident.name)
+			}
+		}
 		if mut left is ast.CallExpr {
 			// ban `foo() = 10`
 			if c.pref.is_vls {
@@ -256,8 +262,7 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 			c.inside_decl_rhs = false
 			c.inside_ref_lit = old_inside_ref_lit
 			if node.right_types.len == i {
-				node.right_types << c.check_expr_option_or_result_call(node.right[i],
-					right_type)
+				node.right_types << c.check_expr_option_or_result_call(node.right[i], right_type)
 			}
 		} else if c.inside_recheck && i < node.right.len {
 			// Generic rechecks reuse the same AST nodes, so cached rhs types for
@@ -267,8 +272,7 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 			if needs_rhs_recheck {
 				mut expr := mut node.right[i]
 				right_type := c.expr(mut expr)
-				node.right_types[i] = c.check_expr_option_or_result_call(node.right[i],
-					right_type)
+				node.right_types[i] = c.check_expr_option_or_result_call(node.right[i], right_type)
 			}
 		}
 		mut right := if i < node.right.len { node.right[i] } else { node.right[0] }
@@ -394,8 +398,7 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 					}
 				} else if left.kind == .blank_ident {
 					if !is_decl && mut right is ast.None {
-						c.error('cannot assign a `none` value to blank `_` identifier',
-							right.pos)
+						c.error('cannot assign a `none` value to blank `_` identifier', right.pos)
 					}
 					left_type = right_type
 					node.left_types[i] = right_type
@@ -531,8 +534,7 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 						}
 					}
 				} else if left.op == .amp {
-					c.error('cannot use a reference on the left side of `${node.op}`',
-						left.pos)
+					c.error('cannot use a reference on the left side of `${node.op}`', left.pos)
 				} else {
 					c.error('cannot use `${left.op}` on the left of `${node.op}`', left.pos)
 				}
@@ -744,8 +746,7 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 				if right_sym.kind == .map {
 					c.error('maps cannot be static', left.pos)
 				} else if !right.is_constant() {
-					c.error('cannot initialized static variable with non-constant value',
-						left.pos)
+					c.error('cannot initialized static variable with non-constant value', left.pos)
 				}
 			}
 		}
@@ -789,8 +790,19 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 						right.pos())
 				}
 			}
-			.and_assign, .or_assign, .xor_assign, .mod_assign, .left_shift_assign,
-			.right_shift_assign {
+			.and_assign, .or_assign, .xor_assign {
+				left_final_sym := c.table.final_sym(left_type_unwrapped)
+				if left_final_sym.info is ast.Enum && left_final_sym.info.is_flag {
+					// `@[flag]` tagged enums support compound bitwise assignment.
+				} else if !left_sym.is_int() && !left_final_sym.is_int() {
+					c.error('operator ${node.op.str()} not defined on left operand type `${left_sym.name}`',
+						left.pos())
+				} else if !right_sym.is_int() && !c.table.final_sym(right_type_unwrapped).is_int() {
+					c.error('operator ${node.op.str()} not defined on right operand type `${right_sym.name}`',
+						right.pos())
+				}
+			}
+			.mod_assign, .left_shift_assign, .right_shift_assign {
 				if !left_sym.is_int() && !c.table.final_sym(left_type_unwrapped).is_int() {
 					c.error('operator ${node.op.str()} not defined on left operand type `${left_sym.name}`',
 						left.pos())
@@ -884,12 +896,14 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 				continue
 			}
 			if method := left_sym.find_method_with_generic_parent(extracted_op) {
+				c.mark_fn_decl_as_referenced(method.fkey())
 				if method.return_type != left_type_unwrapped {
 					c.error('operator `${extracted_op}` must return `${left_name}` to be used as an assignment operator',
 						node.pos)
 				}
 			} else {
 				if method := parent_sym.find_method_with_generic_parent(extracted_op) {
+					c.mark_fn_decl_as_referenced(method.fkey())
 					if parent_sym.kind == .alias
 						&& (parent_sym.info as ast.Alias).parent_type != method.return_type {
 						c.error('operator `${extracted_op}` must return `${left_name}` to be used as an assignment operator',
@@ -901,8 +915,7 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 							c.error('undefined operation `${left_name}` ${extracted_op} `${right_name}`',
 								node.pos)
 						} else {
-							c.error('mismatched types `${left_name}` and `${right_name}`',
-								node.pos)
+							c.error('mismatched types `${left_name}` and `${right_name}`', node.pos)
 						}
 					}
 				}
@@ -956,8 +969,7 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 				if left_type_unwrapped.is_ptr() && right_type_unwrapped.is_int()
 					&& node.op in [.plus_assign, .minus_assign] {
 					if !c.inside_unsafe {
-						c.warn('pointer arithmetic is only allowed in `unsafe` blocks',
-							node.pos)
+						c.warn('pointer arithmetic is only allowed in `unsafe` blocks', node.pos)
 					}
 				} else {
 					if c.comptime.comptime_for_field_var != '' && left is ast.ComptimeSelector {
@@ -980,11 +992,9 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 								if left_sym.kind == .array_fixed && right_sym.kind == .array
 									&& right is ast.ArrayInit {
 									c.add_error_detail('try `${left} = ${right}!` instead (with `!` after the array literal)')
-									c.error('cannot assign to `${left}`: ${err.msg()}',
-										right.pos())
+									c.error('cannot assign to `${left}`: ${err.msg()}', right.pos())
 								} else {
-									c.error('cannot assign to `${left}`: ${err.msg()}',
-										right.pos())
+									c.error('cannot assign to `${left}`: ${err.msg()}', right.pos())
 								}
 							}
 						}

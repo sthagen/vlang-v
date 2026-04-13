@@ -1033,7 +1033,8 @@ fn test_execute_with_stderr_redirection() {
 	assert result.output.contains('unknown command `wrong_command`')
 
 	stderr_path := os.join_path_single(tfolder, 'stderr.txt')
-	result2 := os.execute('${os.quoted_path(@VEXE)} wrong_command 2> ${os.quoted_path(stderr_path)}')
+	result2 :=
+		os.execute('${os.quoted_path(@VEXE)} wrong_command 2> ${os.quoted_path(stderr_path)}')
 	assert result2.exit_code == 1
 	assert result2.output == ''
 	assert os.exists(stderr_path)
@@ -1047,6 +1048,18 @@ fn test_execute_with_linefeeds() {
 	assert result.exit_code == 0
 	result2 := os.execute('false\n')
 	assert result2.exit_code == 1
+}
+
+fn test_execute_pipe_into_vfmt() {
+	producer_script := os.join_path_single(tfolder, 'pipe_into_vfmt.v')
+	os.write_file(producer_script, "fn main() {\n\tprint('fn main(){println(1)}\\n')\n}\n")!
+	defer {
+		os.rm(producer_script) or {}
+	}
+	result :=
+		os.execute('${os.quoted_path(@VEXE)} run ${os.quoted_path(producer_script)} | ${os.quoted_path(@VEXE)} fmt')
+	assert result.exit_code == 0, result.output
+	assert result.output == 'fn main() {\n\tprintln(1)\n}\n'
 }
 
 fn test_execute_fc_get_output() {

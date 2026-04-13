@@ -259,7 +259,11 @@ fn (mut p Parser) check_expr(precedence int) !ast.Expr {
 			mut pos := p.tok.pos()
 			p.next()
 			if p.inside_unsafe {
-				return p.error_with_pos('already inside `unsafe` block', pos)
+				err := p.error_with_pos('already inside `unsafe` block', pos)
+				if p.tok.kind != .eof {
+					p.recover_until_closing_rcbr()
+				}
+				return err
 			}
 			p.inside_unsafe = true
 			p.check(.lcbr)
@@ -449,7 +453,9 @@ fn (mut p Parser) check_expr(precedence int) !ast.Expr {
 					}
 				} else {
 					// Anonymous struct
-					p.next()
+					if !p.is_explicit_anon_struct_init() {
+						p.next()
+					}
 					return p.struct_init('', .anon, false)
 				}
 			} else if p.tok.kind == .key_type {
@@ -481,6 +487,24 @@ fn (mut p Parser) check_expr(precedence int) !ast.Expr {
 		p.left_comments = p.eat_comments()
 	}
 	return p.expr_with_left(node, precedence, is_stmt_ident)
+}
+
+fn (p &Parser) is_explicit_anon_struct_init() bool {
+	mut n := 2
+	mut curlies := 1
+	for curlies > 0 {
+		tok := p.peek_token(n)
+		if tok.kind == .eof {
+			return false
+		}
+		if tok.kind == .lcbr {
+			curlies++
+		} else if tok.kind == .rcbr {
+			curlies--
+		}
+		n++
+	}
+	return p.peek_token(n).kind == .lcbr
 }
 
 fn (mut p Parser) parse_typeof_expr(start_pos token.Pos) ast.Expr {
@@ -727,7 +751,7 @@ fn (mut p Parser) expr_with_left(left ast.Expr, precedence int, is_stmt_ident bo
 				is_stmt: true
 			}
 		} else if p.tok.kind.is_infix()
-			&& !(p.tok.kind in [.minus, .amp, .mul, .key_as, .key_in, .key_is]
+			&& !(p.tok.kind in [.minus, .amp, .mul, .arrow, .key_as, .key_in, .key_is]
 			&& p.tok.line_nr != p.prev_tok.line_nr) {
 			// continue on infix expr
 			node = p.infix_expr(node)
@@ -811,7 +835,8 @@ fn (mut p Parser) gen_or_block() ast.OrExpr {
 		// `foo()?`
 		p.next()
 		if p.inside_defer {
-			p.error_with_pos('error propagation not allowed inside `defer` blocks', p.prev_tok.pos())
+			p.error_with_pos('error propagation not allowed inside `defer` blocks',
+				p.prev_tok.pos())
 		}
 		return ast.OrExpr{
 			kind:  if is_not { ast.OrKind.propagate_result } else { ast.OrKind.propagate_option }

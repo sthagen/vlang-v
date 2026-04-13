@@ -58,6 +58,14 @@ gg__Size gg_get_screen_size() {
 	return res;
 }
 
+void gg_macos_resize_window(void *window_ptr, int width, int height) {
+	if (window_ptr == nil || width <= 0 || height <= 0) {
+		return;
+	}
+	NSWindow *window = (__bridge NSWindow *)window_ptr;
+	[window setContentSize:NSMakeSize((CGFloat)width, (CGFloat)height)];
+}
+
 void darwin_draw_string(int x, int y, string s, gg__TextCfg cfg) {
 	NSFont* font = [NSFont userFontOfSize:cfg.size];
 	// # NSFont*    font = [NSFont fontWithName:@"Roboto Mono" size:cfg.size];
@@ -107,18 +115,19 @@ void darwin_draw_rect(float x, float y, float width, float height, gg__Color c) 
 }
 
 void darwin_window_refresh() {
-	//[g_view setNeedsDisplay:YES];
-	// update UI on the main thread TODO separate fn
-	if (g_view == nil) {
-		return;
-	}
-
 	dispatch_async(dispatch_get_main_queue(), ^{
-	  [g_view setNeedsDisplay:YES];
+		NSWindow *window = [NSApp mainWindow];
+		if (window == nil) {
+			window = [NSApp keyWindow];
+		}
+		if (window == nil) {
+			return;
+		}
+		[[window contentView] setNeedsDisplay:YES];
 	});
 
 	// puts("refresh");
-	//[g_view drawRect:NSMakeRect(0,0,2000,2000)];
+	//[[NSApp mainWindow].contentView drawRect:NSMakeRect(0,0,2000,2000)];
 	//[[NSGraphicsContext currentContext] flushGraphics];
 }
 

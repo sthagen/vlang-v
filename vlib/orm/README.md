@@ -3,6 +3,9 @@
 V has a powerful, concise ORM baked in! Create tables, insert records, manage relationships, all
 regardless of the DB driver you decide to use.
 
+Driver authors using the shared SQL generators can target SQLite, PostgreSQL, MySQL, and
+H2-backed connections with the built-in ORM dialect helpers.
+
 ## Nullable
 
 For a nullable column, use an option field. If the field is non-option, the column will be defined
@@ -88,6 +91,14 @@ sql db {
     // query; see below
 }!
 ```
+
+> [!TIP]
+> This guide uses the built-in `db.sqlite` module. If you want SQLite without first installing
+> system-level SQLite development files, the V team also maintains the
+> [`sqlite`](https://vpm.vlang.io/packages/sqlite) VPM package.
+>
+> Install it with `v install sqlite` and change `import db.sqlite` to `import sqlite`.
+> The package keeps the same API while bundling SQLite for you.
 
 When you need to reference the table, simply pass the struct itself.
 
@@ -267,6 +278,22 @@ sql db {
 }!
 ```
 
+For a Rails-style full-record save, load a struct, mutate it, then call `orm.save`.
+The helper uses the struct primary key, or an `id` field when present, for the
+`WHERE` clause and updates the remaining mapped fields automatically.
+
+```v ignore
+import orm
+
+mut foo := (sql db {
+    select from Foo where id == 1
+}!).first()
+foo.name = 'updated'
+foo.updated_at = time.now()
+
+orm.save(db, foo)!
+```
+
 Note that `is none` and `!is none` can be used to select for NULL fields.
 
 ### Delete
@@ -406,6 +433,16 @@ struct User {
 	qb.set('age = ?, title = ?', 71, 'boss')!.where('name = ?','John')!.update()!
 ```
 
+For a full-record update without spelling out each `set(...)` clause, use `orm.save`:
+
+```v ignore
+	selected := qb.where('name = ?', 'John')!.query()!
+	mut john := selected.first()
+	john.age = 72
+	john.title = 'lead'
+	orm.save(db, john)!
+```
+
 9. Query aggregate values​​:
 
 ```v ignore
@@ -454,3 +491,9 @@ The API includes a built-in parser to handle intricate `WHERE` clause conditions
 
 Note the use of placeholders `?`.
 The conditional expressions support logical operators including `AND`, `OR`, `||`, and `&&`.
+Named arrays can also be passed directly for `IN` clauses:
+
+```v ignore
+	user_ids := ['1', '2']
+	users := qb.where('id IN ?', user_ids)!.query()!
+```

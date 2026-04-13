@@ -8,6 +8,27 @@ import v.ast
 import v.util
 import v.type_resolver
 
+fn (g &Gen) veb_context_html_arg() string {
+	if g.fn_decl.params.len < 2 {
+		return 'ctx'
+	}
+	ctx_param := g.fn_decl.params[1]
+	ctx_sym := g.table.final_sym(ctx_param.typ)
+	if ctx_sym.name == 'veb.Context' {
+		return ctx_param.name
+	}
+	if ctx_sym.info is ast.Struct {
+		for embed in ctx_sym.info.embeds {
+			embed_sym := g.table.sym(embed)
+			if embed_sym.name == 'veb.Context' {
+				dot := if ctx_param.typ.is_ptr() { '->' } else { '.' }
+				return '&${ctx_param.name}${dot}${embed_sym.embed_name()}'
+			}
+		}
+	}
+	return ctx_param.name
+}
+
 fn (mut g Gen) comptime_selector(node ast.ComptimeSelector) {
 	left_type := g.resolved_expr_type(node.left, node.left_type)
 	is_interface_field := g.table.sym(left_type).kind == .interface
@@ -124,7 +145,7 @@ fn (mut g Gen) comptime_call(mut node ast.ComptimeCall) {
 		}
 
 		ret_sym := g.table.sym(g.fn_decl.return_type)
-		fn_name := g.fn_decl.name.replace('.', '__') + node.pos.pos.str()
+		fn_name := g.fn_decl.name.replace('.', '__').to_lower() + node.pos.pos.str()
 		is_x_vweb := ret_sym.cname == 'x__vweb__Result'
 		is_veb := ret_sym.cname == 'veb__Result'
 
@@ -154,11 +175,9 @@ fn (mut g Gen) comptime_call(mut node ast.ComptimeCall) {
 		if is_html {
 			// return a vweb or x.vweb html template
 			if is_veb {
-				ctx_name := g.fn_decl.params[1].name
-				g.writeln('veb__Context_html(${ctx_name}, _tmpl_res_${fn_name});')
+				g.writeln('veb__Context_html(${g.veb_context_html_arg()}, _tmpl_res_${fn_name});')
 			} else if is_x_vweb {
-				ctx_name := g.fn_decl.params[1].name
-				g.writeln('x__vweb__Context_html(${ctx_name}, _tmpl_res_${fn_name});')
+				g.writeln('x__vweb__Context_html(${g.veb_context_html_arg()}, _tmpl_res_${fn_name});')
 			} else {
 				// old vweb:
 				app_name := g.fn_decl.params[0].name
@@ -345,7 +364,7 @@ fn cgen_attrs(attrs []ast.Attr) []string {
 			}
 			s += ': ${arg}'
 		}
-		res << '_S("${escape_quotes(s)}")'
+		res << '_S("${cescape_nonascii(util.smart_quote(s, false))}")'
 	}
 	return res
 }
@@ -509,6 +528,50 @@ fn (mut g Gen) gen_branch_context_string() string {
 	return arr.join(',')
 }
 
+fn (g &Gen) can_preserve_comptime_if_condition_in_c(cond ast.Expr) bool {
+	match cond {
+		ast.BoolLiteral {
+			return true
+		}
+		ast.Ident {
+			// CPU architecture and compiler conditions are safe to preserve as C
+			// preprocessor checks because they are mutually exclusive categories
+			// derived from real compiler intrinsics (see cheaders.v).
+			// This is important for Android builds where one C file is compiled
+			// by the NDK for multiple architectures (arm64, armv7a, x86, x86_64).
+			return cond.name in ast.valid_comptime_if_platforms
+				|| cond.name in ast.valid_comptime_if_compilers
+		}
+		ast.ParExpr {
+			return g.can_preserve_comptime_if_condition_in_c(cond.expr)
+		}
+		ast.PrefixExpr {
+			return cond.op == .not && g.can_preserve_comptime_if_condition_in_c(cond.right)
+		}
+		ast.InfixExpr {
+			return cond.op in [.and, .logical_or]
+				&& g.can_preserve_comptime_if_condition_in_c(cond.left)
+				&& g.can_preserve_comptime_if_condition_in_c(cond.right)
+		}
+		ast.PostfixExpr {
+			return cond.op == .question && cond.expr is ast.Ident
+		}
+		else {
+			return false
+		}
+	}
+}
+
+fn (g &Gen) comptime_if_condition_for_c(cond ast.Expr, result ast.ComptTimeCondResult) string {
+	if g.pref.output_cross_c || g.can_preserve_comptime_if_condition_in_c(cond) {
+		return result.c_str
+	}
+	// For normal C generation, honor the branch result that V already resolved.
+	// Re-evaluating built-in comptime conditions in the C preprocessor can pick
+	// a different branch than the V checker, e.g. `termux` vs `linux`.
+	return if result.val { '1' } else { '0' }
+}
+
 fn (mut g Gen) comptime_if(node ast.IfExpr) {
 	tmp_var := g.new_tmp_var()
 	mut inferred_typ := node.typ
@@ -565,9 +628,14 @@ fn (mut g Gen) comptime_if(node ast.IfExpr) {
 			// `g.table.comptime_is_true` are the branch condition results set by `checker`
 			is_true = comptime_is_true
 		} else {
-			g.error('checker error: condition result idx string not found => [${idx_str}]',
-				node.branches[i].cond.pos())
-			return
+			// No checker data found for this key. This can happen when:
+			// 1. The markused walker spuriously registers generic instantiations
+			//    that the checker never evaluated (e.g. from dead comptime branches).
+			// 2. Type alias resolution causes key mismatches.
+			// Default all branches to false (#if 0) since the function body
+			// is either dead code or will be generated correctly by another
+			// instantiation with matching types.
+			is_true = ast.ComptTimeCondResult{}
 		}
 		if !node.has_else || i < node.branches.len - 1 {
 			if i == 0 {
@@ -575,9 +643,7 @@ fn (mut g Gen) comptime_if(node ast.IfExpr) {
 			} else {
 				g.write('#elif ')
 			}
-			// directly use `checker` evaluate results
-			// for `cgen`, we can use `is_true.c_str` or `is_true.value` here
-			g.writeln('${is_true.c_str}')
+			g.writeln(g.comptime_if_condition_for_c(branch.cond, is_true))
 			$if debug_comptime_branch_context ? {
 				g.writeln('/* ${node.branches[i].cond} | generic=[${comptime_branch_context_str}] */')
 			}
@@ -592,61 +658,64 @@ fn (mut g Gen) comptime_if(node ast.IfExpr) {
 			g.defer_ifdef += expr_str
 		}
 		if node.is_expr {
-			len := branch.stmts.len
-			if len > 0 {
-				last := branch.stmts.last() as ast.ExprStmt
-				if len > 1 {
-					g.indent++
-					g.writeln('{')
-					g.stmts(branch.stmts[..len - 1])
-					g.set_current_pos_as_last_stmt_pos()
-					prev_skip_stmt_pos := g.skip_stmt_pos
-					g.skip_stmt_pos = true
-					if is_opt_or_result {
-						tmp_var2 := g.new_tmp_var()
-						g.write('{ ${g.base_type(inferred_typ)} ${tmp_var2} = ')
-						g.stmt(last)
-						g.writeln('builtin___result_ok(&(${g.base_type(inferred_typ)}[]) { ${tmp_var2} }, (_result*)(&${tmp_var}), sizeof(${g.base_type(inferred_typ)}));')
-						g.writeln('}')
-					} else {
-						g.write('\t${tmp_var} = ')
-						g.stmt(last)
-					}
-					g.skip_stmt_pos = prev_skip_stmt_pos
-					g.writeln2(';', '}')
-					g.indent--
-					g.write_defer_stmts(branch.scope, false, branch.pos)
-				} else {
-					g.indent++
-					g.set_current_pos_as_last_stmt_pos()
-					prev_skip_stmt_pos := g.skip_stmt_pos
-					g.skip_stmt_pos = true
-					if is_opt_or_result {
-						tmp_var2 := g.new_tmp_var()
-						base_styp := g.base_type(inferred_typ)
-						g.write('{ ${base_styp} ${tmp_var2} = ')
-						g.stmt(last)
-						g.writeln('builtin___result_ok(&(${base_styp}[]) { ${tmp_var2} }, (_result*)(&${tmp_var}), sizeof(${base_styp}));')
-						g.writeln('}')
-					} else if is_array_fixed {
-						tmp_var2 := g.new_tmp_var()
-						base_styp := g.base_type(inferred_typ)
-						g.write('{ ${base_styp} ${tmp_var2} = ')
-						g.stmt(last)
-						if g.out.last_n(2).contains(';') {
-							g.go_back(2)
+			if is_true.val {
+				g.bind_comptime_if_generic_types(branch.cond)
+				len := branch.stmts.len
+				if len > 0 {
+					last := branch.stmts.last() as ast.ExprStmt
+					if len > 1 {
+						g.indent++
+						g.writeln('{')
+						g.stmts(branch.stmts[..len - 1])
+						g.set_current_pos_as_last_stmt_pos()
+						prev_skip_stmt_pos := g.skip_stmt_pos
+						g.skip_stmt_pos = true
+						if is_opt_or_result {
+							tmp_var2 := g.new_tmp_var()
+							g.write('{ ${g.base_type(inferred_typ)} ${tmp_var2} = ')
+							g.stmt(last)
+							g.writeln('builtin___result_ok(&(${g.base_type(inferred_typ)}[]) { ${tmp_var2} }, (_result*)(&${tmp_var}), sizeof(${g.base_type(inferred_typ)}));')
+							g.writeln('}')
+						} else {
+							g.write('\t${tmp_var} = ')
+							g.stmt(last)
 						}
-						g.writeln(';')
-						g.writeln2('memcpy(&${tmp_var}, &${tmp_var2}, sizeof(${base_styp}));',
-							'}')
+						g.skip_stmt_pos = prev_skip_stmt_pos
+						g.writeln2(';', '}')
+						g.indent--
+						g.write_defer_stmts(branch.scope, false, branch.pos)
 					} else {
-						g.write('${tmp_var} = ')
-						g.stmt(last)
+						g.indent++
+						g.set_current_pos_as_last_stmt_pos()
+						prev_skip_stmt_pos := g.skip_stmt_pos
+						g.skip_stmt_pos = true
+						if is_opt_or_result {
+							tmp_var2 := g.new_tmp_var()
+							base_styp := g.base_type(inferred_typ)
+							g.write('{ ${base_styp} ${tmp_var2} = ')
+							g.stmt(last)
+							g.writeln('builtin___result_ok(&(${base_styp}[]) { ${tmp_var2} }, (_result*)(&${tmp_var}), sizeof(${base_styp}));')
+							g.writeln('}')
+						} else if is_array_fixed {
+							tmp_var2 := g.new_tmp_var()
+							base_styp := g.base_type(inferred_typ)
+							g.write('{ ${base_styp} ${tmp_var2} = ')
+							g.stmt(last)
+							if g.out.last_n(2).contains(';') {
+								g.go_back(2)
+							}
+							g.writeln(';')
+							g.writeln2('memcpy(&${tmp_var}, &${tmp_var2}, sizeof(${base_styp}));',
+								'}')
+						} else {
+							g.write('${tmp_var} = ')
+							g.stmt(last)
+						}
+						g.skip_stmt_pos = prev_skip_stmt_pos
+						g.writeln(';')
+						g.indent--
+						g.write_defer_stmts(branch.scope, false, branch.pos)
 					}
-					g.skip_stmt_pos = prev_skip_stmt_pos
-					g.writeln(';')
-					g.indent--
-					g.write_defer_stmts(branch.scope, false, branch.pos)
 				}
 			}
 		} else {
@@ -656,6 +725,7 @@ fn (mut g Gen) comptime_if(node ast.IfExpr) {
 				g.writeln('{')
 			}
 			if is_true.val || g.pref.output_cross_c {
+				g.bind_comptime_if_generic_types(branch.cond)
 				g.stmts(branch.stmts)
 			}
 			if should_create_scope {
@@ -672,9 +742,53 @@ fn (mut g Gen) comptime_if(node ast.IfExpr) {
 	}
 }
 
+fn (mut g Gen) bind_comptime_if_generic_types(cond ast.Expr) {
+	match cond {
+		ast.ParExpr {
+			g.bind_comptime_if_generic_types(cond.expr)
+		}
+		ast.PrefixExpr {
+			g.bind_comptime_if_generic_types(cond.right)
+		}
+		ast.Likely {
+			g.bind_comptime_if_generic_types(cond.expr)
+		}
+		ast.InfixExpr {
+			match cond.op {
+				.and, .logical_or {
+					g.bind_comptime_if_generic_types(cond.left)
+					g.bind_comptime_if_generic_types(cond.right)
+				}
+				.key_is {
+					if cond.right is ast.TypeNode {
+						g.type_resolver.bind_matching_generic_type(g.get_expr_type(cond.left),
+							cond.right.typ)
+					}
+				}
+				.key_in {
+					if cond.right is ast.ArrayInit {
+						left_type := g.get_expr_type(cond.left)
+						for expr in cond.right.exprs {
+							if expr is ast.TypeNode
+								&& g.type_resolver.bind_matching_generic_type(left_type, expr.typ) {
+								break
+							}
+						}
+					}
+				}
+				else {}
+			}
+		}
+		else {}
+	}
+}
+
 fn (mut g Gen) get_expr_type(cond ast.Expr) ast.Type {
 	match cond {
 		ast.Ident {
+			if cond.name in g.type_resolver.type_map {
+				return g.type_resolver.get_ct_type_or_default(cond.name, ast.void_type)
+			}
 			return g.unwrap_generic(g.type_resolver.get_type_or_default(cond, cond.obj.typ))
 		}
 		ast.TypeNode {
@@ -1204,9 +1318,9 @@ fn (mut g Gen) comptime_match(node ast.MatchExpr) {
 			// `g.table.comptime_is_true` are the branch condition results set by `checker`
 			is_true = comptime_is_true
 		} else {
-			g.error('checker error: match branch result idx string not found => [${idx_str}]',
-				branch.pos)
-			return
+			// No checker data - spurious instantiation or alias mismatch.
+			// Default all branches to false (#if 0).
+			is_true = ast.ComptTimeCondResult{}
 		}
 		if !branch.is_else {
 			if i == 0 {

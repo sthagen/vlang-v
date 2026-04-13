@@ -64,7 +64,8 @@ fn (mut c Checker) markused_castexpr(mut _ ast.CastExpr, _ ast.Type, mut final_t
 }
 
 fn (mut c Checker) markused_comptimecall(mut node ast.ComptimeCall) {
-	c.markused_comptime_call(true, '${int(c.unwrap_generic(c.comptime.comptime_for_method.receiver_type))}.${c.comptime.comptime_for_method.name}')
+	c.markused_comptime_call(true,
+		'${int(c.unwrap_generic(c.comptime.comptime_for_method.receiver_type))}.${c.comptime.comptime_for_method.name}')
 	if c.inside_anon_fn {
 		// $method passed to anon fn, mark all methods as used
 		sym := c.table.sym(c.unwrap_generic(node.left_type))
@@ -124,6 +125,7 @@ fn (mut c Checker) markused_print_call(mut node ast.CallExpr) {
 			|| !c.table.sym(arg_typ).has_method('str') {
 			c.table.used_features.auto_str = true
 		} else {
+			c.mark_type_str_method_as_referenced(arg_typ)
 			if arg_typ.has_option_or_result() {
 				c.table.used_features.print_options = true
 			}
@@ -155,7 +157,8 @@ fn (mut c Checker) markused_print_call(mut node ast.CallExpr) {
 					c.table.used_features.auto_str_ptr = sym.info.fields.any(it.typ.is_ptr()
 						|| it.typ.is_pointer())
 				}
-				c.table.used_features.auto_str_arr = sym.info.fields.any(c.table.final_sym(it.typ).kind == .array)
+				c.table.used_features.auto_str_arr =
+					sym.info.fields.any(c.table.final_sym(it.typ).kind == .array)
 			}
 		}
 	}
@@ -184,6 +187,7 @@ fn (mut c Checker) markused_string_inter_lit(mut _ ast.StringInterLiteral, ftyp 
 	if !c.table.sym(ftyp).has_method('str') {
 		c.table.used_features.auto_str = true
 	} else {
+		c.mark_type_str_method_as_referenced(ftyp)
 		c.table.used_features.print_types[ftyp.idx()] = true
 	}
 	if ftyp.is_ptr() {

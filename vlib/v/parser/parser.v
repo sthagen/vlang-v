@@ -25,104 +25,105 @@ mut:
 	unique_prefix     string       // a hash of p.file_path, used for making anon fn generation unique
 	file_backend_mode ast.Language // .c for .c.v|.c.vv|.c.vsh files; .js for .js.v files, .amd64/.rv32/other arches for .amd64.v/.rv32.v/etc. files, .v otherwise.
 	// see comment in parse_file
-	tok                      token.Token
-	prev_tok                 token.Token
-	peek_tok                 token.Token
-	language                 ast.Language
-	fn_language              ast.Language // .c for `fn C.abcd()` declarations
-	struct_language          ast.Language // for `struct C.abcd{ embedded struct/union }` declarations
-	expr_level               int          // prevent too deep recursions for pathological programs
-	inside_vlib_file         bool         // true for all vlib/ files
-	inside_test_file         bool         // when inside _test.v or _test.vv file
-	inside_if                bool
-	inside_comptime_if       bool
-	inside_if_expr           bool
-	inside_if_cond           bool
-	inside_ct_if_expr        bool
-	inside_or_expr           bool
-	inside_for               bool
-	inside_for_expr          bool
-	inside_fn                bool // true even with implicit main
-	inside_fn_return         bool
-	inside_fn_param          bool // true while parsing function parameter types
-	inside_fn_concrete_type  bool // parsing fn_name[concrete_type]() call expr
-	inside_call_args         bool // true inside f(  ....  )
-	inside_unsafe_fn         bool
-	inside_str_interp        bool
-	inside_array_lit         bool
-	inside_in_array          bool
-	inside_infix             bool
-	inside_assign_rhs        bool // rhs assignment
-	inside_match             bool // to separate `match A { }` from `Struct{}`
-	inside_select            bool // to allow `ch <- Struct{} {` inside `select`
-	inside_match_case        bool // to separate `match_expr { }` from `Struct{}`
-	inside_match_body        bool // to fix eval not used TODO
-	inside_ct_match          bool
-	inside_ct_match_case     bool
-	inside_ct_match_body     bool
-	inside_unsafe            bool
-	inside_sum_type          bool // to prevent parsing inline sum type again
-	inside_asm_template      bool
-	inside_asm               bool
-	inside_defer             bool
-	defer_mode               ast.DeferMode
-	inside_generic_params    bool // indicates if parsing between `<` and `>` of a method/function
-	inside_receiver_param    bool // indicates if parsing the receiver parameter inside the first `(` and `)` of a method
-	inside_struct_field_decl bool
-	inside_struct_attr_decl  bool
-	inside_map_init          bool
-	inside_orm               bool
-	inside_chan_decl         bool
-	inside_attr_decl         bool
-	inside_lock_exprs        bool
-	array_dim                int               // array dim parsing level
-	fixed_array_dim          int               // fixed array dim parsing level
-	or_is_handled            bool              // ignore `or` in this expression
-	builtin_mod              bool              // are we in the `builtin` module?
-	mod                      string            // current module name
-	is_manualfree            bool              // true when `@[manualfree] module abc`, makes *all* fns in the current .v file, opt out of autofree
-	has_globals              bool              // `@[has_globals] module abc` - allow globals declarations, even without -enable-globals, in that single .v file __only__
-	is_generated             bool              // `@[generated] module abc` - turn off compiler notices for that single .v file __only__.
-	is_translated            bool              // `@[translated] module abc` - mark a file as translated, to relax some compiler checks for translated code.
-	attrs                    []ast.Attr        // attributes before next decl stmt
-	expr_mod                 string            // for constructing full type names in parse_type()
-	last_enum_name           string            // saves the last enum name on an array initialization
-	last_enum_mod            string            // saves the last enum mod name on an array initialization
-	imports                  map[string]string // alias => mod_name
-	ast_imports              []ast.Import      // mod_names
-	used_imports             []string
-	auto_imports             []string // imports, the user does not need to specify
-	implied_imports          []string // ​imports that the user's code uses but omitted to import explicitly, used by `vfmt`
-	imported_symbols         map[string]string
-	imported_symbols_used    map[string]bool
-	imported_symbols_trie    token.KeywordsMatcherTrie
-	is_amp                   bool // for generating the right code for `&Foo{}`
-	returns                  bool
-	is_stmt_ident            bool // true while the beginning of a statement is an ident/selector
-	expecting_type           bool // `is Type`, expecting type
-	expecting_value          bool = true // true where a node value will be used
-	cur_fn_name              string
-	cur_fn_scope             &ast.Scope = unsafe { nil }
-	label_names              []string
-	name_error               bool // indicates if the token is not a name or the name is on another line
-	n_asm                    int  // controls assembly labels
-	global_labels            []string
-	comptime_if_cond         bool
-	defer_vars               []ast.Ident
-	should_abort             bool // when too many errors/warnings/notices are accumulated, should_abort becomes true, and the parser should stop
-	codegen_text             string
-	anon_struct_decl         ast.StructDecl
-	init_generic_types       []ast.Type
-	if_cond_comments         []ast.Comment
-	left_comments            []ast.Comment
-	script_mode              bool
-	script_mode_start_token  token.Token
-	generic_type_level       int  // to avoid infinite recursion segfaults due to compiler bugs in ensure_type_exists
-	main_already_defined     bool // TODO move to checker
-	is_vls                   bool
-	is_vls_skip_file         bool // in `vls` mode, skip parse and check for unrelated files, such as `vlib`
-	inside_import_section    bool
-	cur_comments             []ast.Comment // comments between other stmts
+	tok                        token.Token
+	prev_tok                   token.Token
+	peek_tok                   token.Token
+	language                   ast.Language
+	fn_language                ast.Language // .c for `fn C.abcd()` declarations
+	struct_language            ast.Language // for `struct C.abcd{ embedded struct/union }` declarations
+	expr_level                 int          // prevent too deep recursions for pathological programs
+	inside_vlib_file           bool         // true for all vlib/ files
+	inside_test_file           bool         // when inside _test.v or _test.vv file
+	inside_if                  bool
+	inside_comptime_if         bool
+	inside_if_expr             bool
+	inside_if_cond             bool
+	inside_ct_if_expr          bool
+	inside_or_expr             bool
+	inside_for                 bool
+	inside_for_expr            bool
+	inside_fn                  bool // true even with implicit main
+	inside_fn_return           bool
+	inside_fn_param            bool // true while parsing function parameter types
+	inside_fn_concrete_type    bool // parsing fn_name[concrete_type]() call expr
+	inside_call_args           bool // true inside f(  ....  )
+	inside_unsafe_fn           bool
+	inside_str_interp          bool
+	inside_array_lit           bool
+	inside_in_array            bool
+	inside_infix               bool
+	inside_assign_rhs          bool // rhs assignment
+	inside_match               bool // to separate `match A { }` from `Struct{}`
+	inside_select              bool // to allow `ch <- Struct{} {` inside `select`
+	inside_match_case          bool // to separate `match_expr { }` from `Struct{}`
+	inside_match_body          bool // to fix eval not used TODO
+	inside_ct_match            bool
+	inside_ct_match_case       bool
+	inside_ct_match_body       bool
+	inside_unsafe              bool
+	inside_sum_type            bool // to prevent parsing inline sum type again
+	inside_asm_template        bool
+	inside_asm                 bool
+	inside_defer               bool
+	defer_mode                 ast.DeferMode
+	inside_generic_params      bool // indicates if parsing between `<` and `>` of a method/function
+	inside_receiver_param      bool // indicates if parsing the receiver parameter inside the first `(` and `)` of a method
+	inside_struct_field_decl   bool
+	inside_struct_attr_decl    bool
+	inside_map_init            bool
+	inside_orm                 bool
+	inside_chan_decl           bool
+	inside_attr_decl           bool
+	inside_lock_exprs          bool
+	array_dim                  int               // array dim parsing level
+	fixed_array_dim            int               // fixed array dim parsing level
+	or_is_handled              bool              // ignore `or` in this expression
+	builtin_mod                bool              // are we in the `builtin` module?
+	mod                        string            // current module name
+	is_manualfree              bool              // true when `@[manualfree] module abc`, makes *all* fns in the current .v file, opt out of autofree
+	has_globals                bool              // `@[has_globals] module abc` - allow globals declarations, even without -enable-globals, in that single .v file __only__
+	is_generated               bool              // `@[generated] module abc` - turn off compiler notices for that single .v file __only__.
+	is_translated              bool              // `@[translated] module abc` - mark a file as translated, to relax some compiler checks for translated code.
+	attrs                      []ast.Attr        // attributes before next decl stmt
+	expr_mod                   string            // for constructing full type names in parse_type()
+	last_enum_name             string            // saves the last enum name on an array initialization
+	last_enum_mod              string            // saves the last enum mod name on an array initialization
+	imports                    map[string]string // alias => mod_name
+	ast_imports                []ast.Import      // mod_names
+	used_imports               []string
+	auto_imports               []string // imports, the user does not need to specify
+	implied_imports            []string // ​imports that the user's code uses but omitted to import explicitly, used by `vfmt`
+	imported_symbols           map[string]string
+	imported_symbols_used      map[string]bool
+	imported_symbols_trie      token.KeywordsMatcherTrie
+	is_amp                     bool // for generating the right code for `&Foo{}`
+	returns                    bool
+	is_stmt_ident              bool // true while the beginning of a statement is an ident/selector
+	expecting_type             bool // `is Type`, expecting type
+	expecting_value            bool = true // true where a node value will be used
+	cur_fn_name                string
+	cur_fn_scope               &ast.Scope = unsafe { nil }
+	label_names                []string
+	name_error                 bool // indicates if the token is not a name or the name is on another line
+	n_asm                      int  // controls assembly labels
+	global_labels              []string
+	comptime_if_cond           bool
+	defer_vars                 []ast.Ident
+	should_abort               bool // when too many errors/warnings/notices are accumulated, should_abort becomes true, and the parser should stop
+	codegen_text               string
+	anon_struct_decl           ast.StructDecl
+	init_generic_types         []ast.Type
+	consume_init_generic_types bool
+	if_cond_comments           []ast.Comment
+	left_comments              []ast.Comment
+	script_mode                bool
+	script_mode_start_token    token.Token
+	generic_type_level         int  // to avoid infinite recursion segfaults due to compiler bugs in ensure_type_exists
+	main_already_defined       bool // TODO move to checker
+	is_vls                     bool
+	is_vls_skip_file           bool // in `vls` mode, skip parse and check for unrelated files, such as `vlib`
+	inside_import_section      bool
+	cur_comments               []ast.Comment // comments between other stmts
 pub mut:
 	scanner &scanner.Scanner = unsafe { nil }
 	table   &ast.Table       = unsafe { nil }
@@ -228,14 +229,13 @@ fn (mut p Parser) free_scanner() {
 	}
 }
 
-const normalised_working_folder = (os.real_path(os.getwd()) + os.path_separator).replace('\\',
-	'/')
+const normalised_working_folder = (os.real_path(os.getwd()) + os.path_separator).replace('\\', '/')
 
 pub fn (mut p Parser) set_path(path string) {
 	p.file_path = path
 	p.file_base = os.base(path)
-	p.file_display_path = os.real_path(p.file_path).replace_once(normalised_working_folder,
-		'').replace('\\', '/')
+	p.file_display_path =
+		os.real_path(p.file_path).replace_once(normalised_working_folder, '').replace('\\', '/')
 	p.inside_vlib_file = os.dir(path).contains('vlib')
 	p.inside_test_file = p.file_base.ends_with('_test.v') || p.file_base.ends_with('_test.vv')
 		|| p.file_base.all_before_last('.v').all_before_last('.').ends_with('_test')
@@ -427,12 +427,18 @@ pub fn parse_files(paths []string, mut table ast.Table, pref_ &pref.Preferences)
 	$if time_parsing ? {
 		timers.should_print = true
 	}
+	stop_after_first_error := pref_.fatal_errors
+		|| (pref_.output_mode == .stdout && !pref_.check_only && !pref_.is_vls)
 	unsafe {
 		mut files := []&ast.File{cap: paths.len}
 		for path in paths {
 			timers.start('parse_file ${path}')
-			files << parse_file(path, mut table, .skip_comments, pref_)
+			file := parse_file(path, mut table, .skip_comments, pref_)
+			files << file
 			timers.show('parse_file ${path}')
+			if stop_after_first_error && file.errors.len > 0 {
+				break
+			}
 		}
 		handle_codegen_for_multiple_files(mut files)
 		return files
@@ -646,6 +652,21 @@ fn (mut p Parser) check(expected token.Kind) {
 			s = '`${s}`'
 		}
 		p.unexpected(expecting: s)
+	}
+}
+
+// recover_until_closing_rcbr skips the remaining contents of a `{ ... }` block after
+// the opening `{` has already been consumed, leaving the parser positioned after the
+// matching closing brace or at EOF.
+fn (mut p Parser) recover_until_closing_rcbr() {
+	mut brace_level := 1
+	for p.tok.kind != .eof && brace_level > 0 {
+		if p.tok.kind == .lcbr {
+			brace_level++
+		} else if p.tok.kind == .rcbr {
+			brace_level--
+		}
+		p.next()
 	}
 }
 
@@ -1046,8 +1067,7 @@ fn (mut p Parser) stmt(is_top_level bool) ast.Stmt {
 					return stmt
 				}
 				p.attrs = []
-				return p.error_with_pos('attributes can only be used before declarations',
-					attr_pos)
+				return p.error_with_pos('attributes can only be used before declarations', attr_pos)
 			}
 			return p.parse_multi_expr(is_top_level)
 		}
@@ -1217,8 +1237,7 @@ fn (mut p Parser) stmt(is_top_level bool) ast.Stmt {
 							defer_mode = .function
 						}
 						else {
-							return p.error_with_pos('unknown `defer` mode: `${mode}`',
-								mode_pos)
+							return p.error_with_pos('unknown `defer` mode: `${mode}`', mode_pos)
 						}
 					}
 					p.check(.rpar)
@@ -1515,6 +1534,13 @@ fn (mut p Parser) alias_array_type() ast.Type {
 	return ast.void_type
 }
 
+fn (p &Parser) is_known_non_placeholder_type(name string) bool {
+	if idx := p.table.type_idxs[name] {
+		return p.table.sym(ast.idx_to_type(idx)).kind != .placeholder
+	}
+	return false
+}
+
 @[direct_array_access]
 fn (mut p Parser) name_expr() ast.Expr {
 	prev_tok_kind := p.prev_tok.kind
@@ -1754,8 +1780,8 @@ fn (mut p Parser) name_expr() ast.Expr {
 		if (is_option || p.peek_tok.kind in [.lsbr, .lpar]) && (is_mod_cast
 			|| is_c_pointer_cast || is_c_type_cast || is_js_cast || is_generic_cast
 			|| (language == .v && name != '' && (is_capital_after_last_dot
-			|| name[0].is_capital()
-			|| (!known_var && (name in p.table.type_idxs || name_w_mod in p.table.type_idxs))))) {
+			|| name[0].is_capital() || (!known_var && (p.is_known_non_placeholder_type(name)
+			|| p.is_known_non_placeholder_type(name_w_mod)))))) {
 			// MainLetter(x) is *always* a cast, as long as it is not `C.`
 			// TODO: handle C.stat()
 			start_pos := p.tok.pos()
@@ -1884,8 +1910,7 @@ fn (mut p Parser) name_expr() ast.Expr {
 			full_type_name := if mod != '' { '${mod}.${type_name}' } else { p.imported_symbols[type_name] or {
 					p.prepend_mod(type_name)} }
 			if func := p.table.find_fn(full_type_name + '__static__' + p.peek_token(2).lit) {
-				fn_type := ast.new_type(p.table.find_or_register_fn_type(func, false,
-					true))
+				fn_type := ast.new_type(p.table.find_or_register_fn_type(func, false, true))
 				pos := p.tok.pos()
 				p.check_name()
 				p.check(.dot)
@@ -2225,8 +2250,10 @@ fn (mut p Parser) dot_expr(left ast.Expr) ast.Expr {
 		}
 	}
 	mut field_name := ''
-	// check if the name is on the same line as the dot
-	if p.prev_tok.pos().line_nr == name_pos.line_nr || p.tok.kind != .name {
+	dot_line := p.prev_tok.pos().line_nr
+	// check if the name is on the same line as the dot, or the dot
+	// is on the same line as the expression before (trailing dot for chaining)
+	if dot_line == name_pos.line_nr || prev_line == dot_line || p.tok.kind != .name {
 		if p.is_vls && p.tok.kind != .name {
 			if p.tok.kind in [.rpar, .rcbr] {
 				// Simplify the dot expression for VLS, so that the parser doesn't error
@@ -2241,7 +2268,15 @@ fn (mut p Parser) dot_expr(left ast.Expr) ast.Expr {
 	} else {
 		p.name_error = true
 	}
-	is_builtin_array_generic_method := ast.builtin_array_generic_methods_matcher.matches(field_name)
+	if ast.builtin_array_generic_methods_matcher.matches(field_name) {
+		if p.file_backend_mode == .v || p.file_backend_mode == .c {
+			p.register_auto_import('builtin.closure')
+		}
+		p.open_scope()
+		defer(fn) {
+			p.close_scope()
+		}
+	}
 	// ! in mutable methods
 	if p.tok.kind == .not && p.peek_tok.kind == .lpar {
 		p.next()
@@ -2263,15 +2298,6 @@ fn (mut p Parser) dot_expr(left ast.Expr) ast.Expr {
 		}
 	}
 	if p.tok.kind == .lpar {
-		if is_builtin_array_generic_method {
-			if p.file_backend_mode == .v || p.file_backend_mode == .c {
-				p.register_auto_import('builtin.closure')
-			}
-			p.open_scope()
-			defer(fn) {
-				p.close_scope()
-			}
-		}
 		p.next()
 		args := p.call_args()
 		p.check(.rpar)
@@ -2696,6 +2722,17 @@ fn (mut p Parser) const_decl() ast.ConstDecl {
 		full_name := if is_virtual_c_const { name } else { p.prepend_mod(name) }
 		if p.tok.kind == .comma {
 			p.error_with_pos('const declaration do not support multiple assign yet', p.tok.pos())
+			if is_block {
+				for p.tok.kind !in [.eof, .rpar] {
+					p.next()
+				}
+			} else {
+				line_nr := p.tok.line_nr
+				for p.tok.kind != .eof && p.tok.line_nr == line_nr {
+					p.next()
+				}
+			}
+			break
 		}
 		// Allow for `const x := 123`, and for `const x = 123` too.
 		// Supporting `const x := 123` in addition to `const x = 123`, makes extracting local variables to constants
@@ -3013,8 +3050,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 		}
 	}
 	if p.is_imported_symbol(name) {
-		p.error_with_pos('cannot register alias `${name}`, this type was already imported',
-			end_pos)
+		p.error_with_pos('cannot register alias `${name}`, this type was already imported', end_pos)
 		return ast.AliasTypeDecl{}
 	}
 	mut sum_variants := []ast.TypeNode{}
@@ -3151,7 +3187,8 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 	}
 	if idx == pidx {
 		type_alias_pos := sum_variants[0].pos
-		p.error_with_pos('a type alias can not refer to itself: ${name}', decl_pos.extend(type_alias_pos))
+		p.error_with_pos('a type alias can not refer to itself: ${name}',
+			decl_pos.extend(type_alias_pos))
 		return ast.AliasTypeDecl{}
 	}
 	comments = sum_variants[0].end_comments.clone()
@@ -3271,7 +3308,9 @@ fn (mut p Parser) unsafe_stmt() ast.Stmt {
 	}
 	p.next()
 	if p.inside_unsafe && !p.inside_defer {
-		return p.error_with_pos('already inside `unsafe` block', pos)
+		err := p.error_with_pos('already inside `unsafe` block', pos)
+		p.recover_until_closing_rcbr()
+		return err
 	}
 	p.inside_unsafe = true
 	p.open_scope() // needed in case of `unsafe {stmt}`

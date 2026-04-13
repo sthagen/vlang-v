@@ -192,7 +192,7 @@ const c_common_macros = '
 		#else
 			#define VV_EXP  extern __attribute__((visibility("default")))
 		#endif
-		#if defined(__clang__) && (defined(_VUSECACHE) || defined(_VBUILDMODULE))
+		#if defined(__clang__) && (defined(_VUSECACHE) || defined(_VBUILDMODULE) || defined(_VOBJECTFILE))
 			#define VV_LOC static
 		#else
 			#define VV_LOC  __attribute__ ((visibility ("hidden")))
@@ -361,7 +361,8 @@ static int v__vsnprintf(char *s, size_t n, const char *fmt, va_list ap) {
 	if (n > 0) {
 		const int written = _vsnprintf_s(s, n, _TRUNCATE, fmt, ap);
 		if (written < 0) {
-			s[n - 1] = 0;
+			s[n -
+	1] = 0;
 		}
 	}
 	return needed;
@@ -377,13 +378,23 @@ static int v__snprintf(char *s, size_t n, const char *fmt, ...) {
 #define snprintf v__snprintf
 #endif
 //================================== GLOBALS =================================*/
+#ifdef _VOBJECTFILE
+static void _vinit(int ___argc, voidptr ___argv);
+static void _vcleanup(void);
+#else
 void _vinit(int ___argc, voidptr ___argv);
 void _vcleanup(void);
+#endif
 #ifdef _WIN32
 	// workaround for windows, export _vinit_caller/_vcleanup_caller, let dl.open()/dl.close() call it
 	// NOTE: This is hardcoded in vlib/dl/dl_windows.c.v!
-	VV_EXP void _vinit_caller();
-	VV_EXP void _vcleanup_caller();
+	#ifdef _VOBJECTFILE
+		static void _vinit_caller();
+		static void _vcleanup_caller();
+	#else
+		VV_EXP void _vinit_caller();
+		VV_EXP void _vcleanup_caller();
+	#endif
 #endif
 #define sigaction_size sizeof(sigaction);
 #define _ARR_LEN(a) ( (sizeof(a)) / (sizeof(a[0])) )
@@ -562,6 +573,49 @@ typedef struct sync__Channel* chan;
 #endif
 '
 
+const c_shift_helpers = '
+#define V_SAFE_SHIFT_BITS(type) ((u64)(sizeof(type) * 8))
+#define V_SAFE_LSHIFT_UNSIGNED(name, type) static inline type name(type x, u64 y) { return y >= V_SAFE_SHIFT_BITS(type) ? (type)0 : (type)(x << y); }
+#define V_SAFE_LSHIFT_SIGNED(name, type, unsigned_type) static inline type name(type x, u64 y) { return y >= V_SAFE_SHIFT_BITS(type) ? (type)0 : (type)(((unsigned_type)x) << y); }
+#define V_SAFE_RSHIFT_UNSIGNED(name, type) static inline type name(type x, u64 y) { return y >= V_SAFE_SHIFT_BITS(type) ? (type)0 : (type)(x >> y); }
+#define V_SAFE_RSHIFT_SIGNED(name, type) static inline type name(type x, u64 y) { return y >= V_SAFE_SHIFT_BITS(type) ? (type)(x < 0 ? -1 : 0) : (type)(x >> y); }
+V_SAFE_LSHIFT_SIGNED(v__lshift_char, char, u8)
+V_SAFE_RSHIFT_SIGNED(v__rshift_char, char)
+V_SAFE_LSHIFT_SIGNED(v__lshift_i8, i8, u8)
+V_SAFE_RSHIFT_SIGNED(v__rshift_i8, i8)
+V_SAFE_LSHIFT_SIGNED(v__lshift_i16, i16, u16)
+V_SAFE_RSHIFT_SIGNED(v__rshift_i16, i16)
+V_SAFE_LSHIFT_SIGNED(v__lshift_i32, i32, u32)
+V_SAFE_RSHIFT_SIGNED(v__rshift_i32, i32)
+V_SAFE_LSHIFT_SIGNED(v__lshift_int, int, unsigned int)
+V_SAFE_RSHIFT_SIGNED(v__rshift_int, int)
+V_SAFE_LSHIFT_SIGNED(v__lshift_vint_t, vint_t, u64)
+V_SAFE_RSHIFT_SIGNED(v__rshift_vint_t, vint_t)
+V_SAFE_LSHIFT_SIGNED(v__lshift_i64, i64, u64)
+V_SAFE_RSHIFT_SIGNED(v__rshift_i64, i64)
+V_SAFE_LSHIFT_SIGNED(v__lshift_isize, isize, usize)
+V_SAFE_RSHIFT_SIGNED(v__rshift_isize, isize)
+V_SAFE_LSHIFT_UNSIGNED(v__lshift_u8, u8)
+V_SAFE_RSHIFT_UNSIGNED(v__rshift_u8, u8)
+V_SAFE_LSHIFT_UNSIGNED(v__lshift_u16, u16)
+V_SAFE_RSHIFT_UNSIGNED(v__rshift_u16, u16)
+V_SAFE_LSHIFT_UNSIGNED(v__lshift_u32, u32)
+V_SAFE_RSHIFT_UNSIGNED(v__rshift_u32, u32)
+V_SAFE_LSHIFT_UNSIGNED(v__lshift_u64, u64)
+V_SAFE_RSHIFT_UNSIGNED(v__rshift_u64, u64)
+V_SAFE_LSHIFT_UNSIGNED(v__lshift_usize, usize)
+V_SAFE_RSHIFT_UNSIGNED(v__rshift_usize, usize)
+V_SAFE_LSHIFT_UNSIGNED(v__lshift_rune, rune)
+V_SAFE_RSHIFT_UNSIGNED(v__rshift_rune, rune)
+V_SAFE_LSHIFT_SIGNED(v__lshift_int_literal, int_literal, u64)
+V_SAFE_RSHIFT_SIGNED(v__rshift_int_literal, int_literal)
+#undef V_SAFE_RSHIFT_SIGNED
+#undef V_SAFE_RSHIFT_UNSIGNED
+#undef V_SAFE_LSHIFT_SIGNED
+#undef V_SAFE_LSHIFT_UNSIGNED
+#undef V_SAFE_SHIFT_BITS
+'
+
 const c_mapfn_callback_types = '
 typedef u64 (*MapHashFn)(voidptr);
 typedef bool (*MapEqFn)(voidptr, voidptr);
@@ -577,9 +631,9 @@ typedef long unsigned int size_t;
 void *malloc(size_t size);
 void *calloc(size_t nitems, size_t size);
 void *realloc(void *ptr, size_t size);
-void *memcpy(void *dest, void *src, size_t n);
+void *memcpy(void *dest, const void *src, size_t n);
 void *memset(void *s, int c, size_t n);
-void *memmove(void *dest, void *src, size_t n);
+void *memmove(void *dest, const void *src, size_t n);
 // varargs implementation, TODO: works on tcc and gcc, but is very unportable and hacky
 typedef __builtin_va_list va_list;
 #define va_start(a, b) __builtin_va_start(a, b)
@@ -587,8 +641,13 @@ typedef __builtin_va_list va_list;
 #define va_arg(a, b)   __builtin_va_arg(a, b)
 #define va_copy(a, b)  __builtin_va_copy(a, b)
 //================================== GLOBALS =================================*/
+#ifdef _VOBJECTFILE
+static void _vinit(int ___argc, voidptr ___argv);
+static void _vcleanup(void);
+#else
 void _vinit(int ___argc, voidptr ___argv);
 void _vcleanup();
+#endif
 #define sigaction_size sizeof(sigaction);
 #define _ARR_LEN(a) ( (sizeof(a)) / (sizeof(a[0])) )
 voidptr builtin__memdup(voidptr src, isize size);

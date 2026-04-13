@@ -64,7 +64,8 @@ fn (vd &VDoc) render_search_index(out Output) {
 	for i, title in vd.search_module_index {
 		data := vd.search_module_data[i]
 		js_search_index.write_string('"${title}",\n')
-		description := data.description.replace('\n', '').replace('\r', '') // fix multiline js string bug
+		description :=
+			data.description.replace('\n', '').replace('\r', '') // fix multiline js string bug
 		js_search_data.write_string('["${description}","${data.link}"],\n')
 	}
 	js_search_index.writeln('];\n')
@@ -191,6 +192,7 @@ fn (vd &VDoc) write_content(cn &doc.DocNode, d &doc.Doc, mut hw strings.Builder)
 	cfg := vd.cfg
 	file_path_name := vd.get_repo_file_path_for_links(cn.file_path)
 	src_link := get_src_link(vd.manifest.repo_url, vd.manifest.repo_branch, file_path_name,
+
 		cn.pos.line_nr + 1)
 	md_link_base := get_src_dir_link(vd.manifest.repo_url, vd.manifest.repo_branch, file_path_name)
 	if cn.content.len != 0 || cn.name == 'Constants' {
@@ -510,7 +512,9 @@ fn write_token(tok token.Token, typ HighlightTokenTyp, mut buf strings.Builder) 
 }
 
 fn html_highlight(code string, tb &ast.Table) string {
-	mut s := scanner.new_scanner(code, .parse_comments, &pref.Preferences{ output_mode: .silent })
+	mut s := scanner.new_scanner(code, .parse_comments, &pref.Preferences{
+		output_mode: .silent
+	})
 	mut tok := s.scan()
 	mut prev_tok := tok
 	mut next_tok := s.scan()
@@ -664,7 +668,9 @@ fn (vd &VDoc) doc_node_html(dn doc.DocNode, link string, md_link_base string, he
 		}
 	}
 	only_comments_text := dn.merge_comments_without_examples()
-	md_content := markdown.render(only_comments_text, mut renderer) or { '' }
+	md_content := markdown.render(prepare_markdown_for_html(only_comments_text), mut renderer) or {
+		''
+	}
 	highlighted_code := html_highlight(dn.content, tb)
 	node_class := if dn.kind == .const_group { ' const' } else { '' }
 	sym_name := get_sym_name(dn)
@@ -695,7 +701,8 @@ fn (vd &VDoc) doc_node_html(dn doc.DocNode, link string, md_link_base string, he
 		dnw.write_string('</div>\n')
 	}
 	if deprecated_tags.len > 0 {
-		attributes := deprecated_tags.map('<div class="attribute attribute-deprecated">${it.replace_each(quote_escape_seq)}</div>\n').join('')
+		attributes :=
+			deprecated_tags.map('<div class="attribute attribute-deprecated">${it.replace_each(quote_escape_seq)}</div>\n').join('')
 		dnw.writeln('<div class="attributes">${attributes}</div>\n')
 	}
 	if tags.len > 0 {
@@ -721,6 +728,75 @@ fn (vd &VDoc) doc_node_html(dn doc.DocNode, link string, md_link_base string, he
 	dnw.writeln('</section>')
 	dnw_str := dnw.str()
 	return dnw_str
+}
+
+fn prepare_markdown_for_html(text string) string {
+	if !text.contains('>') {
+		return text
+	}
+	lines := text.split_into_lines()
+	mut prepared := []string{cap: lines.len}
+	mut is_codeblock := false
+	for i, line in lines {
+		trimmed := line.trim_space()
+		if trimmed.starts_with('```') {
+			prepared << line
+			is_codeblock = !is_codeblock
+			continue
+		}
+		if is_codeblock {
+			prepared << line
+			continue
+		}
+		next_line := if i + 1 < lines.len { lines[i + 1] } else { '' }
+		if blockquote_line_needs_hard_break(line, next_line) {
+			prepared << line + '  '
+		} else {
+			prepared << line
+		}
+	}
+	return prepared.join('\n')
+}
+
+fn blockquote_line_needs_hard_break(line string, next_line string) bool {
+	if line.ends_with('  ') {
+		return false
+	}
+	payload := blockquote_payload(line) or { return false }
+	if payload == '' {
+		return false
+	}
+	next_payload := blockquote_payload(next_line) or { return false }
+	if next_payload == '' {
+		return false
+	}
+	return !blockquote_payload_starts_new_block(next_payload)
+}
+
+fn blockquote_payload(line string) ?string {
+	trimmed := line.trim_space()
+	if !trimmed.starts_with('>') {
+		return none
+	}
+	return trimmed[1..].trim_space()
+}
+
+fn blockquote_payload_starts_new_block(payload string) bool {
+	if payload == '' || payload.starts_with('```') || payload.starts_with('>')
+		|| payload.starts_with('|') {
+		return true
+	}
+	if payload.len > 1 && payload[1] == ` ` && payload[0] in [`-`, `*`, `+`] {
+		return true
+	}
+	if payload.len > 2 && payload[2] == ` ` && payload[1] == `.` && payload[0].is_digit() {
+		return true
+	}
+	if !payload.starts_with('#') {
+		return false
+	}
+	line_before_spaces := payload.before(' ')
+	return line_before_spaces.count('#') == line_before_spaces.len
 }
 
 fn write_toc(dn doc.DocNode, mut toc strings.Builder) {

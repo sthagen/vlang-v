@@ -41,6 +41,7 @@ $if !new_veb ? {
 		// reserve space for read and write buffers
 		pico_context.buf = unsafe { malloc_noscan(picoev.max_fds * max_read + 1) }
 		defer { unsafe { free(pico_context.buf) } }
+		pico_context.body_buffers = [][]u8{len: picoev.max_fds}
 		pico_context.incomplete_requests = []http.Request{len: picoev.max_fds}
 		pico_context.file_responses = []FileResponse{len: picoev.max_fds}
 		pico_context.string_responses = []StringResponse{len: picoev.max_fds}
@@ -177,6 +178,26 @@ $if !new_veb ? {
 		return error('invalid chunked body')
 	}
 
+	@[inline]
+	fn append_request_body(mut params RequestParams, fd int, chunk []u8, expected_len int) {
+		if chunk.len == 0 {
+			return
+		}
+		if params.body_buffers[fd].cap == 0 {
+			initial_cap := if expected_len > 0 { expected_len } else { chunk.len }
+			params.body_buffers[fd] = []u8{cap: initial_cap}
+		}
+		params.body_buffers[fd] << chunk
+	}
+
+	@[inline; manualfree]
+	fn finalize_request_body(mut params RequestParams, fd int) string {
+		body := params.body_buffers[fd].bytestr()
+		unsafe { params.body_buffers[fd].free() }
+		params.body_buffers[fd] = []u8{}
+		return body
+	}
+
 	// handle_write_file reads data from a file and sends that data over the socket.
 	@[direct_array_access; manualfree]
 	fn handle_write_file(mut pv picoev.Picoev, mut params RequestParams, fd int) {
@@ -218,9 +239,27 @@ $if !new_veb ? {
 		if params.file_responses[fd].pos == params.file_responses[fd].total {
 			// file is done writing
 			params.file_responses[fd].done()
-			handle_complete_request(params.file_responses[fd].should_close_conn, mut pv,
-				fd)
+			handle_complete_request(params.file_responses[fd].should_close_conn, mut pv, fd)
 			return
+		}
+	}
+
+	@[manualfree]
+	fn send_file_inline(mut conn net.TcpConn, mut file os.File, total i64, timeout_in_seconds int) ! {
+		conn.write_timeout = timeout_in_seconds * time.second
+		data := unsafe { malloc(max_write) }
+		defer {
+			unsafe { free(data) }
+		}
+		mut remaining := total
+		for remaining > 0 {
+			bytes_to_write := if remaining > max_write { max_write } else { int(remaining) }
+			bytes_read := file.read_into_ptr(data, bytes_to_write)!
+			if bytes_read <= 0 {
+				return error('unexpected EOF while sending file response')
+			}
+			send_string_ptr(mut conn, data, bytes_read)!
+			remaining -= bytes_read
 		}
 	}
 
@@ -249,8 +288,7 @@ $if !new_veb ? {
 			// done writing
 			params.string_responses[fd].done()
 			pv.close_conn(fd)
-			handle_complete_request(params.string_responses[fd].should_close_conn, mut
-				pv, fd)
+			handle_complete_request(params.string_responses[fd].should_close_conn, mut pv, fd)
 			return
 		}
 	}
@@ -427,17 +465,17 @@ $if !new_veb ? {
 					return
 				} else if n < bytes_to_read || params.idx[fd] + n < content_length_i {
 					// request is incomplete wait until the socket becomes ready to read again
-					// TODO: change this to a memcpy function?
-					req.data += buf[0..n].bytestr()
+					append_request_body(mut params, fd, buf[0..n], content_length_i)
 					params.incomplete_requests[fd] = req
 					params.idx[fd] += n
 					$if trace_handle_read ? {
-						eprintln('>>>>> request is NOT complete, fd: ${fd} | n: ${n} | req.data.len: ${req.data.len} | params.idx[fd]: ${params.idx[fd]}')
+						eprintln('>>>>> request is NOT complete, fd: ${fd} | n: ${n} | body_buffer.len: ${params.body_buffers[fd].len} | params.idx[fd]: ${params.idx[fd]}')
 					}
 					return
 				} else {
 					// request is complete: n = bytes_to_read
-					req.data += buf[0..n].bytestr()
+					append_request_body(mut params, fd, buf[0..n], content_length_i)
+					req.data = finalize_request_body(mut params, fd)
 					params.idx[fd] += n
 					$if trace_handle_read ? {
 						eprintln('>>>>> request is NOW COMPLETE, fd: ${fd} | n: ${n} | req.data.len: ${req.data.len}')
@@ -461,8 +499,7 @@ $if !new_veb ? {
 					// See Context.send_file for why we use max_read instead of max_write.
 					if completed_context.res.body.len < max_read {
 						fast_send_resp(mut conn, completed_context.res) or {}
-						handle_complete_request(completed_context.client_wants_to_close, mut
-							pv, fd)
+						handle_complete_request(completed_context.client_wants_to_close, mut pv, fd)
 					} else {
 						params.string_responses[fd].open = true
 						params.string_responses[fd].str = completed_context.res.body
@@ -487,28 +524,50 @@ $if !new_veb ? {
 						fast_send_resp(mut conn, http_500) or {}
 						return
 					}
-					params.file_responses[fd].total = length.i64()
-					params.file_responses[fd].file = os.open(completed_context.return_file) or {
-						// Context checks if the file is valid, so this should never happen
-						fast_send_resp(mut conn, http_500) or {}
-						params.file_responses[fd].done()
-						pv.close_conn(fd)
-						return
-					}
-					params.file_responses[fd].open = true
+					$if termux {
+						mut file := os.open(completed_context.return_file) or {
+							// Context checks if the file is valid, so this should never happen
+							fast_send_resp(mut conn, http_500) or {}
+							pv.close_conn(fd)
+							return
+						}
+						defer { file.close() }
+						fast_send_resp_header(mut conn, completed_context.res) or {
+							pv.close_conn(fd)
+							return
+						}
+						// Termux file responses are sent inline because deferred write events can
+						// leave static responses stalled.
+						send_file_inline(mut conn, mut file, length.i64(),
+							params.timeout_in_seconds) or {
+							pv.close_conn(fd)
+							return
+						}
+						handle_complete_request(completed_context.client_wants_to_close, mut pv, fd)
+					} $else {
+						params.file_responses[fd].total = length.i64()
+						params.file_responses[fd].file = os.open(completed_context.return_file) or {
+							// Context checks if the file is valid, so this should never happen
+							fast_send_resp(mut conn, http_500) or {}
+							params.file_responses[fd].done()
+							pv.close_conn(fd)
+							return
+						}
+						params.file_responses[fd].open = true
 
-					res := pv.add(fd, picoev.picoev_write, params.timeout_in_seconds,
-						picoev.raw_callback)
-					// picoev error
-					if res == -1 {
-						// should not happen
-						fast_send_resp(mut conn, http_500) or {}
-						params.file_responses[fd].done()
-						pv.close_conn(fd)
-						return
+						res := pv.add(fd, picoev.picoev_write, params.timeout_in_seconds,
+							picoev.raw_callback)
+						// picoev error
+						if res == -1 {
+							// should not happen
+							fast_send_resp(mut conn, http_500) or {}
+							params.file_responses[fd].done()
+							pv.close_conn(fd)
+							return
+						}
+						// no errors we can send the HTTP headers
+						fast_send_resp_header(mut conn, completed_context.res) or {}
 					}
-					// no errors we can send the HTTP headers
-					fast_send_resp_header(mut conn, completed_context.res) or {}
 				}
 			}
 		} else {
@@ -537,7 +596,7 @@ $if !new_veb ? {
 			dump(req.url)
 		}
 		// parse the URL, query and form data
-		mut url := urllib.parse(req.url) or {
+		mut url := urllib.parse_request_uri(req.url) or {
 			eprintln('[veb] error parsing path "${req.url}": ${err}')
 			return none
 		}
@@ -572,9 +631,7 @@ $if !new_veb ? {
 		}
 		// match controller paths
 		$if A is ControllerInterface {
-			if completed_context := handle_controllers[X](params.controllers, ctx, mut
-				url, host)
-			{
+			if completed_context := handle_controllers[X](params.controllers, ctx, mut url, host) {
 				return completed_context
 			}
 		}

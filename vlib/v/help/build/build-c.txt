@@ -95,14 +95,14 @@ see also `v help build`.
          @[export: 'calloc']
          __calloc(nmemb usize, size usize) &C.void
             Like malloc, but sets all the bytes to `0` first.
-         memcpy(dest &C.void, src &C.void, n usize) &C.void
+         memcpy(dest &C.void, const_src &C.void, n usize) &C.void
             Moves n bytes from dest to src, and returns dest
-         memmove(dest &C.void, src &C.void, n usize) &C.void
+         memmove(dest &C.void, const_src &C.void, n usize) &C.void
             Like memcpy, but guaranteed to work if dest and src overlap.
-         memcmp(a &C.void, b &C.void, n usize) int
+         memcmp(const_a &C.void, const_b &C.void, n usize) int
             Compare two buffers of length n. If a and b are equal, return 0.
             Otherwise, return the difference between the first different letter.
-         strlen(s &C.void) usize
+         strlen(const_s &char) usize
             Returns the amount of bytes until the first `0`, starting at s
          memset(s &C.void, c int, n usize) &C.void
             Sets n bytes starting at s to c (c is casted to a char)
@@ -189,6 +189,8 @@ see also `v help build`.
       Tell V to compile an .o object file instead of an executable.
       This is useful if you plan to create a module, that will be later linked to a
       larger program, potentially written in another language.
+      The flag can also be combined with `-o file.c`, to generate C source that can be
+      compiled and linked together with other `-is_o` generated V units.
       Note: this option currently works with gcc/clang/tcc, but not msvc.
       Note: use either -no-skip-unused or tag the functions you expect to be publicly
       usable in the .o file with `@[markused]` . Adding `-gc none` may be also needed,
@@ -205,10 +207,11 @@ see also `v help build`.
       more performant without autofree.
 
    -gc <mode>
-      V uses a garbage collector by default. Only the Boehm–Demers–Weiser garbage collector
-      is supported currently with the following sub-options:
+      On most supported C targets, V uses a garbage collector by default. Musl keeps the
+      historical default of `-gc none`. Only the Boehm–Demers–Weiser garbage collector is
+      supported currently with the following sub-options:
 
-      `-gc boehm` ........... use default garbage collector (same as not specifying option)
+      `-gc boehm` ........... use the default Boehm garbage collector mode
       `-gc boehm_full` ...... full garbage collection mode
       `-gc boehm_incr` ...... incremental/generational garbage collection mode
       `-gc boehm_full_opt` .. optimized full garbage collection mode

@@ -234,7 +234,7 @@ pub:
 	fullscreen    bool
 	scale         f32 = 1.0
 	sample_count  int
-	swap_interval int = 1 // 1 = 60fps, 2 = 30fps etc. The preferred swap interval (ignored on some platforms)
+	swap_interval int = 1 // 1 = 60fps, 2 = 30fps etc. Ignored by the JS backend; frame pacing follows requestAnimationFrame.
 	// ved needs this
 	// init_text bool
 	font_path             string
@@ -485,7 +485,8 @@ pub fn (mut ctx Context) draw_rect(x f32, y f32, w f32, h f32, c Color) {
 
 fn gg_animation_frame_fn(mut g Context) {
 	g.frame++
-	g.context.clearRect(JS.Number(0), JS.Number(0), JS.Number(g.config.width), JS.Number(g.config.height))
+	g.context.clearRect(JS.Number(0), JS.Number(0), JS.Number(g.config.width),
+		JS.Number(g.config.height))
 	// todo(playXE): handle events
 
 	if !isnil(g.config.frame_fn) {

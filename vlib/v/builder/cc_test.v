@@ -99,3 +99,42 @@ fn test_c_output_suggests_missing_typedef_for_c_struct_requires_matching_redecla
 		'other_c_struct': true
 	}) == ''
 }
+
+fn test_c_error_missing_library_name_detects_tcc_output() {
+	tcc_output := "tcc: error: library 'pq' not found"
+	lib_name := c_error_missing_library_name(tcc_output)
+	assert lib_name == 'pq'
+}
+
+fn test_c_error_missing_libatomic_marker_with_tcc_output() {
+	c_output := "/tmp/v/vdoc.tmp.c:24184: warning: assignment makes pointer from integer without a cast\ntcc: error: library 'atomic' not found\n"
+	assert c_error_missing_libatomic_marker(c_output) == "library 'atomic' not found"
+	assert c_error_looks_like_missing_libatomic(c_output)
+}
+
+fn test_c_error_missing_libatomic_marker_with_ld_output() {
+	c_output := '/usr/bin/ld: cannot find -latomic\ncollect2: error: ld returned 1 exit status\n'
+	assert c_error_missing_libatomic_marker(c_output) == 'cannot find -latomic'
+	assert c_error_looks_like_missing_libatomic(c_output)
+}
+
+fn test_c_error_missing_libatomic_marker_with_regular_c_error() {
+	c_output := "error: unknown type name 'my_missing_type'"
+	assert c_error_missing_libatomic_marker(c_output) == ''
+	assert !c_error_looks_like_missing_libatomic(c_output)
+}
+
+fn test_c_error_missing_library_name_with_macos_ld_output() {
+	c_output := "ld: library 'mbedtls' not found\nclang: error: linker command failed with exit code 1\n"
+	assert c_error_missing_library_name(c_output) == 'mbedtls'
+}
+
+fn test_c_error_missing_library_name_with_gnu_ld_output() {
+	c_output := '/usr/bin/ld: cannot find -lssl\ncollect2: error: ld returned 1 exit status\n'
+	assert c_error_missing_library_name(c_output) == 'ssl'
+}
+
+fn test_c_error_missing_library_name_with_regular_c_error() {
+	c_output := "error: unknown type name 'my_missing_type'"
+	assert c_error_missing_library_name(c_output) == ''
+}

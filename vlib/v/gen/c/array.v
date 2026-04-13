@@ -129,7 +129,8 @@ fn (mut g Gen) array_init(node ast.ArrayInit, var_name string) {
 	}
 	if g.cur_concrete_types.len > 0 && array_type.unaliased_sym.kind == .array
 		&& resolved_elem_type.typ != 0 {
-		current_elem_type := g.unwrap_generic(g.recheck_concrete_type(g.table.value_type(array_type.typ)))
+		current_elem_type :=
+			g.unwrap_generic(g.recheck_concrete_type(g.table.value_type(array_type.typ)))
 		if current_elem_type != resolved_elem_type.typ {
 			resolved_array_type := g.table.find_or_register_array(resolved_elem_type.typ)
 			array_type = g.unwrap(resolved_array_type)
@@ -212,6 +213,99 @@ fn (mut g Gen) array_init(node ast.ArrayInit, var_name string) {
 			g.write(')')
 		}
 	}
+}
+
+fn (mut g Gen) can_convert_array_to_interface_array(got_type ast.Type, expected_type ast.Type) bool {
+	if got_type.is_ptr() || expected_type.is_ptr() || got_type.has_option_or_result()
+		|| expected_type.has_option_or_result() {
+		return false
+	}
+	got := g.table.unaliased_type(g.unwrap_generic(got_type))
+	expected := g.table.unaliased_type(g.unwrap_generic(expected_type))
+	if got == expected {
+		return false
+	}
+	if g.table.final_sym(got).kind != .array || g.table.final_sym(expected).kind != .array {
+		return false
+	}
+	return g.can_convert_array_elem_to_interface_array(got, expected)
+}
+
+fn (mut g Gen) can_convert_array_elem_to_interface_array(got ast.Type, expected ast.Type) bool {
+	got_type := g.table.unaliased_type(g.unwrap_generic(got))
+	expected_type := g.table.unaliased_type(g.unwrap_generic(expected))
+	got_sym := g.table.final_sym(got_type)
+	expected_sym := g.table.final_sym(expected_type)
+	if got_sym.kind == .array && expected_sym.kind == .array {
+		return g.can_convert_array_elem_to_interface_array(got_sym.array_info().elem_type,
+			expected_sym.array_info().elem_type)
+	}
+	return !expected_type.is_ptr() && expected_sym.kind == .interface
+		&& g.table.does_type_implement_interface(got_type, expected_type)
+}
+
+fn (mut g Gen) register_array_interface_cast_fn(got_type ast.Type, expected_type ast.Type) string {
+	got := g.table.unaliased_type(g.unwrap_generic(got_type))
+	expected := g.table.unaliased_type(g.unwrap_generic(expected_type))
+	fn_name := '__v_array_to_interface_array__${g.styp(got)}__to__${g.styp(expected)}'
+	mut already_generated := false
+	lock g.generated_array_interface_cast_fns {
+		already_generated = fn_name in g.generated_array_interface_cast_fns
+		if !already_generated {
+			g.generated_array_interface_cast_fns[fn_name] = true
+		}
+	}
+	if already_generated {
+		return fn_name
+	}
+	got_info := g.table.final_sym(got).array_info()
+	expected_info := g.table.final_sym(expected).array_info()
+	expected_styp := g.styp(expected)
+	expected_elem_styp := g.styp(expected_info.elem_type)
+	noscan := g.check_noscan(expected_info.elem_type)
+	g.definitions.writeln('${g.static_non_parallel}${expected_styp} ${fn_name}(${g.styp(got)} a);')
+	mut fn_builder := strings.new_builder(512)
+	fn_builder.writeln('${g.static_non_parallel}inline ${expected_styp} ${fn_name}(${g.styp(got)} a) {')
+	fn_builder.writeln('\t${expected_styp} res = builtin____new_array_with_default${noscan}(a.len, a.cap, sizeof(${expected_elem_styp}), 0);')
+	fn_builder.writeln('\tfor (${ast.int_type_name} i = 0; i < a.len; ++i) {')
+	src_elem_expr := '((${g.styp(got_info.elem_type)}*)a.data)[i]'
+	converted_expr := g.array_interface_cast_expr(src_elem_expr, got_info.elem_type,
+		expected_info.elem_type)
+	fn_builder.writeln('\t\t((${expected_elem_styp}*)res.data)[i] = ${converted_expr};')
+	fn_builder.writeln('\t}')
+	fn_builder.writeln('\treturn res;')
+	fn_builder.writeln('}')
+	g.auto_fn_definitions << fn_builder.str()
+	return fn_name
+}
+
+fn (mut g Gen) array_interface_cast_expr(src_elem_expr string, got_type ast.Type, expected_type ast.Type) string {
+	got := g.table.unaliased_type(g.unwrap_generic(got_type))
+	expected := g.table.unaliased_type(g.unwrap_generic(expected_type))
+	if got == expected {
+		return src_elem_expr
+	}
+	got_sym := g.table.final_sym(got)
+	expected_sym := g.table.final_sym(expected)
+	if got_sym.kind == .array && expected_sym.kind == .array {
+		inner_fn := g.register_array_interface_cast_fn(got, expected)
+		return '${inner_fn}(${src_elem_expr})'
+	}
+	if expected_sym.kind == .interface && !expected.is_ptr() {
+		got_styp := g.cc_type(got, true)
+		mut cast_fn := 'I_${got_styp}_to_Interface_${expected_sym.cname}'
+		if expected_sym.info is ast.Interface && expected_sym.info.is_generic {
+			cast_fn = g.generic_fn_name(expected_sym.info.concrete_types, cast_fn)
+		}
+		lock g.referenced_fns {
+			g.referenced_fns[cast_fn] = true
+		}
+		if got.is_ptr() {
+			return '${cast_fn}(${src_elem_expr})'
+		}
+		return '${cast_fn}(HEAP(${got_styp}, ${src_elem_expr}))'
+	}
+	return src_elem_expr
 }
 
 fn (mut g Gen) fixed_array_init(node ast.ArrayInit, array_type Type, var_name string, is_amp bool) {
@@ -667,9 +761,11 @@ fn (mut g Gen) gen_array_map(node ast.CallExpr) {
 	}
 	ret_styp := g.styp(return_type)
 	ret_sym := g.table.final_sym(return_type)
-	resolved_left_type := g.resolved_array_receiver_type(node)
-	inp_sym := g.table.final_sym(resolved_left_type)
-	left_is_array := inp_sym.kind == .array
+
+	left_type := g.resolved_array_receiver_type(node)
+	left_sym := g.table.final_sym(left_type)
+	left_is_array := left_sym.kind == .array
+	inp_sym := left_sym
 
 	ret_elem_type := if left_is_array {
 		(ret_sym.info as ast.Array).elem_type
@@ -702,8 +798,7 @@ fn (mut g Gen) gen_array_map(node ast.CallExpr) {
 		}
 	}
 	noscan := g.check_noscan(ret_elem_type)
-	has_infix_left_var_name := g.write_prepared_tmp_value(past.tmp_var, node, ret_styp,
-		'{0}')
+	has_infix_left_var_name := g.write_prepared_tmp_value(past.tmp_var, node, ret_styp, '{0}')
 	if left_is_array {
 		g.writeln('${past.tmp_var} = builtin____new_array${noscan}(0, ${past.tmp_var}_len, sizeof(${ret_elem_styp}));\n')
 	}
@@ -828,7 +923,8 @@ fn (mut g Gen) gen_array_map(node ast.CallExpr) {
 		}
 	}
 	if left_is_array {
-		g.writeln2(';', 'builtin__array_push${noscan}((array*)&${past.tmp_var}, &${tmp_map_expr_result_name});')
+		g.writeln2(';',
+			'builtin__array_push${noscan}((array*)&${past.tmp_var}, &${tmp_map_expr_result_name});')
 	} else {
 		g.writeln2(';', '${past.tmp_var}[${i}] = ${tmp_map_expr_result_name};')
 	}
@@ -1048,7 +1144,10 @@ fn (mut g Gen) gen_array_sort(node ast.CallExpr) {
 	}
 
 	stype_arg := g.styp(elem_type)
-	g.sort_fn_definitions.writeln('VV_LOC ${g.static_modifier} int ${compare_fn}(${stype_arg}* a, ${stype_arg}* b) {')
+	// In -parallel-cc these bodies are seen by every split C translation unit via `out.h`,
+	// so they need internal linkage to avoid duplicate symbols at link time.
+	sort_fn_visibility := if g.static_modifier != '' { g.static_modifier } else { 'VV_LOC ' }
+	g.sort_fn_definitions.writeln('${sort_fn_visibility}int ${compare_fn}(${stype_arg}* a, ${stype_arg}* b) {')
 	c_condition := if comparison_type.sym.has_method('<') {
 		method_name := if comparison_type.sym.is_builtin() {
 			'builtin__${g.styp(comparison_type.typ)}__lt'
@@ -1827,8 +1926,7 @@ fn (mut g Gen) gen_array_any(node ast.CallExpr) {
 		(sym.info as ast.ArrayFixed).elem_type
 	}
 	elem_type_str := g.styp(elem_type)
-	has_infix_left_var_name := g.write_prepared_tmp_value(past.tmp_var, node, 'bool',
-		'false')
+	has_infix_left_var_name := g.write_prepared_tmp_value(past.tmp_var, node, 'bool', 'false')
 
 	mut expr := node.args[0].expr
 	var_name := g.get_array_expr_param_name(mut expr)
@@ -1845,8 +1943,7 @@ fn (mut g Gen) gen_array_any(node ast.CallExpr) {
 	g.writeln('for (${ast.int_type_name} ${i} = 0; ${i} < ${past.tmp_var}_len; ++${i}) {')
 	g.indent++
 
-	g.write_prepared_var(var_name, elem_type, elem_type_str, past.tmp_var, i, left_is_array,
-		false)
+	g.write_prepared_var(var_name, elem_type, elem_type_str, past.tmp_var, i, left_is_array, false)
 	g.set_current_pos_as_last_stmt_pos()
 	mut is_embed_map_filter := false
 	match mut expr {
@@ -1921,8 +2018,8 @@ fn (mut g Gen) gen_array_count(node ast.CallExpr) {
 		(sym.info as ast.ArrayFixed).elem_type
 	}
 	elem_type_str := g.styp(elem_type)
-	has_infix_left_var_name := g.write_prepared_tmp_value(past.tmp_var, node, ast.int_type_name,
-		'0')
+	has_infix_left_var_name :=
+		g.write_prepared_tmp_value(past.tmp_var, node, ast.int_type_name, '0')
 
 	mut expr := node.args[0].expr
 	var_name := g.get_array_expr_param_name(mut expr)
@@ -1939,8 +2036,7 @@ fn (mut g Gen) gen_array_count(node ast.CallExpr) {
 	g.writeln('for (${ast.int_type_name} ${i} = 0; ${i} < ${past.tmp_var}_len; ++${i}) {')
 	g.indent++
 
-	g.write_prepared_var(var_name, elem_type, elem_type_str, past.tmp_var, i, left_is_array,
-		false)
+	g.write_prepared_var(var_name, elem_type, elem_type_str, past.tmp_var, i, left_is_array, false)
 	g.set_current_pos_as_last_stmt_pos()
 	mut is_embed_map_filter := false
 	match mut expr {
@@ -2016,8 +2112,7 @@ fn (mut g Gen) gen_array_all(node ast.CallExpr) {
 	}
 	elem_type_str := g.styp(elem_type)
 
-	has_infix_left_var_name := g.write_prepared_tmp_value(past.tmp_var, node, 'bool',
-		'true')
+	has_infix_left_var_name := g.write_prepared_tmp_value(past.tmp_var, node, 'bool', 'true')
 	i := g.new_tmp_var()
 
 	mut expr := node.args[0].expr
@@ -2034,8 +2129,7 @@ fn (mut g Gen) gen_array_all(node ast.CallExpr) {
 
 	g.writeln('for (${ast.int_type_name} ${i} = 0; ${i} < ${past.tmp_var}_len; ++${i}) {')
 	g.indent++
-	g.write_prepared_var(var_name, elem_type, elem_type_str, past.tmp_var, i, left_is_array,
-		false)
+	g.write_prepared_var(var_name, elem_type, elem_type_str, past.tmp_var, i, left_is_array, false)
 	g.empty_line = true
 	g.set_current_pos_as_last_stmt_pos()
 	mut is_embed_map_filter := false
@@ -2094,6 +2188,10 @@ fn (mut g Gen) gen_array_all(node ast.CallExpr) {
 		g.writeln('}')
 		g.set_current_pos_as_last_stmt_pos()
 	}
+}
+
+fn (mut g Gen) resolve_array_call_left_type(node &ast.CallExpr) ast.Type {
+	return g.unwrap_generic(g.type_resolver.get_type_or_default(node.left, node.left_type))
 }
 
 fn (mut g Gen) write_prepared_tmp_value(tmp string, node &ast.CallExpr, tmp_stype string, initial_value string) bool {
@@ -2252,7 +2350,8 @@ fn (mut g Gen) fixed_array_var_init(expr_str string, is_auto_deref bool, elem_ty
 	for i in 0 .. size {
 		if elem_sym.info is ast.ArrayFixed {
 			init_str := if g.inside_array_fixed_struct { '${expr_str}' } else { '${expr_str}[${i}]' }
-			g.fixed_array_var_init(init_str, is_auto_deref, elem_sym.info.elem_type, elem_sym.info.size)
+			g.fixed_array_var_init(init_str, is_auto_deref, elem_sym.info.elem_type,
+				elem_sym.info.size)
 		} else {
 			if is_auto_deref {
 				g.write('(*')

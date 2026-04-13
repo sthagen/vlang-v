@@ -83,8 +83,8 @@ fn test_orm_func_where() {
 
 	// and_or_combination
 	qb.reset()
-	qb.where('name = ? AND status = ? OR role = ? || id = ? && title = ?', 'Alice', 1,
-		'admin', 1, 'st')!
+	qb.where('name = ? AND status = ? OR role = ? || id = ? && title = ?', 'Alice', 1, 'admin', 1,
+		'st')!
 	assert qb.where.fields == ['name', 'status', 'role', 'id', 'title']
 	assert qb.where.kinds == [.eq, .eq, .eq, .eq, .eq]
 	assert qb.where.is_and == [true, false, false, true]
@@ -116,6 +116,20 @@ fn test_orm_func_where() {
 	qb.where('name in ? AND age not in ?', ['Tom'], [2])!
 	assert qb.where.fields == ['name', 'age']
 	assert qb.where.kinds == [.in, .not_in]
+
+	// variable arrays for in and not in
+	names := ['Tom']
+	ages := [2]
+	qb.reset()
+	qb.where('name IN ? AND age NOT IN ?', names, ages)!
+	assert qb.where.fields == ['name', 'age']
+	assert qb.where.kinds == [.in, .not_in]
+	assert qb.where.data[0] is []orm.Primitive
+	assert qb.where.data[1] is []orm.Primitive
+	name_params := qb.where.data[0] as []orm.Primitive
+	age_params := qb.where.data[1] as []orm.Primitive
+	assert name_params == [orm.Primitive('Tom')]
+	assert age_params == [orm.Primitive(2)]
 }
 
 fn test_orm_func_stmts() {

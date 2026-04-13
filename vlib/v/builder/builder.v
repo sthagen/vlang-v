@@ -105,7 +105,13 @@ pub fn new_builder(pref_ &pref.Preferences) Builder {
 pub fn (mut b Builder) interpret_text(code string, v_files []string) ! {
 	b.parsed_files = parser.parse_files(v_files, mut b.table, b.pref)
 	b.parsed_files << parser.parse_text(code, '', mut b.table, .skip_comments, b.pref)
+	if b.should_stop_after_frontend_error() && b.has_frontend_errors() {
+		exit(1)
+	}
 	b.parse_imports()
+	if b.should_stop_after_frontend_error() && b.has_frontend_errors() {
+		exit(1)
+	}
 
 	if b.pref.only_check_syntax {
 		return error_with_code('stop_after_parser', 7001)
@@ -125,8 +131,14 @@ pub fn (mut b Builder) front_stages(v_files []string) ! {
 	util.timing_start('Builder.front_stages.parse_files')
 	b.parsed_files = parser.parse_files(v_files, mut b.table, b.pref)
 	timers.show('Builder.front_stages.parse_files')
+	if b.should_stop_after_frontend_error() && b.has_frontend_errors() {
+		exit(1)
+	}
 
 	b.parse_imports()
+	if b.should_stop_after_frontend_error() && b.has_frontend_errors() {
+		exit(1)
+	}
 
 	timers.show('SCAN')
 	timers.show('PARSE')
@@ -200,6 +212,17 @@ pub fn (mut b Builder) middle_stages() ! {
 pub fn (mut b Builder) front_and_middle_stages(v_files []string) ! {
 	b.front_stages(v_files)!
 	b.middle_stages()!
+}
+
+@[inline]
+fn (b &Builder) should_stop_after_frontend_error() bool {
+	return b.pref.fatal_errors
+		|| (b.pref.output_mode == .stdout && !b.pref.check_only && !b.pref.is_vls)
+}
+
+@[inline]
+fn (b &Builder) has_frontend_errors() bool {
+	return b.parsed_files.any(it.errors.len > 0)
 }
 
 // parse all deps from already parsed files
@@ -279,6 +302,9 @@ pub fn (mut b Builder) parse_imports() {
 				}
 			}
 			b.parsed_files << parsed_files
+			if b.should_stop_after_frontend_error() && parsed_files.any(it.errors.len > 0) {
+				return
+			}
 			done_imports << mod
 		}
 	}
@@ -431,12 +457,73 @@ pub fn module_path(mod string) string {
 	return mod.replace('.', os.path_separator)
 }
 
+fn find_module_path_from_vmod_root(vmod_root string, mod string) !string {
+	vmod_path := os.join_path(vmod_root, 'v.mod')
+	if !os.is_file(vmod_path) {
+		return error('module not found')
+	}
+	manifest := vmod.from_file(vmod_path) or { return error('module not found') }
+	tail_path := mod_tail_after_vmod_name(mod, manifest.name) or {
+		return error('module not found')
+	}
+	if tail_path == '' {
+		return error('module not found')
+	}
+	try_path := os.join_path(vmod_root, 'src', tail_path)
+	if os.is_dir(try_path) {
+		return try_path
+	}
+	return error('module not found')
+}
+
+fn find_module_path_from_search_root(search_path string, mod string) !string {
+	mod_path := module_path(mod)
+	try_path := os.join_path_single(search_path, mod_path)
+	if os.is_dir(try_path) {
+		return try_path
+	}
+	if src_try_path := find_module_path_from_vmod_root(search_path, mod) {
+		return src_try_path
+	}
+	mod_parts := mod.split('.')
+	for i := mod_parts.len - 1; i > 0; i-- {
+		candidate_root := os.join_path_single(search_path, mod_parts[..i].join(os.path_separator))
+		if !os.is_file(os.join_path(candidate_root, 'v.mod')) {
+			continue
+		}
+		submodule_path := mod_parts[i..].join(os.path_separator)
+		src_try_path := os.join_path(candidate_root, 'src', submodule_path)
+		if os.is_dir(src_try_path) {
+			return src_try_path
+		}
+	}
+	return error('module not found')
+}
+
+fn mod_tail_after_vmod_name(mod string, vmod_name string) !string {
+	if vmod_name == '' {
+		return error('module not found')
+	}
+	mod_parts := mod.split('.')
+	vmod_parts := vmod_name.split('.')
+	for i := 0; i + vmod_parts.len <= mod_parts.len; i++ {
+		if i > 1 {
+			break
+		}
+		if mod_parts[i..i + vmod_parts.len].join('.') == vmod_name {
+			return mod_parts[i + vmod_parts.len..].join(os.path_separator)
+		}
+	}
+	return error('module not found')
+}
+
 // TODO: try to merge this & util.module functions to create a
 // reliable multi use function. see comments in util/module.v
 pub fn (b &Builder) find_module_path(mod string, fpath string) !string {
 	// support @VEXEROOT/v.mod relative paths:
 	mut mcache := vmod.get_cache()
-	vmod_file_location := mcache.get_by_file(fpath)
+	resolved_fpath := os.real_path(fpath)
+	vmod_file_location := mcache.get_by_file(resolved_fpath)
 	mod_path := module_path(mod)
 	mut module_lookup_paths := []string{}
 	if vmod_file_location.vmod_file.len != 0
@@ -444,11 +531,10 @@ pub fn (b &Builder) find_module_path(mod string, fpath string) !string {
 		module_lookup_paths << vmod_file_location.vmod_folder
 	}
 	module_lookup_paths << b.module_search_paths
-	module_lookup_paths << os.getwd()
 	// go up through parents looking for modules a folder.
 	// we need a proper solution that works most of the time. look at vdoc.get_parent_mod
-	if fpath.contains(os.path_separator + 'modules' + os.path_separator) {
-		parts := fpath.split(os.path_separator)
+	if resolved_fpath.contains(os.path_separator + 'modules' + os.path_separator) {
+		parts := resolved_fpath.split(os.path_separator)
 		for i := parts.len - 2; i >= 0; i-- {
 			if parts[i] == 'modules' {
 				module_lookup_paths << parts[0..i + 1].join(os.path_separator)
@@ -461,24 +547,28 @@ pub fn (b &Builder) find_module_path(mod string, fpath string) !string {
 		if b.pref.is_verbose {
 			println('  >> trying to find ${mod} in ${try_path} ..')
 		}
-		if os.is_dir(try_path) {
+		if found_path := find_module_path_from_search_root(search_path, mod) {
 			if b.pref.is_verbose {
-				println('  << found ${try_path} .')
+				println('  << found ${found_path} .')
 			}
-			return try_path
+			return found_path
 		}
 	}
 	// look up through parents
-	path_parts := fpath.split(os.path_separator)
-	for i := path_parts.len - 2; i > 0; i-- {
-		p1 := path_parts[0..i].join(os.path_separator)
-		try_path := os.join_path(p1, mod_path)
+	mut current_dir := os.dir(resolved_fpath)
+	for {
+		try_path := os.join_path(current_dir, mod_path)
 		if b.pref.is_verbose {
 			println('  >> trying to find ${mod} in ${try_path} ..')
 		}
-		if os.is_dir(try_path) {
-			return try_path
+		if found_path := find_module_path_from_search_root(current_dir, mod) {
+			return found_path
 		}
+		parent_dir := os.dir(current_dir)
+		if parent_dir == current_dir {
+			break
+		}
+		current_dir = parent_dir
 	}
 	smodule_lookup_paths := module_lookup_paths.join(', ')
 	return error('module "${mod}" not found in:\n${smodule_lookup_paths}')
@@ -517,7 +607,8 @@ pub fn (b &Builder) show_total_warns_and_errors_stats() {
 			// the intended command may have been `v .` instead, so just suggest that:
 			old_cmd := util.bold('v ${b.pref.path}')
 			new_cmd := util.bold('v ${os.dir(b.pref.path)}')
-			eprintln(util.color('notice', 'If the code of your project is in a folder with multiple .v files, try `${new_cmd}` instead of `${old_cmd}`'))
+			eprintln(util.color('notice',
+				'If the code of your project is in a folder with multiple .v files, try `${new_cmd}` instead of `${old_cmd}`'))
 		}
 	}
 }
@@ -654,8 +745,8 @@ pub fn (mut b Builder) print_warnings_and_errors() {
 				for stmt in file.stmts {
 					if stmt is ast.FnDecl {
 						if stmt.name == fn_name {
-							fheader := b.table.stringify_fn_decl(&stmt, 'main', map[string]string{},
-								false)
+							fheader := b.table.stringify_fn_decl(&stmt, 'main',
+								map[string]string{}, false)
 							redefines << FunctionRedefinition{
 								fpath:   file.path
 								fline:   stmt.pos.line_nr

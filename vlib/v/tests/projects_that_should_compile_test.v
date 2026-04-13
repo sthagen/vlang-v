@@ -14,6 +14,38 @@ fn vroot_path(relpath string) string {
 	return os.real_path(os.join_path(@VMODROOT, relpath))
 }
 
+fn vrun_ok_in_dir(workdir string, options string, path string) string {
+	old_wd := os.getwd()
+	os.chdir(workdir) or { panic(err) }
+	defer {
+		os.chdir(old_wd) or { panic(err) }
+	}
+	return vrun_ok(options, path)
+}
+
+fn write_file(path string, content string) {
+	os.write_file(path, content) or { panic(err) }
+}
+
+fn setup_module_resolution_workdir_fixture() string {
+	workspace := os.join_path(os.vtmp_dir(),
+		'v_module_resolution_independent_of_workdir_${os.getpid()}')
+	interp := r'${'
+	os.rmdir_all(workspace) or {}
+	os.mkdir_all(os.join_path(workspace, 'app', 'src')) or { panic(err) }
+	os.mkdir_all(os.join_path(workspace, 'lib', 'src')) or { panic(err) }
+	write_file(os.join_path(workspace, '.v.mod.stop'), '')
+	write_file(os.join_path(workspace, 'app', 'v.mod'),
+		"Module {\n\tname: 'app'\n\tdescription: ''\n\tversion: ''\n\tlicense: ''\n\tdependencies: []\n}\n")
+	write_file(os.join_path(workspace, 'app', 'src', 'main.v'),
+		"module main\n\nimport lib\n\nfn main() {\n\tprintln('Hello ${interp}lib.square(4)}!')\n}\n")
+	write_file(os.join_path(workspace, 'lib', 'v.mod'),
+		"Module {\n\tname: 'lib'\n\tdescription: ''\n\tversion: ''\n\tlicense: ''\n\tdependencies: []\n}\n")
+	write_file(os.join_path(workspace, 'lib', 'src', 'lib.v'),
+		'module lib\n\npub fn square(x int) int {\n\treturn x * x\n}\n')
+	return workspace
+}
+
 fn vrun_ok(options string, path string) string {
 	cmd := '${os.quoted_path(@VEXE)} ${options} ${os.quoted_path(path)}'
 	res := os.execute(cmd)
@@ -47,8 +79,10 @@ fn test_running_subdir_project_with_parent_vmod_works() {
 	}
 	os.mkdir_all(os.join_path(root, 'hexagonal', 'application'))!
 	os.write_file(os.join_path(root, 'v.mod'), 'Module {\nname: "vanilla3"\n}')!
-	os.write_file(os.join_path(root, 'hexagonal', 'application', 'auth_usecase.v'), 'module application\n\npub struct AuthUseCase {}\n')!
-	os.write_file(os.join_path(root, 'hexagonal', 'main.v'), "module main\n\nimport application\n\nfn main() {\n\t_ := application.AuthUseCase{}\n\tprintln('built')\n}\n")!
+	os.write_file(os.join_path(root, 'hexagonal', 'application', 'auth_usecase.v'),
+		'module application\n\npub struct AuthUseCase {}\n')!
+	os.write_file(os.join_path(root, 'hexagonal', 'main.v'),
+		"module main\n\nimport application\n\nfn main() {\n\t_ := application.AuthUseCase{}\n\tprintln('built')\n}\n")!
 	old_dir := os.getwd()
 	defer {
 		os.chdir(old_dir) or {}
@@ -57,4 +91,36 @@ fn test_running_subdir_project_with_parent_vmod_works() {
 	res := os.execute('${os.quoted_path(@VEXE)} run hexagonal')
 	assert res.exit_code == 0, res.output
 	assert res.output.trim_space() == 'built'
+}
+
+fn test_module_resolution_is_independent_of_working_directory() {
+	workspace := setup_module_resolution_workdir_fixture()
+	defer {
+		os.rmdir_all(workspace) or {}
+	}
+	res_root := vrun_ok_in_dir(workspace, 'run', 'app')
+	assert res_root.trim_space() == 'Hello 16!'
+
+	res_app := vrun_ok_in_dir(os.join_path(workspace, 'app'), 'run', '.')
+	assert res_app.trim_space() == 'Hello 16!'
+}
+
+fn test_custom_print_should_compile_with_no_builtin() {
+	source_path := os.join_path(os.vtmp_dir(), 'custom_print_no_builtin_${os.getpid()}.v')
+	output_path := os.join_path(os.vtmp_dir(), 'custom_print_no_builtin_${os.getpid()}.c')
+	source := [
+		'@[markused]',
+		'pub fn error() {',
+		"\tprint(c'\\n')",
+		'}',
+		'',
+		'pub fn print(fmt voidptr, ...) {}',
+	].join_lines()
+	os.write_file(source_path, source)!
+	defer {
+		os.rm(source_path) or {}
+		os.rm(output_path) or {}
+	}
+	_ = vrun_ok('-o ${os.quoted_path(output_path)} -no-builtin', source_path)
+	assert os.exists(output_path)
 }

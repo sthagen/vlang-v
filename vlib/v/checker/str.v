@@ -49,8 +49,7 @@ fn (mut c Checker) check_string_inter_lit_format_expr(mut expr ast.Expr, what st
 	c.expected_type = ast.int_type
 	mut typ := c.expr(mut expr)
 	c.expected_type = expected_type
-	typ = c.type_resolver.get_type_or_default(expr, c.check_expr_option_or_result_call(expr,
-		typ))
+	typ = c.type_resolver.get_type_or_default(expr, c.check_expr_option_or_result_call(expr, typ))
 	typ = c.table.unalias_num_type(typ)
 	if typ != ast.int_type && !typ.is_int_literal() {
 		c.error('${what} expression should return `int`', expr.pos())
@@ -65,8 +64,8 @@ fn (mut c Checker) string_inter_lit(mut node ast.StringInterLiteral) ast.Type {
 		c.expected_type = ast.string_type
 		mut ftyp := c.expr(mut expr)
 		c.expected_type = expected_type
-		ftyp = c.type_resolver.get_type_or_default(expr, c.check_expr_option_or_result_call(expr,
-			ftyp))
+		ftyp = c.type_resolver.get_type_or_default(expr,
+			c.check_expr_option_or_result_call(expr, ftyp))
 		if ftyp == ast.void_type || ftyp == 0 {
 			c.error('expression does not return a value', expr.pos())
 		} else if ftyp == ast.char_type && ftyp.nr_muls() == 0 {

@@ -347,7 +347,8 @@ pub fn (mut f Fmt) import_stmt(imp ast.Import) {
 		f.global_processed_imports << imp_stmt
 	}
 	if !f.format_state.is_vfmt_on {
-		original_imp_line := f.get_source_lines()#[imp.pos.line_nr..imp.pos.last_line + 1].join('\n')
+		original_imp_line :=
+			f.get_source_lines()#[imp.pos.line_nr..imp.pos.last_line + 1].join('\n')
 		// Same line comments(`imp.comments`) are included in the `original_imp_line`.
 		f.writeln(original_imp_line)
 		f.import_comments(imp.next_comments)
@@ -843,6 +844,15 @@ fn expr_is_single_line(expr ast.Expr) bool {
 	return true
 }
 
+fn (mut f Fmt) write_expr_list(exprs []ast.Expr) {
+	for i, expr in exprs {
+		f.expr(expr)
+		if i < exprs.len - 1 {
+			f.write(', ')
+		}
+	}
+}
+
 //=== Specific Stmt methods ===//
 
 pub fn (mut f Fmt) assert_stmt(node ast.AssertStmt) {
@@ -866,10 +876,23 @@ pub fn (mut f Fmt) assign_stmt(node ast.AssignStmt) {
 	}
 	f.is_assign = true
 	f.write(' ${node.op.str()} ')
-	for i, val in node.right {
-		f.expr(val)
-		if i < node.right.len - 1 {
-			f.write(', ')
+	right_start_pos := f.out.len
+	right_start_len := f.line_len
+	can_wrap_rhs := node.right.len == 1 && node.right[0] in [ast.CallExpr, ast.StructInit]
+	f.write_expr_list(node.right)
+	if can_wrap_rhs && !f.single_line_if && f.line_len > max_len {
+		right_str := f.out.after(right_start_pos)
+		if !right_str.contains('\n') {
+			f.out.go_back_to(right_start_pos)
+			f.line_len = right_start_len
+			if f.out.last() == ` ` {
+				f.out.go_back(1)
+				f.line_len--
+			}
+			f.writeln('')
+			f.indent++
+			f.write_expr_list(node.right)
+			f.indent--
 		}
 	}
 	if node.attr.name != '' {
@@ -1050,7 +1073,8 @@ pub fn (mut f Fmt) enum_decl(node ast.EnumDecl) {
 		attrs_len := inline_attrs_len(field.attrs)
 		if field.attrs.len > 0 {
 			if field.has_expr {
-				attr_align.add_info(field.expr.str().len + 2, field.pos.line_nr, field.has_break_line)
+				attr_align.add_info(field.expr.str().len + 2, field.pos.line_nr,
+					field.has_break_line)
 			} else {
 				attr_align.add_info(field.name.len, field.pos.line_nr, field.has_break_line)
 			}
@@ -1059,7 +1083,8 @@ pub fn (mut f Fmt) enum_decl(node ast.EnumDecl) {
 			if field.attrs.len > 0 {
 				comment_align.add_info(attrs_len, field.pos.line_nr, field.has_break_line)
 			} else if field.has_expr {
-				comment_align.add_info(field.expr.str().len + 2, field.pos.line_nr, field.has_break_line)
+				comment_align.add_info(field.expr.str().len + 2, field.pos.line_nr,
+					field.has_break_line)
 			} else {
 				comment_align.add_info(field.name.len, field.pos.line_nr, field.has_break_line)
 			}
@@ -1093,7 +1118,8 @@ pub fn (mut f Fmt) enum_decl(node ast.EnumDecl) {
 			if field.attrs.len > 0 {
 				f.write(' '.repeat(comment_align.max_len(field.pos.line_nr) - attrs_len + 1))
 			} else if field.has_expr {
-				f.write(' '.repeat(comment_align.max_len(field.pos.line_nr) - field.expr.str().len - 1))
+				f.write(' '.repeat(comment_align.max_len(field.pos.line_nr) - field.expr.str().len -
+					1))
 			} else {
 				f.write(' '.repeat(comment_align.max_len(field.pos.line_nr) - field.name.len + 1))
 			}
@@ -1195,7 +1221,8 @@ pub fn (mut f Fmt) for_c_stmt(node ast.ForCStmt) {
 	}
 	init_comments := node.comments.filter(it.pos.pos < node.init.pos.pos)
 	cond_comments := node.comments[init_comments.len..].filter(it.pos.pos < node.cond.pos().pos)
-	inc_comments := node.comments[(init_comments.len + cond_comments.len)..].filter(it.pos.pos < node.inc.pos.pos)
+	inc_comments :=
+		node.comments[(init_comments.len + cond_comments.len)..].filter(it.pos.pos < node.inc.pos.pos)
 	after_inc_comments := node.comments[(init_comments.len + cond_comments.len + inc_comments.len)..]
 	f.write('for ')
 	if node.has_init {
@@ -1416,7 +1443,8 @@ pub fn (mut f Fmt) interface_decl(node ast.InterfaceDecl) {
 		end_comments := method.comments.filter(it.pos.pos > method.pos.pos)
 		if end_comments.len > 0 {
 			f.table.new_int_fmt_fix = f.table.new_int && (f.is_translated_module || f.is_c_function)
-			method_str := f.table.stringify_fn_decl(&method, f.cur_mod, f.mod2alias, false).all_after_first('fn ')
+			method_str :=
+				f.table.stringify_fn_decl(&method, f.cur_mod, f.mod2alias, false).all_after_first('fn ')
 			f.table.new_int_fmt_fix = false
 			method_comment_align.add_info(method_str.len, method.pos.line_nr, method.has_break_line)
 		}
@@ -1484,7 +1512,8 @@ pub fn (mut f Fmt) calculate_alignment(fields []ast.StructField, mut type_align 
 						if prev_state != AlignState.has_attributes {
 							comment_align.add_new_info(attrs_len, comment.pos.line_nr)
 						} else {
-							comment_align.add_info(attrs_len, comment.pos.line_nr, field.has_break_line)
+							comment_align.add_info(attrs_len, comment.pos.line_nr,
+								field.has_break_line)
 						}
 						prev_state = AlignState.has_attributes
 					} else if field.has_default_expr {
@@ -1492,15 +1521,16 @@ pub fn (mut f Fmt) calculate_alignment(fields []ast.StructField, mut type_align 
 							comment_align.add_new_info(field.default_expr.str().len + 2,
 								comment.pos.line_nr)
 						} else {
-							comment_align.add_info(field.default_expr.str().len + 2, comment.pos.line_nr,
-								field.has_break_line)
+							comment_align.add_info(field.default_expr.str().len + 2,
+								comment.pos.line_nr, field.has_break_line)
 						}
 						prev_state = AlignState.has_default_expression
 					} else {
 						if prev_state != AlignState.has_everything {
 							comment_align.add_new_info(ft.len, comment.pos.line_nr)
 						} else {
-							comment_align.add_info(ft.len, comment.pos.line_nr, field.has_break_line)
+							comment_align.add_info(ft.len, comment.pos.line_nr,
+								field.has_break_line)
 						}
 						prev_state = AlignState.has_everything
 					}
@@ -1559,7 +1589,8 @@ pub fn (mut f Fmt) interface_method(method ast.FnDecl, mut comment_align FieldAl
 	}
 	f.write('\t')
 	f.table.new_int_fmt_fix = f.table.new_int && (f.is_translated_module || f.is_c_function)
-	method_str := f.table.stringify_fn_decl(&method, f.cur_mod, f.mod2alias, false).all_after_first('fn ')
+	method_str :=
+		f.table.stringify_fn_decl(&method, f.cur_mod, f.mod2alias, false).all_after_first('fn ')
 	f.table.new_int_fmt_fix = false
 	f.write(method_str)
 	if end_comments.len > 0 {
@@ -2157,8 +2188,14 @@ pub fn (mut f Fmt) call_args(args []ast.CallArg) {
 		if arg.is_mut {
 			f.write(arg.share.str() + ' ')
 		}
-		if i > 0 && !f.single_line_if && !f.use_short_fn_args {
-			f.wrap_long_line(3, true)
+		if i > 0 && !f.single_line_if && !f.use_short_fn_args && arg.expr !is ast.StructInit {
+			arg_str := f.node_str(arg.expr)
+			tail_len := if i < args.len - 1 { 2 } else { 1 }
+			is_tiny_last_assign_arg := f.is_assign && i == args.len - 1 && arg_str.len <= 4
+			if !is_tiny_last_assign_arg && !arg_str.contains('\n')
+				&& f.line_len + arg_str.len + tail_len > max_len {
+				f.wrap_long_line(0, true)
+			}
 		}
 		f.expr(arg.expr)
 		if post_comments.len > 0 {
@@ -2426,7 +2463,8 @@ pub fn (mut f Fmt) if_expr(node ast.IfExpr) {
 			if i < node.branches.len - 1 || !node.has_else {
 				f.write('${dollar}if ')
 				cur_pos := f.out.len
-				pre_comments := branch.comments[sum_len..].filter(it.pos.pos < branch.cond.pos().pos)
+				pre_comments :=
+					branch.comments[sum_len..].filter(it.pos.pos < branch.cond.pos().pos)
 				sum_len += pre_comments.len
 				post_comments := branch.comments[sum_len..]
 				if pre_comments.len > 0 {
@@ -2524,7 +2562,9 @@ pub fn (mut f Fmt) index_expr(node ast.IndexExpr) {
 
 pub fn (mut f Fmt) infix_expr(node ast.InfixExpr) {
 	buffering_save := f.buffering
-	if !f.buffering && node.op in [.logical_or, .and, .plus] {
+	is_wrappable_additive_minus := node.op == .minus
+		&& (is_additive_infix(node.left) || is_additive_infix(node.right))
+	if !f.buffering && (node.op in [.logical_or, .and, .plus] || is_wrappable_additive_minus) {
 		f.buffering = true
 	}
 	is_assign_save := f.is_assign
@@ -2597,7 +2637,7 @@ pub fn (mut f Fmt) infix_expr(node ast.InfixExpr) {
 pub fn (mut f Fmt) wrap_infix(start_pos int, start_len int, is_cond bool) {
 	cut_span := f.out.len - start_pos
 	infix_str := f.out.cut_last(cut_span)
-	if !infix_str.contains_any_substr(['&&', '||', '+']) {
+	if !infix_str.contains_any_substr(['&&', '||', '+', '-']) {
 		f.write(infix_str)
 		return
 	}
@@ -2607,6 +2647,13 @@ pub fn (mut f Fmt) wrap_infix(start_pos int, start_len int, is_cond bool) {
 	}
 	conditions, penalties := split_up_infix(infix_str, false, is_cond)
 	f.write_splitted_infix(conditions, penalties, false, is_cond)
+}
+
+fn is_additive_infix(expr ast.Expr) bool {
+	return match expr {
+		ast.InfixExpr { expr.op in [.plus, .minus] }
+		else { false }
+	}
 }
 
 fn split_up_infix(infix_str string, ignore_paren bool, is_cond_infix bool) ([]string, []int) {
@@ -2626,11 +2673,15 @@ fn split_up_infix(infix_str string, ignore_paren bool, is_cond_infix bool) ([]st
 				conditions << '${p} '
 				ind++
 			}
-		} else if !is_cond_infix && p == '+' {
-			penalties << 5
-			conditions[ind] += '${p} '
-			conditions << ''
-			ind++
+		} else if !is_cond_infix && p in ['+', '-'] {
+			if inside_paren {
+				conditions[ind] += '${p} '
+			} else {
+				penalties << 5
+				conditions[ind] += '${p} '
+				conditions << ''
+				ind++
+			}
 		} else {
 			conditions[ind] += '${p} '
 			if ignore_paren {
@@ -3252,8 +3303,7 @@ pub fn (mut f Fmt) type_expr(node ast.TypeNode) {
 	if node.stmt == ast.empty_stmt {
 		f.write(f.type_to_str_using_aliases(node.typ, f.mod2alias))
 	} else {
-		f.struct_decl(ast.StructDecl{ fields: (node.stmt as ast.StructDecl).fields },
-			true)
+		f.struct_decl(ast.StructDecl{ fields: (node.stmt as ast.StructDecl).fields }, true)
 	}
 }
 

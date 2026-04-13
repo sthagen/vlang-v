@@ -70,17 +70,70 @@ fn (mut p Preferences) setup_os_and_arch_when_not_explicitly_set() {
 			if host_os == .macos && p.os == .linux {
 				// Cross compilation from macos -> linux; assume AMD64 as the target architecture for now
 				if p.arch == ._auto {
-					p.arch = .amd64
-					p.build_options << '-arch amd64'
+					p.set_default_arch(.amd64)
 				}
 				p.parse_define('use_bundled_libgc')
 			}
 		}
 	}
-	if p.arch == ._auto {
-		p.arch = get_host_arch()
-		p.build_options << '-arch ${p.arch}'
+}
+
+fn (mut p Preferences) set_default_arch(arch Arch) {
+	if p.arch != ._auto || arch == ._auto {
+		return
 	}
+	p.arch = arch
+	p.build_options << '-arch ${arch}'
+}
+
+fn arch_from_ccompiler_name(ccompiler string) Arch {
+	name := os.file_name(ccompiler).to_lower_ascii()
+	if name.contains('x86_64') || name.contains('amd64') {
+		return .amd64
+	}
+	if name.contains('aarch64') || name.contains('arm64-v8a') || name.contains('arm64') {
+		return .arm64
+	}
+	if name.contains('armeabi-v7a') || name.contains('armv7')
+		|| name.contains('arm-linux-androideabi') || name.contains('arm32') {
+		return .arm32
+	}
+	if name.contains('riscv64') {
+		return .rv64
+	}
+	if name.contains('riscv32') {
+		return .rv32
+	}
+	if name.contains('i686') || name.contains('i386') || name.contains('x86') {
+		return .i386
+	}
+	if name.contains('s390x') {
+		return .s390x
+	}
+	if name.contains('ppc64le') {
+		return .ppc64le
+	}
+	if name.contains('loongarch64') {
+		return .loongarch64
+	}
+	if name.contains('sparc64') {
+		return .sparc64
+	}
+	if name.contains('ppc64') {
+		return .ppc64
+	}
+	return ._auto
+}
+
+fn (mut p Preferences) resolve_default_arch() {
+	if p.arch != ._auto {
+		return
+	}
+	host_os := if p.backend == .wasm { OS.wasi } else { get_host_os() }
+	if p.os != host_os {
+		p.set_default_arch(arch_from_ccompiler_name(p.ccompiler))
+	}
+	p.set_default_arch(get_host_arch())
 }
 
 pub fn (mut p Preferences) defines_map_unique_keys() string {
@@ -96,6 +149,14 @@ pub fn (mut p Preferences) defines_map_unique_keys() string {
 	return skeys.join(',')
 }
 
+fn (mut p Preferences) disable_tcc_shared_backtraces() {
+	if p.is_shared && p.ccompiler_type == .tinyc && 'no_backtrace' !in p.compile_defines_all {
+		// TCC shared libraries should not depend on TCC's backtrace runtime symbols.
+		p.parse_define('no_backtrace')
+	}
+}
+
+// fill_with_defaults initializes unset preferences and derives build options from them.
 pub fn (mut p Preferences) fill_with_defaults() {
 	p.setup_os_and_arch_when_not_explicitly_set()
 	p.expand_lookup_paths()
@@ -146,7 +207,7 @@ pub fn (mut p Preferences) fill_with_defaults() {
 		p.parse_define('cross') // TODO: remove when `$if cross {` works
 	}
 	if p.gc_mode == .unknown {
-		if p.backend != .c || p.building_v || p.is_bare || p.os == .windows {
+		if p.backend != .c || p.building_v || p.is_bare || p.os == .windows || p.is_musl {
 			p.gc_mode = .no_gc
 			p.build_options << ['-gc', 'none']
 		} else {
@@ -170,7 +231,9 @@ pub fn (mut p Preferences) fill_with_defaults() {
 		p.default_cpp_compiler()
 	}
 	p.find_cc_if_cross_compiling()
+	p.resolve_default_arch()
 	p.ccompiler_type = cc_from_string(p.ccompiler)
+	p.disable_tcc_shared_backtraces()
 	p.is_test = p.path.ends_with('_test.v') || p.path.ends_with('_test.vv')
 		|| p.path.all_before_last('.v').all_before_last('.').ends_with('_test')
 	p.is_vsh = p.path.ends_with('.vsh') || p.raw_vsh_tmp_prefix != ''
@@ -267,8 +330,9 @@ fn (mut p Preferences) find_cc_if_cross_compiling() {
 }
 
 fn (mut p Preferences) try_to_use_tcc_by_default() {
+	bundled_tcc := usable_bundled_tcc_compiler(os.dir(vexe_path()), p.is_musl)
 	if p.ccompiler == 'tcc' {
-		p.ccompiler = default_tcc_compiler()
+		p.ccompiler = if bundled_tcc != '' { bundled_tcc } else { 'tcc' }
 		return
 	}
 	if p.ccompiler == '' {
@@ -281,19 +345,37 @@ fn (mut p Preferences) try_to_use_tcc_by_default() {
 		if p.is_prod {
 			return
 		}
-		p.ccompiler = default_tcc_compiler()
+		p.ccompiler = bundled_tcc
 		return
 	}
 }
 
+fn usable_bundled_tcc_compiler(vroot string, is_musl bool) string {
+	vtccexe := os.join_path(vroot, 'thirdparty', 'tcc', 'tcc.exe')
+	if !os.exists(vtccexe) {
+		return ''
+	}
+	if is_musl {
+		tcc_probe := os.execute('${os.quoted_path(vtccexe)} -v')
+		if tcc_probe.exit_code != 0 {
+			return ''
+		}
+	}
+	return vtccexe
+}
+
+fn host_uses_musl() bool {
+	$if linux {
+		return os.execute('ldd --version').output.contains('musl')
+	}
+	return false
+}
+
+// default_tcc_compiler returns the bundled TinyCC path when it exists and works on the host.
 pub fn default_tcc_compiler() string {
 	vexe := vexe_path()
 	vroot := os.dir(vexe)
-	vtccexe := os.join_path(vroot, 'thirdparty', 'tcc', 'tcc.exe')
-	if os.exists(vtccexe) {
-		return vtccexe
-	}
-	return ''
+	return usable_bundled_tcc_compiler(vroot, host_uses_musl())
 }
 
 pub fn (mut p Preferences) default_c_compiler() {

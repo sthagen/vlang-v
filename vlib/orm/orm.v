@@ -58,6 +58,20 @@ pub type Primitive = Null
 	| u64
 	| u8
 	| InfixType
+	| []bool
+	| []f32
+	| []f64
+	| []i16
+	| []i64
+	| []i8
+	| []int
+	| []string
+	| []time.Time
+	| []u16
+	| []u32
+	| []u64
+	| []u8
+	| []InfixType
 	| []Primitive
 
 pub struct Null {}
@@ -132,6 +146,7 @@ pub mut:
 
 pub enum SQLDialect {
 	default
+	h2
 	mysql
 	pg
 	sqlite
@@ -442,6 +457,14 @@ fn trim_attr_arg(arg string) string {
 	return out
 }
 
+fn tenant_filter_array_primitive_type[T](value []T) int {
+	if value.len > 0 {
+		first := value[0]
+		return tenant_filter_primitive_type(Primitive(first))
+	}
+	return type_idx['int']
+}
+
 fn tenant_filter_primitive_type(value Primitive) int {
 	return match value {
 		bool {
@@ -495,6 +518,48 @@ fn tenant_filter_primitive_type(value Primitive) int {
 			} else {
 				type_idx['int']
 			}
+		}
+		[]bool {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]f32 {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]f64 {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]i16 {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]i64 {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]i8 {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]int {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]string {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]time.Time {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]u16 {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]u32 {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]u64 {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]u8 {
+			tenant_filter_array_primitive_type(value)
+		}
+		[]InfixType {
+			tenant_filter_array_primitive_type(value)
 		}
 	}
 }
@@ -616,7 +681,7 @@ pub fn orm_stmt_gen(sql_dialect SQLDialect, table Table, q string, kind StmtKind
 
 			are_values_empty := values.len == 0
 
-			if sql_dialect in [.sqlite, .pg] && are_values_empty {
+			if sql_dialect in [.sqlite, .pg, .h2] && are_values_empty {
 				str += 'DEFAULT VALUES'
 			} else {
 				str += '('
@@ -1051,7 +1116,7 @@ pub fn orm_table_gen(sql_dialect SQLDialect, table Table, q string, defaults boo
 	}
 	str += ';'
 
-	if sql_dialect == .pg {
+	if sql_dialect in [.pg, .h2] {
 		if table_comment != '' {
 			str += "\nCOMMENT ON TABLE \"${table.name}\" IS '${table_comment}';"
 		}
@@ -1059,7 +1124,7 @@ pub fn orm_table_gen(sql_dialect SQLDialect, table Table, q string, defaults boo
 			str += "\nCOMMENT ON COLUMN \"${table.name}\".\"${f}\" IS '${c}';"
 		}
 	}
-	if (sql_dialect == .pg || sql_dialect == .sqlite) && index_fields.len > 0 {
+	if sql_dialect in [.pg, .sqlite, .h2] && index_fields.len > 0 {
 		str += '\nCREATE INDEX "idx_${table.name}" ON "${table.name}" ("'
 		str += index_fields.join('","')
 		str += '");'

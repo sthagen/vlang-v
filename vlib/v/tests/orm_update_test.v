@@ -1,4 +1,5 @@
 import db.sqlite
+import time
 
 struct Person {
 	name   string
@@ -38,4 +39,50 @@ fn test_main() {
 	}!
 
 	assert rows.len == 2
+}
+
+@[table: 'orm_update_users']
+struct OrmUpdateUser {
+pub:
+	id         string @[primary]
+	name       string
+	updated_at time.Time @[sql_type: 'TIMESTAMP']
+}
+
+struct OrmUpdateReq {
+	updated_at ?time.Time
+}
+
+fn test_orm_update_with_option_selector_or_block() {
+	mut db := sqlite.connect(':memory:')!
+	defer {
+		db.close() or { panic(err) }
+	}
+
+	sql db {
+		create table OrmUpdateUser
+	}!
+
+	user := OrmUpdateUser{
+		id:         '100'
+		name:       'Alice'
+		updated_at: time.unix(1_700_000_000)
+	}
+	sql db {
+		insert user into OrmUpdateUser
+	}!
+
+	req := OrmUpdateReq{}
+	expected_updated_at := time.unix(1_700_000_123)
+
+	sql db {
+		update OrmUpdateUser set updated_at = req.updated_at or { expected_updated_at } where id == '100'
+	}!
+
+	rows := sql db {
+		select from OrmUpdateUser where id == '100'
+	}!
+
+	assert rows.len == 1
+	assert rows[0].updated_at.unix() == expected_updated_at.unix()
 }

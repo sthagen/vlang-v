@@ -507,9 +507,12 @@ pub fn (mut d Doc) file_asts(mut file_asts []ast.File) ! {
 		}
 		if d.with_head && i == 0 {
 			mut module_name := file_ast.mod.name
-			// if module_name != 'main' && d.parent_mod_name.len > 0 {
-			// 	module_name = d.parent_mod_name + '.' + module_name
-			// }
+			if module_name != file_ast.mod.short_name
+				&& !module_name.ends_with('.${file_ast.mod.short_name}') {
+				// qualify_module resolved by path instead of module name,
+				// use the short name from the source
+				module_name = file_ast.mod.short_name
+			}
 			d.head = DocNode{
 				name:    module_name
 				content: 'module ${module_name}'

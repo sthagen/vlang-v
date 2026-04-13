@@ -28,11 +28,8 @@ pub enum BodyType {
 	html
 }
 
-pub struct Client {
-mut:
-	conn     net.TcpConn
-	ssl_conn &ssl.SSLConn = unsafe { nil }
-	reader   ?&io.BufferedReader
+// Config stores the settings used to connect a new SMTP client.
+pub struct Config {
 pub:
 	server   string
 	port     int = 25
@@ -41,6 +38,15 @@ pub:
 	from     string
 	ssl      bool
 	starttls bool
+	timeout  time.Duration
+}
+
+pub struct Client {
+	Config
+mut:
+	conn     net.TcpConn
+	ssl_conn &ssl.SSLConn = unsafe { nil }
+	reader   ?&io.BufferedReader
 pub mut:
 	is_open   bool
 	encrypted bool
@@ -68,13 +74,13 @@ pub:
 }
 
 // new_client returns a new SMTP client and connects to it
-pub fn new_client(config Client) !&Client {
+pub fn new_client(config Config) !&Client {
 	if config.ssl && config.starttls {
 		return error('Can not use both implicit SSL and STARTTLS')
 	}
 
 	mut c := &Client{
-		...config
+		Config: config
 	}
 	c.reconnect()!
 	return c
@@ -86,7 +92,13 @@ pub fn (mut c Client) reconnect() ! {
 		return error('Already connected to server')
 	}
 
-	conn := net.dial_tcp('${c.server}:${c.port}') or { return error('Connecting to server failed') }
+	mut conn := net.dial_tcp('${c.server}:${c.port}') or {
+		return error('Connecting to server failed')
+	}
+	if c.timeout != 0 {
+		conn.set_read_timeout(c.timeout)
+		conn.set_write_timeout(c.timeout)
+	}
 	c.conn = conn
 
 	if c.ssl || c.encrypted {
@@ -238,10 +250,15 @@ fn (mut c Client) send_data() ! {
 }
 
 fn (mut c Client) send_body(cfg Mail) ! {
+	c.send_str(cfg.message_data())!
+	c.expect_reply(.action_ok)!
+}
+
+fn (cfg &Mail) message_data() string {
 	is_html := cfg.body_type == .html
 	date := cfg.date.custom_format('ddd, D MMM YYYY HH:mm ZZ')
 	nonascii_subject := cfg.subject.bytes().any(it < u8(` `) || it > u8(`~`))
-	mut sb := strings.new_builder(200)
+	mut sb := strings.new_builder(200 + cfg.body.len + cfg.attachments.len * 200)
 	sb.write_string('From: ${cfg.from}\r\n')
 	sb.write_string('To: <${cfg.to.split(';').join('>; <')}>\r\n')
 	sb.write_string('Cc: <${cfg.cc.split(';').join('>; <')}>\r\n')
@@ -255,7 +272,8 @@ fn (mut c Client) send_body(cfg Mail) ! {
 	}
 	if cfg.attachments.len > 0 {
 		sb.write_string('MIME-Version: 1.0\r\n')
-		sb.write_string('Content-Type: multipart/mixed; boundary="${cfg.boundary}"\r\n--${cfg.boundary}\r\n')
+		sb.write_string('Content-Type: multipart/mixed; boundary="${cfg.boundary}"\r\n\r\n')
+		sb.write_string('--${cfg.boundary}\r\n')
 	}
 	if is_html {
 		sb.write_string('Content-Type: text/html; charset=UTF-8\r\n')
@@ -263,31 +281,41 @@ fn (mut c Client) send_body(cfg Mail) ! {
 		sb.write_string('Content-Type: text/plain; charset=UTF-8\r\n')
 	}
 	sb.write_string('Content-Transfer-Encoding: base64\r\n\r\n')
-	sb.write_string(base64.encode_str(cfg.body))
+	sb.write_string(fold_base64(base64.encode_str(cfg.body)))
 	sb.write_string('\r\n')
 	if cfg.attachments.len > 0 {
-		sb.write_string('\r\n--${cfg.boundary}\r\n')
-		sb.write_string(cfg.attachments_to_string())
+		for attachment in cfg.attachments {
+			sb.write_string('--${cfg.boundary}\r\n')
+			sb.write_string(attachment.to_string())
+			sb.write_string('\r\n')
+		}
+		sb.write_string('--${cfg.boundary}--\r\n')
 	}
-	sb.write_string('\r\n.\r\n')
-	c.send_str(sb.str())!
-	c.expect_reply(.action_ok)!
+	sb.write_string('.\r\n')
+	return sb.str()
 }
 
-fn (a &Attachment) to_string(boundary string) string {
+fn (a &Attachment) to_string() string {
 	crlf := '\r\n'
 	cid := if a.cid != '' {
 		'Content-ID: <${a.cid}>${crlf}'
 	} else {
 		''
 	}
-	return 'Content-Type: application/octet-stream${crlf}${cid}Content-Transfer-Encoding: base64${crlf}Content-Disposition: attachment; filename="${a.filename}"${crlf}${crlf}${base64.encode(a.bytes)}${crlf}--${boundary}${crlf}'
+	return 'Content-Type: application/octet-stream${crlf}${cid}Content-Transfer-Encoding: base64${crlf}Content-Disposition: attachment; filename="${a.filename}"${crlf}${crlf}${fold_base64(base64.encode(a.bytes))}'
 }
 
-fn (m &Mail) attachments_to_string() string {
-	mut res := ''
-	for a in m.attachments {
-		res += a.to_string(m.boundary)
+fn fold_base64(encoded string) string {
+	if encoded.len <= 76 {
+		return encoded
 	}
-	return if res.len > 0 { res[..res.len - 2] } else { '' } + '\r\n'
+	mut sb := strings.new_builder(encoded.len + encoded.len / 76 * 2)
+	for start := 0; start < encoded.len; start += 76 {
+		end := if start + 76 < encoded.len { start + 76 } else { encoded.len }
+		sb.write_string(encoded[start..end])
+		if end < encoded.len {
+			sb.write_string('\r\n')
+		}
+	}
+	return sb.str()
 }

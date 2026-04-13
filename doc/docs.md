@@ -82,7 +82,7 @@ by using any of the following commands in a terminal:
 
 * `v init` → adds necessary files to the current folder to make it a V project
 * `v new abc` → creates a new project in the new folder `abc`, by default a "hello world" project.
-* `v new --web abcd` → creates a new project in the new folder `abcd`, using the vweb template.
+* `v new --web abcd` → creates a new project in the new folder `abcd`, using the veb template.
 
 ## Table of Contents
 
@@ -499,6 +499,8 @@ In development mode the compiler will warn you that you haven't used the variabl
 (you'll get an "unused variable" warning).
 In production mode (enabled by passing the `-prod` flag to v – `v -prod foo.v`)
 it will not compile at all (like in Go).
+The same warning or error also applies to private top-level functions and constants
+in the `main` module when they are never referenced.
 ```v
 fn main() {
 	a := 10
@@ -1726,7 +1728,7 @@ fn main() {
 		month: 12
 		day:   25
 	}
-	println(time.new(my_time).utc_string())
+	println(time.new(my_time).http_header_string())
 	println('Century: ${my_time.century()}')
 }
 ```
@@ -2531,7 +2533,7 @@ mut p := Point{
 	y: 20
 }
 println(p.x) // Struct fields are accessed using a dot
-// Alternative literal syntax
+// Alternative positional syntax; values follow the field declaration order.
 p = Point{10, 20}
 assert p.x == 10
 ```
@@ -2635,29 +2637,31 @@ _ = Foo{}
 
 ### Short struct literal syntax
 
+Here "short" means omitting the field names and relying on the struct field
+order, so `Point{10, 20}` is a shorter form of `Point{x: 10, y: 20}`.
+
 ```v
 struct Point {
 	x int
 	y int
 }
 
-mut p := Point{
-	x: 10
-	y: 20
-}
-p = Point{
+long_form := Point{
 	x: 30
 	y: 4
 }
-assert p.y == 4
-//
-// array: first element defines type of array
+short_form := Point{30, 4}
+assert short_form == long_form
+
+// Arrays still use `Point{...}` for each element.
+// The short part is omitting field names, not the struct type name.
 points := [Point{10, 20}, Point{20, 30}, Point{40, 50}]
 println(points) // [Point{x: 10, y: 20}, Point{x: 20, y: 30}, Point{x: 40,y: 50}]
 ```
 
-Omitting the struct name also works for returning a struct literal or passing one
-as a function argument.
+When the expected type is already known, V can also omit the struct name entirely
+when returning a struct literal or passing one as a function argument. That is a
+separate shorthand from the positional `Point{10, 20}` syntax above.
 
 ### Struct update syntax
 
@@ -4925,6 +4929,9 @@ fn main() {
 The timeout branch is optional. If it is absent `select` waits for an unlimited amount of time.
 It is also possible to proceed immediately if no channel is ready in the moment `select` is called
 by adding an `else { ... }` branch. `else` and `<timeout>` are mutually exclusive.
+In statement form, `else` also runs when every channel operation is unavailable because the
+channels are already closed. To drain buffered values from a closed channel, use a plain
+receive with `or {}` instead of `select ... else`.
 
 The `select` command can be used as an *expression* of type `bool`
 that becomes `false` if all channels are closed:
@@ -5764,21 +5771,20 @@ db.schema('users')!  // CREATE statement(s)
 db.db_size()!        // file size in bytes
 ```
 
-### Using the self contained SQLite module
+### Using the `sqlite` VPM package
+V also maintains the [`sqlite`](https://vpm.vlang.io/packages/sqlite) VPM package.
+It wraps an SQLite amalgamation, but otherwise has the same API as `db.sqlite`.
 
-V also maintains a separate `sqlite` module, that wraps an SQLite
-amalgamation, but otherwise has the same API as the `db.sqlite`
-module. Its benefit is that you do not need to install a separate
-system-level sqlite package (which can be hard on some systems
-like Windows, or systems with musl for example). Its downside is
-that it can make compilations a bit slower since it compiles
-SQLite from C in addition to your own code.
+Its benefit is that you do not need to install a separate system-level SQLite package or
+library on your system, which can be harder on Windows or musl-based systems.
+Its downside is that it can make compilation a bit slower, since it compiles SQLite from C
+in addition to your own code.
 
-To use it, do:
+To install it, run:
 ```sh
 v install sqlite
 ```
-and later, in your code, use this:
+Then, in your code, use this:
 ```v ignore
 import sqlite
 ```
@@ -6768,6 +6774,8 @@ which could be used to obtain the file contents as `string` or `[]u8`.
 
 V has a simple template language for text and html templates, and they can easily
 be embedded via `$tmpl('path/to/template.txt')`:
+the path can also come from a compile-time string expression like concatenation,
+`os.path_separator`, or `os.join_path(...)`.
 
 ```v ignore
 fn build() string {

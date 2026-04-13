@@ -186,6 +186,14 @@ pub fn (mut s Scope) update_smartcasts(name string, typ Type, is_unwrapped bool)
 	}
 }
 
+pub fn (mut s Scope) reset_smartcasts(name string) {
+	mut obj := unsafe { s.objects[name] }
+	if mut obj is Var {
+		obj.smartcasts = []
+		obj.is_unwrapped = false
+	}
+}
+
 // selector_expr:  name.field_name
 pub fn (mut s Scope) register_struct_field(name string, field ScopeStructField) {
 	k := '${name}.${field.name}'
@@ -322,5 +330,5 @@ pub fn (mut sc Scope) mark_var_as_used(varname string) bool {
 }
 
 pub fn (sc &Scope) str() string {
-	return sc.show(0, 0)
+	return sc.show(0, 3)
 }
