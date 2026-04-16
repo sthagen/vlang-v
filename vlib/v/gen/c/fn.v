@@ -1245,7 +1245,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 
 fn (mut g Gen) c_fn_name(node &ast.FnDecl) string {
 	mut name := node.name
-	if name in ['+', '-', '*', '/', '%', '<', '=='] {
+	if name in ['+', '-', '*', '**', '/', '%', '<', '=='] {
 		name = util.replace_op(name)
 	}
 	if node.is_method {
@@ -1623,7 +1623,10 @@ fn (mut g Gen) fn_decl_params(params []ast.Param, scope &ast.Scope, is_variadic 
 		if param.is_mut && param.orig_typ != 0 && param.orig_typ.has_flag(.generic)
 			&& param.typ.has_flag(.generic) {
 			mut surface_typ := g.unwrap_generic(param.orig_typ)
-			typ = if surface_typ.is_ptr() && g.table.sym(surface_typ).kind == .struct {
+			// Only use ref() when the pointer comes from the generic type argument
+			// (T=&int), not from the param signature (&T / ?&T).
+			orig_was_ptr := param.orig_typ.nr_muls() > 0
+			typ = if surface_typ.is_ptr() && !orig_was_ptr {
 				surface_typ.ref()
 			} else {
 				surface_typ.set_nr_muls(1)
@@ -1802,6 +1805,28 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 			return
 		}
 	} else if !g.inside_curry_call && node.left is ast.CallExpr && node.name == '' {
+		if node.or_block.kind == .absent {
+			g.expr(ast.Expr(node.left))
+		} else {
+			ret_typ := node.return_type
+
+			line := g.go_before_last_stmt()
+			g.empty_line = true
+
+			tmp_res := g.new_tmp_var()
+			g.write('${g.styp(ret_typ)} ${tmp_res} = ')
+
+			g.last_tmp_call_var << tmp_res
+			g.expr(ast.Expr(node.left))
+
+			old_inside_curry_call := g.inside_curry_call
+			g.inside_curry_call = true
+			g.expr(node)
+			g.inside_curry_call = old_inside_curry_call
+			g.write2(line, '*(${g.base_type(ret_typ)}*)${tmp_res}.data')
+			return
+		}
+	} else if !g.inside_curry_call && node.left is ast.SelectorExpr && node.name == '' {
 		if node.or_block.kind == .absent {
 			g.expr(ast.Expr(node.left))
 		} else {
@@ -5570,7 +5595,7 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 					if resolved_arg_type != 0 {
 						expected_types[i] = resolved_arg_type
 					}
-				} else if arg.expr.obj.smartcasts.len > 0 {
+				} else if i < expected_types.len && arg.expr.obj.smartcasts.len > 0 {
 					exp_sym := g.table.sym(expected_types[i])
 					orig_sym := g.table.sym(arg.expr.obj.orig_type)
 					if !expected_types[i].has_option_or_result() && orig_sym.kind != .interface
@@ -5967,6 +5992,52 @@ fn (mut g Gen) keep_alive_call_postgen(node ast.CallExpr, tmp_cnt_save int) {
 	}
 }
 
+fn (mut g Gen) write_multi_ref_arg(arg ast.CallArg, arg_typ ast.Type, expected_type ast.Type, lang ast.Language) bool {
+	if lang != .v || g.is_json_fn || !expected_type.is_ptr() || expected_type.has_option_or_result()
+		|| expected_type.nr_muls() <= 1 || expected_type.nr_muls() <= arg_typ.nr_muls()
+		|| arg_typ.has_flag(.shared_f) || expected_type.has_flag(.shared_f) {
+		return false
+	}
+	expected_deref_type := expected_type.deref()
+	expected_deref_sym := g.table.sym(expected_deref_type)
+	arg_sym := g.table.sym(arg_typ)
+	if expected_deref_sym.kind in [.interface, .sum_type] || arg_sym.kind == .function
+		|| arg.expr is ast.None {
+		return false
+	}
+	if arg.expr is ast.Ident
+		&& (arg.expr.language == .c || g.table.is_interface_smartcast(arg.expr.obj)) {
+		return false
+	}
+	// Build the first reference level from the original storage when possible,
+	// then materialize deeper levels through compound-literal temporaries.
+	extra_refs := expected_type.nr_muls() - arg_typ.nr_muls()
+	for level := extra_refs - 1; level > 0; level-- {
+		ref_type := arg_typ.set_nr_muls(arg_typ.nr_muls() + level)
+		g.write('ADDR(${g.styp(ref_type)}, ')
+	}
+	old_arg_no_auto_deref := g.arg_no_auto_deref
+	if arg.expr.is_auto_deref_var() {
+		g.arg_no_auto_deref = true
+	}
+	defer {
+		g.arg_no_auto_deref = old_arg_no_auto_deref
+	}
+	is_auto_heap_ident := arg.expr is ast.Ident && g.resolved_ident_is_auto_heap(arg.expr)
+	if is_auto_heap_ident {
+		g.write_raw_receiver_expr(arg.expr)
+	} else if arg.expr.is_lvalue() {
+		g.write('&')
+		g.expr(arg.expr)
+	} else {
+		g.write('ADDR(${g.styp(arg_typ)}, ')
+		g.expr_with_cast(arg.expr, arg_typ, arg_typ)
+		g.write(')')
+	}
+	g.write(')'.repeat(extra_refs - 1))
+	return true
+}
+
 @[inline]
 fn (mut g Gen) ref_or_deref_arg(arg ast.CallArg, expected_type_ ast.Type, lang ast.Language, is_smartcast bool) {
 	g.ref_or_deref_arg_ex(arg, expected_type_, lang, is_smartcast, false)
@@ -6040,7 +6111,7 @@ fn (mut g Gen) ref_or_deref_arg_ex(arg ast.CallArg, expected_type_ ast.Type, lan
 	// but C compilers with -Werror=incompatible-pointer-types reject the mismatch.
 	// Only cast for V language calls with named function type aliases (not anonymous fn types).
 	if exp_sym.kind == .function && arg_sym.kind == .function && !arg.is_mut && lang == .v
-		&& !exp_sym.name.starts_with('fn ') {
+		&& !exp_sym.name.starts_with('fn ') && !expected_type.has_flag(.option) {
 		exp_styp := g.styp(expected_type)
 		arg_styp := g.styp(arg_typ)
 		if exp_styp != arg_styp {
@@ -6105,6 +6176,9 @@ fn (mut g Gen) ref_or_deref_arg_ex(arg ast.CallArg, expected_type_ ast.Type, lan
 	if arg_sym.kind == .interface && exp_sym.kind == .interface && arg_typ != expected_type
 		&& !exp_is_ptr && !arg.is_mut && !expected_type.has_flag(.option) {
 		g.expr_with_cast(arg.expr, arg_typ, expected_type)
+		return
+	}
+	if g.write_multi_ref_arg(arg, arg_typ, expected_type, lang) {
 		return
 	}
 	is_auto_heap_ident := arg.expr is ast.Ident && g.resolved_ident_is_auto_heap(arg.expr)
@@ -6348,6 +6422,8 @@ fn (mut g Gen) ref_or_deref_arg_ex(arg ast.CallArg, expected_type_ ast.Type, lan
 	}
 	if arg_typ.has_flag(.option) {
 		g.expr_with_opt(arg.expr, arg_typ, expected_type.set_flag(.option))
+	} else if expected_type.has_flag(.option) && !arg_typ.has_flag(.option) {
+		g.expr_with_opt(arg.expr, arg_typ, expected_type)
 	} else {
 		g.expr_with_cast(arg.expr, arg_typ, expected_type)
 	}
@@ -6468,13 +6544,13 @@ fn (mut g Gen) write_fn_attrs(attrs []ast.Attr) string {
 			'windows_stdcall' {
 				// windows attributes (msvc/mingw)
 				// prefixed by windows to indicate they're for advanced users only and not really supported by V.
-				fn_attrs += call_convention_attribute('stdcall', g.is_cc_msvc)
+				fn_attrs += call_convention_attribute('stdcall')
 			}
 			'_fastcall' {
-				fn_attrs += call_convention_attribute('fastcall', g.is_cc_msvc)
+				fn_attrs += call_convention_attribute('fastcall')
 			}
 			'callconv' {
-				fn_attrs += call_convention_attribute(attr.arg, g.is_cc_msvc)
+				fn_attrs += call_convention_attribute(attr.arg)
 			}
 			'console' {
 				g.force_main_console = true
@@ -6487,34 +6563,24 @@ fn (mut g Gen) write_fn_attrs(attrs []ast.Attr) string {
 	return fn_attrs
 }
 
-fn call_convention_attribute(cconvention string, is_cc_msvc bool) string {
-	return if is_cc_msvc { '__${cconvention} ' } else { '__attribute__((${cconvention})) ' }
+fn call_convention_attribute(cconvention string) string {
+	return 'VCALLCONV(${cconvention}) '
 }
 
 fn (mut g Gen) write_fntype_decl(fn_name string, info ast.FnType, nr_muls int) {
 	ret_styp := g.styp(info.func.return_type)
-	mut call_conv := ''
-	mut msvc_call_conv := ''
+	mut call_conv_attr := ''
 	for attr in info.func.attrs {
 		match attr.name {
 			'callconv' {
-				if g.is_cc_msvc {
-					msvc_call_conv = '__${attr.arg} '
-				} else {
-					call_conv = '${attr.arg}'
-				}
+				call_conv_attr = call_convention_attribute(attr.arg)
 			}
 			else {}
 		}
 	}
-	call_conv_attribute_suffix := if call_conv.len != 0 {
-		'__attribute__((${call_conv}))'
-	} else {
-		''
-	}
-	g.write('${ret_styp} (${msvc_call_conv}${'*'.repeat(nr_muls + 1)}${fn_name}) (')
+	g.write('${ret_styp} (${call_conv_attr}${'*'.repeat(nr_muls + 1)}${fn_name}) (')
 	def_pos := g.definitions.len
 	g.fn_decl_params(info.func.params, unsafe { nil }, false, false)
 	g.definitions.go_back(g.definitions.len - def_pos)
-	g.write(')${call_conv_attribute_suffix}')
+	g.write(')')
 }

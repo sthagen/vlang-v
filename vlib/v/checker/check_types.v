@@ -222,6 +222,9 @@ fn (mut c Checker) check_expected_call_arg(got_ ast.Type, expected_ ast.Type, la
 	if got_ == expected_ {
 		return
 	}
+	if c.table.fully_unaliased_type(got_) == c.table.fully_unaliased_type(expected_) {
+		return
+	}
 	mut expected := c.table.unaliased_type(expected_)
 	is_aliased := expected != expected_
 	is_exp_sumtype := c.table.type_kind(expected_) == .sum_type
@@ -277,10 +280,14 @@ fn (mut c Checker) check_expected_call_arg(got_ ast.Type, expected_ ast.Type, la
 			}
 		}
 
-		// `fn foo(mut p &Expr); mut expr := Expr{}; foo(mut expr)`
-		if arg.is_mut && expected.nr_muls() > 1 && got.nr_muls() < expected.nr_muls() {
-			got_typ_str, expected_typ_str := c.get_string_names_of(got_, expected_)
-			return error('cannot use `${got_typ_str}` as `${expected_typ_str}`')
+		// `mut` normally contributes one more reference level, but auto-deref vars
+		// (like `mut` parameters) already store that lowered pointer depth in `got`.
+		if arg.is_mut && expected.nr_muls() > 1 {
+			got_muls := if arg.expr.is_auto_deref_var() { got.nr_muls() } else { got.nr_muls() + 1 }
+			if got_muls < expected.nr_muls() {
+				got_typ_str, expected_typ_str := c.get_string_names_of(got_, expected_)
+				return error('cannot use `${got_typ_str}` as `${expected_typ_str}`')
+			}
 		}
 
 		exp_sym_idx := expected.idx()
@@ -517,6 +524,9 @@ fn (mut c Checker) check_basic(got ast.Type, expected ast.Type) bool {
 	if got == expected {
 		return true
 	}
+	if c.table.fully_unaliased_type(got) == c.table.fully_unaliased_type(expected) {
+		return true
+	}
 	unalias_got, unalias_expected := c.table.unalias_num_type(got), c.table.unalias_num_type(expected)
 	if unalias_got.idx() == unalias_expected.idx() {
 		// this is returning true even if one type is a ptr
@@ -645,6 +655,16 @@ fn (mut c Checker) check_matching_function_symbols(got_type_sym &ast.TypeSymbol,
 		return false
 	}
 	if got_fn.return_type.has_flag(.result) != exp_fn.return_type.has_flag(.result) {
+		return false
+	}
+	got_return_type := c.table.unaliased_type(got_fn.return_type)
+	exp_return_type := c.table.unaliased_type(exp_fn.return_type)
+	got_return_sym := c.table.final_sym(got_return_type)
+	exp_return_sym := c.table.final_sym(exp_return_type)
+	if got_return_type != exp_return_type && !c.type_has_unresolved_generic_parts(got_return_type)
+		&& !c.type_has_unresolved_generic_parts(exp_return_type)
+		&& (got_return_sym.kind in [.voidptr, .any] || exp_return_sym.kind in [.voidptr, .any])
+		&& (!got_return_type.is_any_kind_of_pointer() || !exp_return_type.is_any_kind_of_pointer()) {
 		return false
 	}
 	if !c.check_basic(got_fn.return_type, exp_fn.return_type) {
@@ -921,6 +941,9 @@ fn (c &Checker) promote_num(left_type ast.Type, right_type ast.Type) ast.Type {
 }
 
 fn (mut c Checker) check_expected(got ast.Type, expected ast.Type) ! {
+	if c.table.fully_unaliased_type(got) == c.table.fully_unaliased_type(expected) {
+		return
+	}
 	if !c.check_types(got, expected) {
 		return error(c.expected_msg(got, expected))
 	}

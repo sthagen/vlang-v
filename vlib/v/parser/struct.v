@@ -12,6 +12,7 @@ fn (mut p Parser) struct_decl(is_anon bool) ast.StructDecl {
 	p.top_level_statement_start()
 	// save attributes, they will be changed later in fields
 	attrs := p.attrs
+	p.attrs = []
 	start_pos := p.tok.pos()
 	mut is_pub := p.tok.kind == .key_pub
 	mut is_shared := p.tok.kind == .key_shared
@@ -118,7 +119,9 @@ fn (mut p Parser) struct_decl(is_anon bool) ast.StructDecl {
 	mut global_pos := -1
 	mut module_pos := -1
 	mut is_field_mut := language == .c
-	mut is_field_pub := language == .c
+	// Anonymous struct parameter fields are part of the function's call surface,
+	// so callers in other modules must be able to initialize them.
+	mut is_field_pub := language == .c || (is_anon && p.inside_fn_param)
 	mut is_field_global := false
 	mut is_implements := false
 	mut implements_types := []ast.TypeNode{cap: 3} // ast.void_type

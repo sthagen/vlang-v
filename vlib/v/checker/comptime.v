@@ -2,6 +2,7 @@
 // Use of this source code is governed by an MIT license that can be found in the LICENSE file.
 module checker
 
+import math
 import os
 import v.ast
 import v.pref
@@ -11,6 +12,28 @@ import v.pkgconfig
 import v.type_resolver
 import v.errors
 import strings
+
+fn comptime_power_i64(base i64, exponent i64) i64 {
+	return math.powi(base, exponent)
+}
+
+fn comptime_power_f64(base f64, exponent f64) f64 {
+	return math.pow(base, exponent)
+}
+
+fn comptime_power_value(left ast.ComptTimeConstValue, right ast.ComptTimeConstValue) ?ast.ComptTimeConstValue {
+	if left_i := left.i64() {
+		if right_i := right.i64() {
+			return comptime_power_i64(left_i, right_i)
+		}
+	}
+	if left_f := left.f64() {
+		if right_f := right.f64() {
+			return comptime_power_f64(left_f, right_f)
+		}
+	}
+	return none
+}
 
 fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 	if node.left !is ast.EmptyExpr {
@@ -293,9 +316,41 @@ fn (mut c Checker) comptime_call_msg(node ast.ComptimeCall) string {
 	}
 }
 
+fn (mut c Checker) comptime_selector_method_value(mut node ast.ComptimeSelector) ast.Type {
+	if c.comptime.comptime_for_method == unsafe { nil } {
+		c.error('compile time method access can only be used when iterating over `T.methods`',
+			node.field_expr.pos())
+		return ast.void_type
+	}
+	method := c.comptime.comptime_for_method
+	node.is_method = true
+	fn_type := c.type_resolver.get_comptime_selector_type(node, ast.void_type)
+	node.typ = c.unwrap_generic(fn_type)
+	c.mark_fn_decl_as_referenced(method.fkey())
+	c.markused_comptime_call(true, '${int(method.params[0].typ)}.${method.name}')
+	receiver := c.unwrap_generic(method.params[0].typ)
+	if receiver.nr_muls() > 0 && !c.inside_unsafe {
+		rec_sym := c.table.sym(receiver.set_nr_muls(0))
+		if !rec_sym.is_heap() {
+			suggestion := if rec_sym.kind == .struct {
+				'declaring `${rec_sym.name}` as `@[heap]`'
+			} else {
+				'wrapping the `${rec_sym.name}` object in a `struct` declared as `@[heap]`'
+			}
+			c.error('method `${c.table.type_to_str(receiver.idx_type())}.${method.name}` cannot be used as a variable outside `unsafe` blocks as its receiver might refer to an object stored on stack. Consider ${suggestion}.',
+				node.left.pos().extend(node.pos))
+		}
+	}
+	c.table.used_features.anon_fn = true
+	return fn_type
+}
+
 fn (mut c Checker) comptime_selector(mut node ast.ComptimeSelector) ast.Type {
 	node.left_type = c.expr(mut node.left)
 	mut expr_type := c.unwrap_generic(c.expr(mut node.field_expr))
+	if c.type_resolver.info.is_comptime_method_selector(node.field_expr) {
+		return c.comptime_selector_method_value(mut node)
+	}
 	expr_sym := c.table.sym(expr_type)
 	if expr_type != ast.string_type {
 		c.error('expected `string` instead of `${expr_sym.name}` (e.g. `field.name`)',
@@ -786,6 +841,9 @@ fn (mut c Checker) eval_comptime_const_expr_with_locals(expr ast.Expr, nlevel in
 			}
 			right := c.eval_comptime_const_expr_with_locals(expr.right, nlevel + 1, local_values)?
 			c.expected_type = saved_expected_type
+			if expr.op == .power {
+				return comptime_power_value(left, right)
+			}
 			if left is string && right is string {
 				match expr.op {
 					.plus {

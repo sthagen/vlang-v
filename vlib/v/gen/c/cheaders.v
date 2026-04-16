@@ -192,7 +192,7 @@ const c_common_macros = '
 		#else
 			#define VV_EXP  extern __attribute__((visibility("default")))
 		#endif
-		#if defined(__clang__) && (defined(_VUSECACHE) || defined(_VBUILDMODULE) || defined(_VOBJECTFILE))
+		#if defined(_VOBJECTFILE) || (defined(__clang__) && (defined(_VUSECACHE) || defined(_VBUILDMODULE)))
 			#define VV_LOC static
 		#else
 			#define VV_LOC  __attribute__ ((visibility ("hidden")))
@@ -249,13 +249,21 @@ const c_common_hidden_attr = '
 #endif
 '
 
+const c_common_callconv_attr = '
+#if !defined(VCALLCONV)
+	#ifdef _MSC_VER
+		#define VCALLCONV(name) __##name
+	#else
+		#define VCALLCONV(name) __attribute__((name))
+	#endif
+#endif
+'
+
 const c_common_noreturn_attr = '
 #if !defined(VNORETURN)
 	#if defined(__TINYC__)
-		#include <stdnoreturn.h>
-		#define VNORETURN noreturn
-	#endif
-	# if !defined(__TINYC__) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+		#define VNORETURN __attribute__((noreturn))
+	# elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 	#  define VNORETURN _Noreturn
 	# elif !defined(VNORETURN) && defined(__GNUC__) && __GNUC__ >= 2
 	#  define VNORETURN __attribute__((noreturn))
@@ -335,7 +343,7 @@ const c_helper_macros = '//============================== HELPER C MACROS ======
 #define _PUSH_MANY_noscan(arr, val, tmp, tmp_typ) {tmp_typ tmp = (val); builtin__array_push_many_noscan(arr, tmp.data, tmp.len);}
 '
 
-const c_headers = c_helper_macros + c_common_macros +
+const c_headers = c_helper_macros + c_common_macros + c_common_callconv_attr +
 	r'
 // c_headers
 typedef int (*qsort_callback_func)(const void*, const void*);
@@ -560,6 +568,7 @@ typedef u8 array_fixed_byte_300 [300];
 typedef struct sync__Channel* chan;
 #ifndef CUSTOM_DEFINE_no_bool
 	#ifndef __cplusplus
+		#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L
 		#ifndef bool
 			#ifdef CUSTOM_DEFINE_4bytebool
 				typedef int bool;
@@ -568,6 +577,7 @@ typedef struct sync__Channel* chan;
 			#endif
 			#define true 1
 			#define false 0
+		#endif
 		#endif
 	#endif
 #endif
@@ -623,10 +633,9 @@ typedef void (*MapCloneFn)(voidptr, voidptr);
 typedef void (*MapFreeFn)(voidptr);
 '
 
-const c_bare_headers = c_helper_macros + c_common_macros +
+const c_bare_headers = c_helper_macros + c_common_macros + c_common_callconv_attr +
 	'
 #define _VFREESTANDING
-typedef long unsigned int size_t;
 // Memory allocation related headers
 void *malloc(size_t size);
 void *calloc(size_t nitems, size_t size);

@@ -380,6 +380,17 @@ fn sub(x int, y int) int {
 
 Again, the type comes after the argument's name.
 
+When a function signature spans multiple lines, commas between parameters are optional:
+
+```v nofmt
+fn greet(
+	salutation string
+	name string
+) string {
+	return 'Hey, ${salutation} ${name}!'
+}
+```
+
 Just like in Go and C, functions cannot be overloaded.
 This simplifies the code and improves maintainability and readability.
 
@@ -1519,6 +1530,24 @@ m := {
 }
 if v := m['abc'] {
 	println('the map value for that key is: ${v}')
+}
+```
+
+Note: map indexing returns a copy of the stored value, including with `or {}`
+and `if v := m[key] {}`. Mutating that local value does not update the value
+stored in the map.
+
+To update a stored value, mutate `m[key]` directly or assign the modified value
+back to the map:
+
+```v
+mut data := map[string][]int{}
+key := 'odd'
+value := 1
+if _ := data[key] {
+	data[key] << value
+} else {
+	data[key] = [value]
 }
 ```
 
@@ -4247,6 +4276,8 @@ if mut w is Mars {
 Otherwise `w` would keep its original type.
 > This works for both simple variables and complex expressions like `user.name`
 > and `values[i]`.
+> The same rule applies to mutable method receivers, for example
+> `fn (mut w World) fn_name() { for mut w is Mars { ... } }`.
 
 Smart casts also work on indexed expressions in `match` branches:
 
@@ -4748,6 +4779,28 @@ fn main() {
 // Output: All jobs finished: [1, 4, 9, 16, 25, 36, 49, 64, 81]
 ```
 
+When the spawned function returns `?T` or `!T`, waiting on the thread array returns
+`?[]T` or `![]T`. That means the batch can be handled with `or`, `?`, or `!` the same
+way as a single thread handle.
+
+```v
+fn maybe_square(i int) !int {
+	if i < 0 {
+		return error('negative input')
+	}
+	return i * i
+}
+
+fn main() {
+	mut threads := []thread !int{}
+	for i in 1 .. 4 {
+		threads << spawn maybe_square(i)
+	}
+	values := threads.wait() or { panic(err) }
+	println(values)
+}
+```
+
 ### Channels
 
 Channels are the preferred way to communicate between threads. They allow threads to exchange data
@@ -4824,6 +4877,8 @@ to do so will then result in a runtime panic (with the exception of `select` and
 `try_push()` - see below). Attempts to pop will return immediately if the
 associated channel has been closed and the buffer is empty. This situation can be
 handled using an `or {}` block (see [Handling options/results](#handling-optionsresults)).
+An optional `IError` can be passed to `close(err)` so receive operations that use
+`or {}` or `?` can distinguish an error termination from a normal close.
 
 ```v wip
 ch := chan int{}
@@ -4837,6 +4892,12 @@ m := <-ch or {
 
 // propagate error
 y := <-ch2 ?
+
+ch2.close(error('worker failed'))
+z := <-ch2 or {
+	println(err.msg())
+	0.0
+}
 ```
 
 Note: buffered channels can be closed while they have unread values in them.
@@ -7359,7 +7420,8 @@ fn main() {
 >
 > `a.add(b).add(c.mul(d))` is a lot less readable than `a + b + c * d`.
 
-Operator overloading is possible for the following binary operators: `+, -, *, /, %, <, ==`.
+Operator overloading is possible for the following binary operators:
+`+, -, *, **, /, %, <, ==`.
 
 ### Implicitly generated overloads
 
@@ -7367,8 +7429,8 @@ Operator overloading is possible for the following binary operators: `+, -, *, /
 
 - `!=`, `>`, `<=` and `>=` are automatically generated when `==` and `<` are defined.
   They cannot be explicitly overridden.
-- Assignment operators (`*=`, `+=`, `/=`, etc) are automatically generated when the corresponding
-  operators are defined and the operands are of the same type.
+- Assignment operators (`*=`, `**=`, `+=`, `/=`, etc) are automatically generated when the
+  corresponding operators are defined and the operands are of the same type.
   They cannot be explicitly overridden.
 
 ### Restriction
@@ -8672,6 +8734,7 @@ This lists operators for [primitive types](#primitive-types) only.
 +    sum                    integers, floats, strings
 -    difference             integers, floats
 *    product                integers, floats
+**   power                  integers, floats
 /    quotient               integers, floats
 %    remainder              integers
 
@@ -8691,6 +8754,7 @@ This lists operators for [primitive types](#primitive-types) only.
 
 
 Precedence    Operator
+    6            **
     5            *  /  %  <<  >> >>> &
     4            +  -  |  ^
     3            ==  !=  <  <=  >  >=

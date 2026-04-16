@@ -4,6 +4,10 @@ module checker
 
 import v.ast
 
+fn assign_expr_is_auto_deref(expr ast.Expr) bool {
+	return expr.is_auto_deref_var()
+}
+
 // TODO: 980 line function
 fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 	prev_inside_assign := c.inside_assign
@@ -296,7 +300,9 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 				right_type = right_type.clear_flag(.option)
 			}
 		} else if right is ast.ComptimeSelector {
-			right_type = c.comptime.comptime_for_field_type
+			if !(right as ast.ComptimeSelector).is_method {
+				right_type = c.comptime.comptime_for_field_type
+			}
 		}
 		if is_decl || is_shared_re_assign {
 			// check generic struct init and return unwrap generic struct type
@@ -317,7 +323,7 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 					c.expr(mut right)
 				}
 			}
-			if right.is_auto_deref_var() && right_type.is_ptr() {
+			if assign_expr_is_auto_deref(right) && right_type.is_ptr() {
 				left_type = ast.mktyp(right_type.deref())
 			} else {
 				left_type = ast.mktyp(right_type)
@@ -680,7 +686,7 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 		}
 		if left_sym.kind == .map && is_assign && right_sym.kind == .map && !c.inside_unsafe
 			&& !left.is_blank_ident() && right.is_lvalue() && right !is ast.ComptimeSelector
-			&& (!right_type.is_ptr() || (right is ast.Ident && right.is_auto_deref_var())) {
+			&& (!right_type.is_ptr() || (right is ast.Ident && assign_expr_is_auto_deref(right))) {
 			// Do not allow `a = b`
 			c.error('cannot copy map: call `move` or `clone` method (or use a reference)',
 				right.pos())
@@ -715,7 +721,7 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 				}
 			}
 		}
-		if left_type.is_any_kind_of_pointer() && !left.is_auto_deref_var() {
+		if left_type.is_any_kind_of_pointer() && !assign_expr_is_auto_deref(left) {
 			if !c.inside_unsafe && node.op !in [.assign, .decl_assign] {
 				// ptr op=
 				if !c.pref.translated && !c.file.is_translated {
@@ -755,7 +761,7 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 			.assign {} // No need to do single side check for =. But here put it first for speed.
 			.plus_assign, .minus_assign {
 				// allow literal values to auto deref var (e.g.`for mut v in values { v += 1.0 }`)
-				left_deref := if left.is_auto_deref_var() && left_type.is_ptr() {
+				left_deref := if assign_expr_is_auto_deref(left) && left_type.is_ptr() {
 					left_type.deref()
 				} else {
 					left_type
@@ -779,7 +785,7 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 						right.pos())
 				}
 			}
-			.mult_assign, .div_assign {
+			.mult_assign, .power_assign, .div_assign {
 				if !left_sym.is_number() && !c.table.final_sym(left_type_unwrapped).is_int()
 					&& left_sym.kind !in [.struct, .alias] {
 					c.error('operator ${node.op.str()} not defined on left operand type `${left_sym.name}`',
@@ -874,7 +880,10 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 			}
 			else {}
 		}
-		if node.op in [.plus_assign, .minus_assign, .mod_assign, .mult_assign, .div_assign]
+		if node.op == .power_assign {
+			c.markused_power_runtime_support()
+		}
+		if node.op in [.plus_assign, .minus_assign, .mod_assign, .mult_assign, .power_assign, .div_assign]
 			&& (left_sym.kind == .alias || (left_sym.kind == .struct && right_sym.kind == .struct)) {
 			left_name := c.table.type_to_str(left_type_unwrapped)
 			right_name := c.table.type_to_str(right_type_unwrapped)
@@ -890,6 +899,7 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 				.div_assign { '/' }
 				.mod_assign { '%' }
 				.mult_assign { '*' }
+				.power_assign { '**' }
 				else { 'unknown op' }
 			}
 			if left_sym.kind == .struct && (left_sym.info as ast.Struct).generic_types.len > 0 {
@@ -938,7 +948,7 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 					left_deref := left_type.deref()
 					right_deref := if right.is_pure_literal() {
 						right.get_pure_type()
-					} else if right.is_auto_deref_var() && right_type.is_ptr() {
+					} else if assign_expr_is_auto_deref(right) && right_type.is_ptr() {
 						right_type.deref()
 					} else {
 						right_type
@@ -948,15 +958,15 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 					}
 				}
 				// allow literal values to auto deref var (e.g.`for mut v in values { v = 1.0 }`)
-				if left.is_auto_deref_var() || right.is_auto_deref_var() {
-					left_deref := if left.is_auto_deref_var() && left_type.is_ptr() {
+				if assign_expr_is_auto_deref(left) || assign_expr_is_auto_deref(right) {
+					left_deref := if assign_expr_is_auto_deref(left) && left_type.is_ptr() {
 						left_type.deref()
 					} else {
 						left_type
 					}
 					right_deref := if right.is_pure_literal() {
 						right.get_pure_type()
-					} else if right.is_auto_deref_var() && right_type.is_ptr() {
+					} else if assign_expr_is_auto_deref(right) && right_type.is_ptr() {
 						right_type.deref()
 					} else {
 						right_type

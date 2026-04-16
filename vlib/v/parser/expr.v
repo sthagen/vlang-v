@@ -173,9 +173,13 @@ fn (mut p Parser) check_expr(precedence int) !ast.Expr {
 			// &x, *x, !x, ~x, <-x
 			node = p.prefix_expr()
 		}
+		.power {
+			node = p.power_prefix_expr()
+		}
 		.minus {
 			// -1, -a
-			if p.peek_tok.kind == .number {
+			if p.peek_tok.kind == .number && !(p.peek_token(2).kind == .power
+				&& p.peek_token(2).line_nr == p.tok.line_nr) {
 				node = p.parse_number_literal()
 			} else {
 				node = p.prefix_expr()
@@ -661,7 +665,16 @@ fn (mut p Parser) expr_with_left(left ast.Expr, precedence int, is_stmt_ident bo
 	p.process_custom_orm_operators()
 
 	// Infix
-	for precedence < p.tok.kind.precedence() {
+	for {
+		if p.tok.kind == .lpar && p.tok.line_nr == p.prev_tok.line_nr
+			&& node in [ast.CallExpr, ast.IndexExpr, ast.SelectorExpr] {
+			node = p.call_expr_with_left(node)
+			p.is_stmt_ident = is_stmt_ident
+			continue
+		}
+		if precedence >= p.tok.kind.precedence() {
+			return node
+		}
 		if p.tok.kind == .dot {
 			// no spaces or line break before dot in map_init
 			if (p.inside_map_init || p.inside_array_lit)
@@ -684,38 +697,7 @@ fn (mut p Parser) expr_with_left(left ast.Expr, precedence int, is_stmt_ident bo
 			} else {
 				node = p.index_expr(node, false)
 			}
-
 			p.is_stmt_ident = is_stmt_ident
-			if p.tok.kind == .lpar && p.tok.line_nr == p.prev_tok.line_nr && node is ast.IndexExpr {
-				p.next()
-				pos := p.tok.pos()
-				args := p.call_args()
-				p.check(.rpar)
-				or_block := p.gen_or_block()
-				node = ast.CallExpr{
-					left:           node
-					args:           args
-					pos:            pos
-					scope:          p.scope
-					or_block:       or_block
-					is_return_used: p.expecting_value
-				}
-				p.is_stmt_ident = is_stmt_ident
-				if p.tok.kind == .lpar && p.prev_tok.line_nr == p.tok.line_nr {
-					p.next()
-					pos2 := p.tok.pos()
-					args2 := p.call_args()
-					p.check(.rpar)
-					or_block2 := p.gen_or_block()
-					node = ast.CallExpr{
-						left:     node
-						args:     args2
-						pos:      pos2
-						scope:    p.scope
-						or_block: or_block2
-					}
-				}
-			}
 		} else if p.tok.kind == .key_as && p.tok.line_nr == p.prev_tok.line_nr {
 			// sum type as cast `x := SumType as Variant`
 			if !p.inside_asm {
@@ -819,6 +801,22 @@ fn (mut p Parser) expr_with_left(left ast.Expr, precedence int, is_stmt_ident bo
 	return node
 }
 
+fn (mut p Parser) call_expr_with_left(left ast.Expr) ast.CallExpr {
+	p.next()
+	pos := p.tok.pos()
+	args := p.call_args()
+	p.check(.rpar)
+	or_block := p.gen_or_block()
+	return ast.CallExpr{
+		left:           left
+		args:           args
+		pos:            pos
+		scope:          p.scope
+		or_block:       or_block
+		is_return_used: p.expecting_value
+	}
+}
+
 fn (mut p Parser) gen_or_block() ast.OrExpr {
 	if p.tok.kind == .key_orelse {
 		// `foo() or {}``
@@ -862,6 +860,8 @@ fn (mut p Parser) infix_expr(left ast.Expr) ast.Expr {
 	if op == .arrow {
 		p.or_is_handled = true
 		p.register_auto_import('sync')
+	} else if op == .power {
+		p.register_auto_import('math')
 	}
 	precedence := p.tok.kind.precedence()
 	mut pos := p.tok.pos()
@@ -891,12 +891,13 @@ fn (mut p Parser) infix_expr(left ast.Expr) ast.Expr {
 	if op in [.decl_assign, .assign] {
 		p.inside_assign_rhs = true
 	}
-	right = p.expr(precedence)
+	right = p.expr(if op == .power { precedence - 1 } else { precedence })
 	p.inside_assign_rhs = old_assign_rhs
-	if op in [.plus, .minus, .mul, .div, .mod, .lt, .eq] && mut right is ast.PrefixExpr {
+	if op in [.plus, .minus, .mul, .power, .div, .mod, .lt, .eq] && mut right is ast.PrefixExpr {
 		mut right_expr := right.right
 		right_expr = right_expr.remove_par()
-		if right.op in [.plus, .minus, .mul, .div, .mod, .lt, .eq] && right_expr.is_pure_literal() {
+		if right.op in [.plus, .minus, .mul, .power, .div, .mod, .lt, .eq]
+			&& right_expr.is_pure_literal() {
 			p.error_with_pos('invalid expression: unexpected token `${op}`', right_op_pos)
 		}
 	}
@@ -1055,6 +1056,20 @@ fn (mut p Parser) prefix_expr() ast.Expr {
 	}
 }
 
+fn (mut p Parser) power_prefix_expr() ast.Expr {
+	pos := p.tok.pos()
+	p.next()
+	mut right := p.expr(int(token.Precedence.prefix))
+	for _ in 0 .. 2 {
+		right = ast.PrefixExpr{
+			op:    .mul
+			right: right
+			pos:   pos
+		}
+	}
+	return right
+}
+
 fn (mut p Parser) recast_as_pointer(mut cast_expr ast.CastExpr, pos token.Pos) {
 	cast_expr.typ = cast_expr.typ.ref()
 	cast_expr.typname = if cast_expr.typ == 0 {
@@ -1141,7 +1156,7 @@ fn (mut p Parser) lambda_expr() ?ast.LambdaExpr {
 
 			p.scope.register(ast.Var{
 				name:         ident.name
-				is_mut:       ident.is_mut
+				is_mut:       p.scope_var_is_mut(ident.is_mut)
 				is_stack_obj: true
 				pos:          ident.pos
 				is_used:      true

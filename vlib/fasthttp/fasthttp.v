@@ -7,10 +7,10 @@ import runtime
 import net
 import time
 
-#include <fcntl.h>
 #include <errno.h>
 
 $if !windows {
+	#include <fcntl.h>
 	#include <sys/socket.h>
 	#include <netinet/in.h>
 	#include <netinet/tcp.h>
@@ -65,8 +65,10 @@ pub mut:
 
 pub struct HttpResponse {
 pub:
-	content   []u8
-	file_path string
+	content      []u8
+	file_path    string
+	takeover     bool // if true, the connection fd is handed off to the caller and must not be closed by fasthttp
+	should_close bool // if true, close the connection after sending (Connection: close)
 }
 
 // ServerConfig bundles the parameters needed to start a fasthttp server.

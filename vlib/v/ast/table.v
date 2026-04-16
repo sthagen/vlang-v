@@ -951,8 +951,8 @@ pub fn (t &Table) sym(typ Type) &TypeSymbol {
 	if idx > 0 && idx < t.type_symbols.len {
 		return t.type_symbols[idx]
 	}
-	if idx == 65535 || typ == invalid_type {
-		// invalid_type is used as a sentinel during generic type resolution;
+	if idx == 0 || idx == 65535 || typ == invalid_type {
+		// invalid_type and idx=0 are used as sentinels during generic type resolution;
 		// return a safe placeholder instead of panicking.
 		return invalid_type_symbol
 	}
@@ -972,6 +972,9 @@ pub fn (t &Table) final_sym(typ Type) &TypeSymbol {
 			idx = cur_sym.info.parent_type.idx()
 		}
 		return t.type_symbols[idx]
+	}
+	if idx == 0 {
+		return invalid_type_symbol
 	}
 	// this should never happen
 	t.panic('table.final_sym: invalid type (typ=${typ} idx=${idx}). Compiler bug. This should never happen. Please report the bug using `v bug file.v`.')
@@ -1025,6 +1028,24 @@ pub fn (t &Table) unaliased_type(typ Type) Type {
 		return sym.info.parent_type
 	}
 	return typ
+}
+
+// fully_unaliased_type unwraps alias chains while preserving pointer indirections and flags.
+@[inline]
+pub fn (t &Table) fully_unaliased_type(typ Type) Type {
+	mut unaliased := typ
+	mut extra_flags := u32(typ) & 0xff00_0000
+	for {
+		sym := t.sym(unaliased)
+		if sym.info is Alias {
+			parent_typ := sym.info.parent_type
+			unaliased = Type(u32(parent_typ.set_nr_muls(parent_typ.nr_muls() + unaliased.nr_muls())) | extra_flags)
+			extra_flags |= u32(unaliased) & 0xff00_0000
+			continue
+		}
+		return unaliased
+	}
+	return unaliased
 }
 
 // update_sym_by_idx replaces the symbol on the `existing_idx`, with the new `sym`
@@ -2364,15 +2385,18 @@ pub fn (mut t Table) convert_generic_type(generic_type Type, generic_names []str
 			mut has_generic := false
 			return_type_sym := t.sym(func.return_type)
 			if func.return_type.has_flag(.generic)
+				|| t.generic_type_names(func.return_type).len > 0
 				|| (return_type_sym.kind == .generic_inst
 				&& (return_type_sym.info as GenericInst).concrete_types.any(it.has_flag(.generic))) {
 				if typ := t.convert_generic_type(func.return_type, generic_names, to_types) {
 					func.return_type = typ
-					typ_sym := t.sym(typ)
-					if typ.has_flag(.generic) || (typ_sym.kind == .generic_inst
-						&& (typ_sym.info as GenericInst).concrete_types.any(it.has_flag(.generic))) {
-						has_generic = true
-					}
+				} else {
+					func.return_type = t.unwrap_generic_type_ex(func.return_type, generic_names,
+						to_types, true)
+				}
+				if func.return_type.has_flag(.generic)
+					|| t.generic_type_names(func.return_type).len > 0 {
+					has_generic = true
 				}
 			}
 			func.params = func.params.clone()
@@ -2388,9 +2412,12 @@ pub fn (mut t Table) convert_generic_type(generic_type Type, generic_names []str
 				if param.typ.has_flag(.generic) || t.generic_type_names(param.typ).len > 0 {
 					has_generic = true
 				}
-				if param.orig_typ.has_flag(.generic) {
+				if param.orig_typ.has_flag(.generic) || t.generic_type_names(param.orig_typ).len > 0 {
 					if otyp := t.convert_generic_type(param.orig_typ, generic_names, to_types) {
 						param.orig_typ = otyp
+					} else {
+						param.orig_typ = t.unwrap_generic_type_ex(param.orig_typ, generic_names,
+							to_types, true)
 					}
 				}
 			}
@@ -2617,8 +2644,11 @@ pub fn (mut t Table) convert_generic_type(generic_type Type, generic_names []str
 	return none
 }
 
-fn (mut t Table) lower_mut_param_type(typ Type) Type {
-	mut lowered := if typ.is_ptr() && t.sym(typ).kind == .struct {
+fn (mut t Table) lower_mut_param_type(typ Type, orig_typ ...Type) Type {
+	// When the pointer came from the generic type argument itself (T=&int),
+	// not from the param signature (&T), we need ref() to add one more level.
+	orig_was_ptr := orig_typ.len > 0 && orig_typ[0].nr_muls() > 0
+	mut lowered := if typ.is_ptr() && !orig_was_ptr {
 		typ.ref()
 	} else {
 		typ.set_nr_muls(1)
@@ -2633,7 +2663,7 @@ pub fn (mut t Table) convert_generic_param_type(param Param, generic_names []str
 	if param.is_mut && param.orig_typ != 0 && param.orig_typ.has_flag(.generic)
 		&& to_types.all(!it.has_flag(.generic)) {
 		if typ := t.convert_generic_type(param.orig_typ, generic_names, to_types) {
-			return t.lower_mut_param_type(typ)
+			return t.lower_mut_param_type(typ, param.orig_typ)
 		}
 	}
 	return t.convert_generic_type(param.typ, generic_names, to_types)
@@ -3176,6 +3206,10 @@ fn (t &Table) find_fn_in_mod(name string, mod string) ?Fn {
 
 pub fn (mut t Table) generic_type_names(generic_type Type) []string {
 	mut names := []string{}
+	idx := generic_type.idx()
+	if idx == 0 || idx >= t.type_symbols.len {
+		return names
+	}
 	mut sym := t.sym(generic_type)
 	if sym.name.len == 1 && sym.name[0].is_capital() {
 		names << sym.name
@@ -3193,7 +3227,17 @@ pub fn (mut t Table) generic_type_names(generic_type Type) []string {
 			names << t.generic_type_names(sym.info.elem_type)
 		}
 		FnType {
-			names << sym.info.func.generic_names
+			for param in sym.info.func.params {
+				generic_names_push_with_filter(mut names, t.generic_type_names(param.typ))
+				if param.orig_typ != 0 {
+					generic_names_push_with_filter(mut names, t.generic_type_names(param.orig_typ))
+				}
+			}
+			generic_names_push_with_filter(mut names,
+				t.generic_type_names(sym.info.func.return_type))
+			if names.len == 0 {
+				generic_names_push_with_filter(mut names, sym.info.func.generic_names)
+			}
 		}
 		MultiReturn {
 			for ret_type in sym.info.types {
@@ -3313,17 +3357,20 @@ fn (mut t Table) unwrap_generic_type_ex_with_depth(typ Type, generic_names []str
 			unwrapped_fn.params = unwrapped_fn.params.clone()
 			mut has_generic := false
 			for i, param in unwrapped_fn.params {
-				if param.typ.has_flag(.generic) {
+				if param.typ.has_flag(.generic) || t.generic_type_names(param.typ).len > 0 {
 					unwrapped_fn.params[i].typ = t.unwrap_generic_param_type(param, generic_names,
 						concrete_types)
 					has_generic = true
 				}
-				if param.orig_typ.has_flag(.generic) {
+				if param.orig_typ.has_flag(.generic) || t.generic_type_names(param.orig_typ).len > 0 {
 					unwrapped_fn.params[i].orig_typ = t.unwrap_generic_type(param.orig_typ,
 						generic_names, concrete_types)
 				}
 			}
-			if unwrapped_fn.return_type.has_flag(.generic) {
+			if unwrapped_fn.return_type.has_flag(.generic)
+				|| t.generic_type_names(unwrapped_fn.return_type).len > 0
+				|| (unwrapped_fn.return_type.idx() > 0 && unwrapped_fn.return_type.idx() < t.type_symbols.len
+				&& t.sym(unwrapped_fn.return_type).kind == .generic_inst&& (t.sym(unwrapped_fn.return_type).info as GenericInst).concrete_types.any(it.has_flag(.generic))) {
 				unwrapped_fn.return_type = t.unwrap_generic_type_ex_with_depth(unwrapped_fn.return_type,
 					generic_names, concrete_types, recheck_concrete_types, depth_guard)
 				has_generic = true
@@ -4018,26 +4065,39 @@ pub fn (mut t Table) generic_insts_to_concrete() {
 					mut function := parent_info.func
 					function.params = function.params.clone()
 					for mut param in function.params {
-						if param.typ.has_flag(.generic) {
+						if param.typ.has_flag(.generic) || t.generic_type_names(param.typ).len > 0 {
 							if t_typ := t.convert_generic_param_type(param, function.generic_names,
 								info.concrete_types)
 							{
 								param.typ = t_typ
+							} else {
+								param.typ = t.unwrap_generic_type_ex(param.typ,
+									function.generic_names, info.concrete_types, true)
 							}
 						}
-						if param.orig_typ.has_flag(.generic) {
+						if param.orig_typ.has_flag(.generic)
+							|| t.generic_type_names(param.orig_typ).len > 0 {
 							if t_typ := t.convert_generic_type(param.orig_typ,
 								function.generic_names, info.concrete_types)
 							{
 								param.orig_typ = t_typ
+							} else {
+								param.orig_typ = t.unwrap_generic_type_ex(param.orig_typ,
+									function.generic_names, info.concrete_types, true)
 							}
 						}
 					}
-					if function.return_type.has_flag(.generic) {
+					return_type_sym := t.sym(function.return_type)
+					if function.return_type.has_flag(.generic)
+						|| t.generic_type_names(function.return_type).len > 0
+						|| (return_type_sym.kind == .generic_inst&& (return_type_sym.info as GenericInst).concrete_types.any(it.has_flag(.generic))) {
 						if t_typ := t.convert_generic_type(function.return_type,
 							function.generic_names, info.concrete_types)
 						{
 							function.return_type = t_typ
+						} else {
+							function.return_type = t.unwrap_generic_type_ex(function.return_type,
+								function.generic_names, info.concrete_types, true)
 						}
 					}
 					function.generic_names = []

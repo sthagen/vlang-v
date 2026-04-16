@@ -880,7 +880,7 @@ fn (mut g Gen) resolved_expr_type(expr ast.Expr, default_typ ast.Type) ast.Type 
 			right_default := if expr.right_type != 0 { expr.right_type } else { default_typ }
 			left_type := g.resolved_expr_type(expr.left, left_default)
 			right_type := g.resolved_expr_type(expr.right, right_default)
-			if expr.op in [.plus, .minus, .mul, .div, .mod] {
+			if expr.op in [.plus, .minus, .mul, .power, .div, .mod] {
 				if left_type == right_type && left_type != 0
 					&& left_type !in [ast.int_literal_type, ast.float_literal_type] {
 					return g.unwrap_generic(left_type)
@@ -946,7 +946,15 @@ fn (mut g Gen) resolved_expr_type(expr ast.Expr, default_typ ast.Type) ast.Type 
 			}
 		}
 		ast.ComptimeSelector {
-			if expr.typ_key != '' {
+			if expr.is_method {
+				ctyp := g.type_resolver.get_comptime_selector_type(expr, ast.void_type)
+				if ctyp != ast.void_type {
+					return g.unwrap_generic(ctyp)
+				}
+				if expr.typ != ast.void_type && expr.typ != 0 {
+					return g.unwrap_generic(expr.typ)
+				}
+			} else if expr.typ_key != '' {
 				ctyp := g.type_resolver.get_ct_type_or_default(expr.typ_key, default_typ)
 				if ctyp != ast.void_type {
 					return g.unwrap_generic(ctyp)

@@ -3,6 +3,11 @@ module checker
 import v.ast
 import v.token
 
+fn (mut c Checker) markused_power_runtime_support() {
+	// C/JS backends lower `**` directly at codegen time, so there is no
+	// function usage to mark here.
+}
+
 fn infix_expr_allows_auto_deref(expr ast.Expr) bool {
 	return expr is ast.Ident && expr.is_auto_deref_var()
 }
@@ -250,7 +255,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	}
 	if left_type.is_any_kind_of_pointer() && !left_type.has_flag(.shared_f)
 		&& !node.left.is_auto_deref_var()
-		&& node.op in [.plus, .minus, .mul, .div, .mod, .xor, .amp, .pipe] {
+		&& node.op in [.plus, .minus, .mul, .power, .div, .mod, .xor, .amp, .pipe] {
 		if !c.pref.translated && ((right_type.is_any_kind_of_pointer() && node.op != .minus)
 			|| (!right_type.is_any_kind_of_pointer() && node.op !in [.plus, .minus])) {
 			if _ := left_sym.find_method(node.op.str()) {
@@ -415,9 +420,9 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				}
 				.map {
 					map_info := right_final_sym.map_info()
-					c.check_expected(left_type, map_info.key_type) or {
-						c.error('left operand to `${node.op}` does not match the map key type: ${err.msg()}',
-							left_right_pos)
+					if !c.check_map_key_type(left_type, map_info.key_type) {
+						c.error('left operand to `${node.op}` does not match the map key type: ${c.map_key_expected_msg(left_type,
+							map_info.key_type, node.left, '')}', left_right_pos)
 					}
 					node.left_type = map_info.key_type
 				}
@@ -445,8 +450,11 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			node.promoted_type = ast.bool_type
 			return ast.bool_type
 		}
-		.plus, .minus, .mul, .div, .mod, .xor, .amp, .pipe {
+		.plus, .minus, .mul, .power, .div, .mod, .xor, .amp, .pipe {
 			// binary operators that expect matching types
+			if node.op == .power {
+				c.markused_power_runtime_support()
+			}
 			unwrapped_left_type := c.unwrap_generic(left_type)
 			left_sym = c.table.sym(unwrapped_left_type)
 			unwrapped_right_type := c.unwrap_generic(right_type)

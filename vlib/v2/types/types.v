@@ -83,7 +83,7 @@ pub:
 	elem_type Type
 }
 
-struct Channel {
+pub struct Channel {
 pub:
 	elem_type ?Type
 }
@@ -414,6 +414,10 @@ fn value_type_with_depth(t Type, depth int) Type {
 			if t.base_type is String {
 				// `&string` is used as pointer-to-first-string in several builtin APIs.
 				// Indexing it should yield `string`, not `u8`.
+				return string_
+			}
+			if t.base_type is Struct
+				&& (t.base_type.name == 'string' || t.base_type.name.ends_with('__string')) {
 				return string_
 			}
 			return value_type_with_depth(t.base_type, depth + 1)

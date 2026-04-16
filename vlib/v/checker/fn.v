@@ -8,6 +8,24 @@ import os
 
 const print_everything_fns = ['println', 'print', 'eprintln', 'eprint', 'panic']
 
+@[inline]
+fn (c &Checker) implicit_mutability_enabled() bool {
+	return c.pref.disable_explicit_mutability
+		&& (!os.dir(c.file.path).contains('vlib') || c.file.path.ends_with('.vv'))
+}
+
+@[inline]
+fn (c &Checker) implicit_mut_call_arg(param ast.Param, arg ast.CallArg) ast.CallArg {
+	if !c.implicit_mutability_enabled() || arg.is_mut || !param.is_mut
+		|| param.typ.share() != .mut_t {
+		return arg
+	}
+	return ast.CallArg{
+		...arg
+		is_mut: true
+	}
+}
+
 fn (mut c Checker) check_os_raw_io_call(node &ast.CallExpr, func &ast.Fn, concrete_types []ast.Type, arg_offset int) {
 	if func.mod != 'os' || !func.is_method {
 		return
@@ -718,7 +736,7 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 					} else if parent_sym.is_primitive() {
 						if node.return_type.has_option_or_result() {
 							c.error('return type cannot be Option or Result', node.return_type_pos)
-						} else if node.name in ['+', '-', '*', '%', '/']
+						} else if node.name in ['+', '-', '*', '**', '%', '/']
 							&& node.return_type != receiver_type {
 							srtype := c.table.type_to_str(receiver_type)
 							c.error('operator `${node.name}` methods on primitive aliases should return `${srtype}`',
@@ -1103,8 +1121,24 @@ fn (mut c Checker) call_expr(mut node ast.CallExpr) ast.Type {
 		}
 	}
 	// If the left expr has an or_block, it needs to be checked for legal or_block statement.
-	left_type := c.expr(mut node.left)
-	c.check_expr_option_or_result_call(node.left, left_type)
+	mut left_type := ast.void_type
+	match mut node.left {
+		ast.SelectorExpr {
+			if node.name == '' && node.left.or_block.kind != .absent {
+				left_type = c.selector_expr(mut node.left)
+			} else {
+				left_type = c.expr(mut node.left)
+			}
+		}
+		else {
+			left_type = c.expr(mut node.left)
+		}
+	}
+	if node.name == '' {
+		left_type = c.check_expr_option_or_result_call(node.left, left_type)
+	} else {
+		c.check_expr_option_or_result_call(node.left, left_type)
+	}
 	// TODO: merge logic from method_call and fn_call
 	// First check everything that applies to both fns and methods
 	old_inside_fn_arg := c.inside_fn_arg
@@ -1302,7 +1336,9 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 	mut concrete_types := []ast.Type{}
 	node.concrete_types = node.raw_concrete_types
 	for concrete_type in node.concrete_types {
-		if concrete_type.has_flag(.generic) {
+		if concrete_type.has_flag(.generic)
+			|| (c.type_has_unresolved_generic_parts(concrete_type)
+			&& c.table.sym(concrete_type).kind != .placeholder) {
 			has_generic = true
 			concrete_types << c.unwrap_generic(concrete_type)
 		} else {
@@ -1504,6 +1540,23 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 				node.return_type = sym.info.func.return_type
 				found = true
 				func = sym.info.func
+			}
+		}
+	}
+	if !found && node.name == '' && node.left_type != 0 {
+		left_sym := c.table.final_sym(c.unwrap_generic(node.left_type))
+		if left_sym.info is ast.FnType {
+			func = left_sym.info.func
+			found = true
+			node.is_fn_var = true
+			node.fn_var_type = node.left_type
+		} else if left_sym.info is ast.GenericInst {
+			parent_sym := c.table.sym(ast.new_type(left_sym.info.parent_idx))
+			if parent_sym.info is ast.FnType {
+				func = parent_sym.info.func
+				found = true
+				node.is_fn_var = true
+				node.fn_var_type = node.left_type
 			}
 		}
 	}
@@ -1874,6 +1927,20 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 		node.should_be_skipped =
 			c.evaluate_once_comptime_if_attribute(mut func.attrs[func.ctdefine_idx])
 	}
+	if node.kind == .free && func.mod == 'builtin' && args_len == 1
+		&& c.table.cur_fn != unsafe { nil } && c.table.cur_fn.is_method && !c.is_builtin_mod
+		&& !c.inside_recheck {
+		if node.args[0].expr is ast.Ident {
+			if node.args[0].expr.name == c.table.cur_fn.receiver.name {
+				receiver_sym := c.table.sym(c.table.cur_fn.receiver.typ)
+				if !receiver_sym.is_heap() {
+					c.warn('calling builtin `free()` on a method receiver will cause a' +
+						' runtime crash when the receiver is stack-allocated; free individual fields instead',
+						node.pos)
+				}
+			}
+		}
+	}
 
 	// dont check number of args for JS functions since arguments are not required
 	if node.language != .js {
@@ -2054,6 +2121,8 @@ fn (mut c Checker) fn_call(mut node ast.CallExpr, mut continue_check &bool) ast.
 			c.error('function with `shared` arguments cannot be called inside `lock`/`rlock` block',
 				call_arg.pos)
 		}
+		call_arg = c.implicit_mut_call_arg(param, call_arg)
+		node.args[i] = call_arg
 		if call_arg.is_mut {
 			to_lock, pos := c.fail_if_immutable(mut call_arg.expr)
 			if !call_arg.expr.is_lvalue() {
@@ -2925,6 +2994,8 @@ fn (mut c Checker) method_call(mut node ast.CallExpr, mut continue_check &bool) 
 						c.error('method with `shared` arguments cannot be called inside `lock`/`rlock` block',
 							arg.pos)
 					}
+					arg = c.implicit_mut_call_arg(param, arg)
+					node.args[i] = arg
 					if arg.is_mut {
 						to_lock, pos := c.fail_if_immutable(mut arg.expr)
 						if !param.is_mut {
@@ -2971,7 +3042,7 @@ fn (mut c Checker) method_call(mut node ast.CallExpr, mut continue_check &bool) 
 			}
 		}
 		if left_sym.kind in [.struct, .aggregate, .interface, .sum_type] {
-			if c.smartcast_mut_pos != token.Pos{} {
+			if c.smartcast_mut_pos != token.Pos{} && !c.implicit_mutability_enabled() {
 				c.note('smartcasting requires either an immutable value, or an explicit mut keyword before the value',
 					c.smartcast_mut_pos)
 			}
@@ -3118,7 +3189,9 @@ fn (mut c Checker) method_call(mut node ast.CallExpr, mut continue_check &bool) 
 		c.error('method with `shared` receiver cannot be called inside `lock`/`rlock` block',
 			node.pos)
 	}
-	if method.params[0].is_mut {
+	requires_mut_receiver := method.params[0].is_mut
+		&& (!is_used_outside_receiver_module || c.fn_has_visible_mutation_for_param(method, 0))
+	if requires_mut_receiver {
 		to_lock, pos := c.check_for_mut_receiver(mut node.left)
 		// node.is_mut = true
 		if to_lock != '' && rec_share != .shared_t {
@@ -3276,6 +3349,8 @@ fn (mut c Checker) method_call(mut node ast.CallExpr, mut continue_check &bool) 
 			c.error('method with `shared` arguments cannot be called inside `lock`/`rlock` block',
 				arg.pos)
 		}
+		arg = c.implicit_mut_call_arg(param, arg)
+		node.args[i] = arg
 		if arg.is_mut {
 			to_lock, pos := c.fail_if_immutable(mut arg.expr)
 			if !param_is_mut {
@@ -3567,6 +3642,21 @@ fn (mut c Checker) spawn_expr(mut node ast.SpawnExpr) ast.Type {
 	} else {
 		return c.table.find_or_register_thread(c.unwrap_generic(ret_type))
 	}
+}
+
+fn (mut c Checker) thread_array_wait_return_type(thread_ret_type ast.Type) ast.Type {
+	payload_type := thread_ret_type.clear_option_and_result()
+	if payload_type == ast.void_type {
+		return thread_ret_type
+	}
+	mut return_type := ast.idx_to_type(c.table.find_or_register_array(payload_type))
+	if thread_ret_type.has_flag(.option) {
+		return_type = return_type.set_flag(.option)
+	}
+	if thread_ret_type.has_flag(.result) {
+		return_type = return_type.set_flag(.result)
+	}
+	return return_type
 }
 
 fn (mut c Checker) go_expr(mut node ast.GoExpr) ast.Type {
@@ -4295,14 +4385,7 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 				c.error('`.wait()` does not have any arguments', arg0.pos)
 			}
 			thread_ret_type := c.unwrap_generic(elem_sym.thread_info().return_type)
-			if thread_ret_type.has_flag(.option) {
-				c.error('`.wait()` cannot be called for an array when thread functions return options. Iterate over the arrays elements instead and handle each returned option with `or`.',
-					node.pos)
-			} else if thread_ret_type.has_flag(.result) {
-				c.error('`.wait()` cannot be called for an array when thread functions return results. Iterate over the arrays elements instead and handle each returned result with `or`.',
-					node.pos)
-			}
-			node.return_type = c.table.find_or_register_array(thread_ret_type)
+			node.return_type = c.thread_array_wait_return_type(thread_ret_type)
 		} else {
 			c.error('`${left_sym.name}` has no method `wait()` (only thread handles and arrays of them have)',
 				node.left.pos())
@@ -4339,6 +4422,19 @@ fn (mut c Checker) array_builtin_method_call(mut node ast.CallExpr, left_type as
 			else {
 				arg_type
 			}
+		}
+		normalized_ret_type := if c.table.sym(ret_type).kind == .alias {
+			unaliased_ret_type := c.table.unaliased_type(ret_type)
+			if unaliased_ret_type.has_option_or_result() {
+				unaliased_ret_type
+			} else {
+				ret_type
+			}
+		} else {
+			ret_type
+		}
+		if normalized_ret_type.has_flag(.result) {
+			c.error('cannot use Result type in `${node.name}`', arg0.expr.pos())
 		}
 		if c.pref.new_generic_solver {
 			node.return_type = c.table.find_or_register_array(ret_type)
@@ -4579,14 +4675,7 @@ fn (mut c Checker) fixed_array_builtin_method_call(mut node ast.CallExpr, left_t
 				c.error('`.wait()` does not have any arguments', arg0.pos)
 			}
 			thread_ret_type := c.unwrap_generic(elem_sym.thread_info().return_type)
-			if thread_ret_type.has_flag(.option) {
-				c.error('`.wait()` cannot be called for an array when thread functions return options. Iterate over the arrays elements instead and handle each returned option with `or`.',
-					node.pos)
-			} else if thread_ret_type.has_flag(.result) {
-				c.error('`.wait()` cannot be called for an array when thread functions return results. Iterate over the arrays elements instead and handle each returned result with `or`.',
-					node.pos)
-			}
-			node.return_type = c.table.find_or_register_array(thread_ret_type)
+			node.return_type = c.thread_array_wait_return_type(thread_ret_type)
 		} else {
 			c.error('`${left_sym.name}` has no method `wait()` (only thread handles and arrays of them have)',
 				node.left.pos())

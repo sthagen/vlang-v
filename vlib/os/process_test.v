@@ -10,6 +10,8 @@ const echo_process_exe_filename = os.join_path(tfolder, 'echo.exe')
 const echo_process_source_filename = os.join_path(tfolder, 'echo.v')
 const delayed_output_exe_filename = os.join_path(tfolder, 'delayed_output.exe')
 const delayed_output_source_filename = os.join_path(tfolder, 'delayed_output.v')
+const utf16le_output_exe_filename = os.join_path(tfolder, 'utf16le_output.exe')
+const utf16le_output_source_filename = os.join_path(tfolder, 'utf16le_output.v')
 const echo_process_source_code = '
 module main
 import io
@@ -38,6 +40,17 @@ fn main() {
 }
 '
 
+const utf16le_output_source_code = '
+module main
+import os
+
+fn main() {
+	payload := [u8(`O`), 0, `K`, 0, u8(10), 0]
+	mut out := os.stdout()
+	out.write(payload) or { panic(err) }
+}
+'
+
 const echo_wait_timeout = 5 // seconds
 
 fn testsuite_begin() {
@@ -61,6 +74,10 @@ fn testsuite_begin() {
 	os.write_file(delayed_output_source_filename, delayed_output_source_code)!
 	os.system('${os.quoted_path(vexe)} -o ${os.quoted_path(delayed_output_exe_filename)} ${os.quoted_path(delayed_output_source_filename)}')
 	assert os.exists(delayed_output_exe_filename)
+
+	os.write_file(utf16le_output_source_filename, utf16le_output_source_code)!
+	os.system('${os.quoted_path(vexe)} -o ${os.quoted_path(utf16le_output_exe_filename)} ${os.quoted_path(utf16le_output_source_filename)}')
+	assert os.exists(utf16le_output_exe_filename)
 }
 
 fn testsuite_end() {
@@ -120,6 +137,37 @@ fn test_set_environment() {
 		eprintln('p output: "${output}"')
 	}
 	assert output.contains('V_OS_TEST_PORT=1234567890'), output
+}
+
+fn test_new_process_uses_exact_executable_path_when_folder_contains_spaces() {
+	$if !windows {
+		return
+	}
+	eprintln(@FN)
+	spaced_dir := os.join_path(tfolder, 'spawn path with spaces')
+	os.rmdir_all(spaced_dir) or {}
+	os.mkdir_all(spaced_dir)!
+	spaced_exe := os.join_path(spaced_dir, 'test os process.exe')
+	os.cp(test_os_process, spaced_exe)!
+
+	stale_source := os.join_path(tfolder, 'spawn.v')
+	stale_exe := os.join_path(tfolder, 'spawn.exe')
+	os.write_file(stale_source, 'fn main() {\n\tprintln("stale-prefix-exe")\n}\n')!
+	assert os.system('${os.quoted_path(vexe)} -o ${os.quoted_path(stale_exe)} ${os.quoted_path(stale_source)}') == 0
+
+	mut p := os.new_process(spaced_exe)
+	p.set_args(['-show_env', '-target', 'stdout'])
+	p.set_environment({
+		'V_OS_TEST_PORT': 'exact_path'
+	})
+	p.set_redirect_stdio()
+	p.wait()
+	assert p.code == 0
+	output := p.stdout_slurp().trim_space()
+	errors := p.stderr_slurp().trim_space()
+	p.close()
+	assert output.contains('V_OS_TEST_PORT=exact_path'), 'stdout:\n${output}\nstderr:\n${errors}'
+	assert !output.contains('stale-prefix-exe'), output
 }
 
 fn test_run() {
@@ -288,4 +336,19 @@ fn test_pipe_read_returns_none_after_eof() {
 		assert false, 'expected none after stderr EOF, got `${err}`'
 	}
 	p.close()
+}
+
+fn test_slurping_utf16le_output_on_windows() {
+	if os.user_os() != 'windows' {
+		return
+	}
+	mut p := os.new_process(utf16le_output_exe_filename)
+	p.set_redirect_stdio()
+	p.wait()
+	assert p.code == 0
+	output := p.stdout_slurp()
+	errors := p.stderr_slurp()
+	p.close()
+	assert output == 'OK\n', output
+	assert errors == ''
 }

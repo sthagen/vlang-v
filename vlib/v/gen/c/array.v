@@ -1887,9 +1887,7 @@ fn (mut g Gen) gen_array_wait(node ast.CallExpr) {
 	thread_type := arr.array_info().elem_type
 	thread_sym := g.table.sym(thread_type)
 	thread_ret_type := thread_sym.thread_info().return_type
-	unwrapped_ret_type := g.unwrap_generic(thread_ret_type)
-	elsymcname := g.table.sym(unwrapped_ret_type).cname
-	fn_name := g.register_thread_array_wait_call(elsymcname)
+	fn_name := g.register_thread_array_wait_call(g.unwrap_generic(thread_ret_type))
 	g.write('${fn_name}(')
 	if g.array_receiver_is_indirect(node.left, resolved_left_type) {
 		g.write('*')
@@ -1903,9 +1901,7 @@ fn (mut g Gen) gen_fixed_array_wait(node ast.CallExpr) {
 	thread_type := arr.array_fixed_info().elem_type
 	thread_sym := g.table.sym(thread_type)
 	thread_ret_type := thread_sym.thread_info().return_type
-	unwrapped_ret_type := g.unwrap_generic(thread_ret_type)
-	elsymcname := g.table.sym(unwrapped_ret_type).cname
-	fn_name := g.register_thread_fixed_array_wait_call(node, elsymcname)
+	fn_name := g.register_thread_fixed_array_wait_call(node, g.unwrap_generic(thread_ret_type))
 	g.write('${fn_name}(')
 	g.expr(node.left)
 	g.write(')')
@@ -2323,11 +2319,7 @@ fn (mut g Gen) fixed_array_update_expr_field(expr_str string, field_type ast.Typ
 		} else {
 			g.write(expr_str)
 			if !expr_str.ends_with(']') {
-				if field_type.is_ptr() {
-					g.write('->')
-				} else {
-					g.write('.')
-				}
+				g.write(g.dot_or_ptr(field_type))
 				if is_update_embed {
 					g.write(embed_field)
 				}

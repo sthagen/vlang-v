@@ -52,6 +52,18 @@ fn test_cross_compile_keeps_explicit_cc() {
 	assert second.ccompiler == custom_cc
 }
 
+fn test_disable_explicit_mutability_flag() {
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	prefs, _ := pref.parse_args_and_show_errors([], ['-disable-explicit-mutability', target], false)
+	assert prefs.disable_explicit_mutability
+	assert prefs.build_options.contains('-disable-explicit-mutability')
+
+	prefs2, _ := pref.parse_args_and_show_errors([], ['--disable-explicit-mutability', target],
+		false)
+	assert prefs2.disable_explicit_mutability
+	assert prefs2.build_options.contains('--disable-explicit-mutability')
+}
+
 fn new_wasm_preferences() pref.Preferences {
 	return pref.Preferences{
 		backend: .wasm
@@ -196,6 +208,24 @@ fn test_unknown_option_flags_with_run() {
 	assert res_run_no_o.exit_code == 0, res_run_no_o.output
 	assert res_run_no_o.output.trim_space() == 'Hello, World!'
 	assert !os.exists(tfile)
+}
+
+fn test_missing_explicit_ccompiler_reports_error() {
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	missing_cc := 'missing_compiler_17126_for_pref_test'
+	output := os.join_path(os.vtmp_dir(), 'missing_explicit_ccompiler_output')
+	mut expected_output := output
+	$if windows {
+		expected_output += '.exe'
+	}
+	os.rm(expected_output) or {}
+	res :=
+		os.execute('${os.quoted_path(@VEXE)} -cc ${missing_cc} -o ${os.quoted_path(output)} ${os.quoted_path(target)}')
+	assert res.exit_code != 0
+	assert res.output.contains(missing_cc), res.output
+	assert res.output.to_lower().contains('not found') || res.output.to_lower().contains('missing'), res.output
+
+	assert !os.exists(expected_output)
 }
 
 fn test_generate_c_project_flag_parsing() {

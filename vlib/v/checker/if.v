@@ -447,7 +447,7 @@ fn (mut c Checker) if_expr(mut node ast.IfExpr) ast.Type {
 						if node.typ == ast.void_type {
 							// first branch of if expression
 							node.is_expr = true
-							if stmt.expr.is_auto_deref_var() {
+							if stmt.expr.is_auto_deref_var() && stmt.typ.is_ptr() {
 								node.typ = stmt.typ.deref()
 							} else {
 								node.typ = stmt.typ
@@ -747,7 +747,7 @@ fn (mut c Checker) smartcast_if_conds(mut node ast.Expr, mut scope ast.Scope, co
 						if mut node.left is ast.Ident
 							&& (left_sym.kind == .interface && right_sym.kind != .interface) {
 							v := scope.find_var(node.left.name) or { &ast.Var{} }
-							if v.is_mut && !node.left.is_mut {
+							if v.is_mut && !node.left.is_mut && !c.implicit_mutability_enabled() {
 								c.error('smart casting a mutable interface value requires `if mut ${node.left.name} is ...`',
 									node.left.pos)
 							}

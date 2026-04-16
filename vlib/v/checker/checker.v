@@ -149,16 +149,18 @@ mut:
 	is_js_backend                    bool
 	// doing_line_info                  int    // a quick single file run when called with v -line-info (contains line nr to inspect)
 	// doing_line_path                  string // same, but stores the path being parsed
-	is_index_assign        bool
-	comptime_call_pos      int                      // needed for correctly checking use before decl for templates
-	generic_call_positions map[string]token.Pos     // map from generic function key to call position
-	goto_labels            map[string]ast.GotoLabel // to check for unused goto labels
-	enum_data_type         ast.Type
-	field_data_type        ast.Type
-	variant_data_type      ast.Type
-	fn_return_type         ast.Type
-	orm_table_fields       map[string][]ast.StructField // known table structs
-	short_module_names     []string                     // to check for function names colliding with module functions
+	is_index_assign                    bool
+	comptime_call_pos                  int                      // needed for correctly checking use before decl for templates
+	generic_call_positions             map[string]token.Pos     // map from generic function key to call position
+	goto_labels                        map[string]ast.GotoLabel // to check for unused goto labels
+	enum_data_type                     ast.Type
+	field_data_type                    ast.Type
+	variant_data_type                  ast.Type
+	fn_return_type                     ast.Type
+	orm_table_fields                   map[string][]ast.StructField // known table structs
+	short_module_names                 []string                     // to check for function names colliding with module functions
+	visible_param_mutation_cache       map[string]bool
+	visible_param_mutation_in_progress map[string]bool
 
 	v_current_commit_hash string // same as old C.V_CURRENT_COMMIT_HASH
 	assign_stmt_attr      string // for `x := [1,2,3] @[freed]`
@@ -181,15 +183,17 @@ pub fn new_checker(table &ast.Table, pref_ &pref.Preferences) &Checker {
 		vcurrent_hash()
 	}
 	mut checker := &Checker{
-		table:                         table
-		pref:                          pref_
-		timers:                        util.new_timers(
+		table:                              table
+		pref:                               pref_
+		timers:                             util.new_timers(
 			should_print: timers_should_print
 			label:        'checker'
 		)
-		match_exhaustive_cutoff_limit: pref_.checker_match_exhaustive_cutoff_limit
-		v_current_commit_hash:         v_current_commit_hash
-		checker_transformer:           transformer.new_transformer_with_table(table, pref_)
+		match_exhaustive_cutoff_limit:      pref_.checker_match_exhaustive_cutoff_limit
+		v_current_commit_hash:              v_current_commit_hash
+		checker_transformer:                transformer.new_transformer_with_table(table, pref_)
+		visible_param_mutation_cache:       map[string]bool{}
+		visible_param_mutation_in_progress: map[string]bool{}
 	}
 	checker.checker_transformer.skip_array_transform = true
 	checker.type_resolver = type_resolver.TypeResolver.new(table, checker)
@@ -1409,6 +1413,109 @@ fn (mut c Checker) expr_is_mutable_alias_of_immutable_source(expr ast.Expr) bool
 	}
 }
 
+fn (mut c Checker) call_arg_expr_for_param(node ast.CallExpr, func ast.Fn, param_name string) ast.Expr {
+	mut arg_idx := 0
+	for i, param in func.params {
+		if func.is_method && i == 0 {
+			continue
+		}
+		if arg_idx >= node.args.len {
+			break
+		}
+		if param.name == param_name {
+			return node.args[arg_idx].expr
+		}
+		arg_idx++
+	}
+	return ast.empty_expr
+}
+
+fn (mut c Checker) return_expr_immutable_alias_source(expr ast.Expr, func ast.Fn, call ast.CallExpr, allow_non_ptr bool) ast.Expr {
+	match expr {
+		ast.CastExpr {
+			return c.return_expr_immutable_alias_source(expr.expr, func, call, allow_non_ptr)
+		}
+		ast.Ident {
+			if expr.obj is ast.Var && expr.obj.is_arg {
+				arg_expr := c.call_arg_expr_for_param(call, func, expr.name)
+				if arg_expr !is ast.EmptyExpr && (allow_non_ptr || expr.obj.typ.is_ptr())
+					&& c.expr_is_immutable_source(arg_expr) {
+					return arg_expr
+				}
+			}
+			if expr.obj is ast.Var && (allow_non_ptr || expr.obj.typ.is_ptr()) {
+				return c.return_expr_immutable_alias_source(expr.obj.expr, func, call, false)
+			}
+			return ast.empty_expr
+		}
+		ast.ParExpr {
+			return c.return_expr_immutable_alias_source(expr.expr, func, call, allow_non_ptr)
+		}
+		ast.PrefixExpr {
+			if expr.op == .amp {
+				return c.return_expr_immutable_alias_source(expr.right, func, call, true)
+			}
+			return ast.empty_expr
+		}
+		ast.UnsafeExpr {
+			return c.return_expr_immutable_alias_source(expr.expr, func, call, allow_non_ptr)
+		}
+		else {
+			return ast.empty_expr
+		}
+	}
+}
+
+fn (mut c Checker) node_immutable_alias_source(node ast.Node, func ast.Fn, call ast.CallExpr) ast.Expr {
+	match node {
+		ast.Expr {
+			if node is ast.AnonFn {
+				return ast.empty_expr
+			}
+		}
+		ast.Stmt {
+			if node is ast.FnDecl {
+				return ast.empty_expr
+			}
+			if node is ast.Return {
+				for expr in node.exprs {
+					source := c.return_expr_immutable_alias_source(expr, func, call, false)
+					if source !is ast.EmptyExpr {
+						return source
+					}
+				}
+				return ast.empty_expr
+			}
+		}
+		else {}
+	}
+	for child in node.children() {
+		source := c.node_immutable_alias_source(child, func, call)
+		if source !is ast.EmptyExpr {
+			return source
+		}
+	}
+	return ast.empty_expr
+}
+
+fn (mut c Checker) call_expr_immutable_alias_source(node ast.CallExpr) ast.Expr {
+	if !node.return_type.is_ptr() {
+		return ast.empty_expr
+	}
+	func := c.get_fn_from_call_expr(node) or { return ast.empty_expr }
+	if func.source_fn == unsafe { nil } {
+		return ast.empty_expr
+	}
+	fn_decl := unsafe { &ast.FnDecl(func.source_fn) }
+	for stmt in fn_decl.stmts {
+		source := c.node_immutable_alias_source(stmt, func, node)
+		if source !is ast.EmptyExpr {
+			return source
+		}
+	}
+	return ast.empty_expr
+}
+
 // fail_if_immutable_to_mutable checks if there is a immutable reference on right-side of assignment for mutable var
 fn (mut c Checker) fail_if_immutable_to_mutable(left_type ast.Type, right_type ast.Type, right ast.Expr) bool {
 	if c.inside_unsafe || c.pref.translated || c.file.is_translated {
@@ -1426,6 +1533,18 @@ fn (mut c Checker) fail_if_immutable_to_mutable(left_type ast.Type, right_type a
 					mut expr := right.expr
 					c.fail_if_immutable(mut expr)
 				}
+			}
+		}
+		ast.CallExpr {
+			source := c.call_expr_immutable_alias_source(right)
+			if source !is ast.EmptyExpr {
+				if source is ast.Ident && c.expr_is_immutable_source(source) {
+					c.note('`${source.name}` is immutable, cannot have a mutable reference to an immutable object',
+						source.pos)
+				} else {
+					c.note('call result aliases mutable data from an immutable value', right.pos)
+				}
+				return false
 			}
 		}
 		ast.Ident {
@@ -1570,8 +1689,23 @@ fn (mut c Checker) fail_if_immutable(mut expr ast.Expr) (string, token.Pos) {
 				else {}
 			}
 			if elem_type.has_flag(.shared_f) {
-				c.error('you have to create a handle and `lock` it to modify `shared` ${kind} element',
-					expr.left.pos().extend(expr.pos))
+				expr_name := ast.Expr(expr).str()
+				if expr_name !in c.locked_names {
+					if c.locked_names.len > 0 || c.rlocked_names.len > 0 {
+						if expr_name in c.rlocked_names {
+							c.error('${expr_name} has an `rlock` but needs a `lock`',
+								expr.left.pos().extend(expr.pos))
+						} else {
+							c.error('${expr_name} must be added to the `lock` list above',
+								expr.left.pos().extend(expr.pos))
+						}
+					} else {
+						c.error('you have to create a handle and `lock` it to modify `shared` ${kind} element',
+							expr.left.pos().extend(expr.pos))
+					}
+					return '', expr.pos
+				}
+				return '', expr.pos
 			}
 			to_lock, pos = c.fail_if_immutable(mut expr.left)
 		}
@@ -1950,8 +2084,8 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 
 		// Verify methods
 		for imethod in imethods {
-			mut method := c.table.find_method_with_embeds(typ_sym, imethod.name) or {
-				typ_sym.find_method_with_generic_parent(imethod.name) or {
+			mut method := typ_sym.find_method_with_generic_parent(imethod.name) or {
+				c.table.find_method_with_embeds(typ_sym, imethod.name) or {
 					// `str() string` is auto-generated for all types during cgen
 					if imethod.name == 'str' && imethod.params.len == 1
 						&& imethod.return_type == ast.string_type {
@@ -1990,6 +2124,28 @@ fn (mut c Checker) type_implements(typ ast.Type, interface_type ast.Type, pos to
 							}
 							else {}
 						}
+					}
+				}
+				ast.GenericInst {
+					parent_sym := c.table.sym(ast.new_type(typ_sym.info.parent_idx))
+					match parent_sym.info {
+						ast.Struct, ast.Interface, ast.SumType {
+							generic_names := parent_sym.info.generic_types.map(c.table.sym(it).name)
+							if rt := c.table.convert_generic_type(method.return_type,
+								generic_names, typ_sym.info.concrete_types)
+							{
+								method.return_type = rt
+							}
+							method.params = method.params.clone()
+							for mut param in method.params {
+								if pt := c.table.convert_generic_type(param.typ, generic_names,
+									typ_sym.info.concrete_types)
+								{
+									param.typ = pt
+								}
+							}
+						}
+						else {}
 					}
 				}
 				else {}
@@ -2149,7 +2305,11 @@ fn (mut c Checker) check_expr_option_or_result_call(expr ast.Expr, ret_type ast.
 					c.check_or_expr(expr.or_block, ret_type, expr_ret_type, expr)
 					c.cur_or_expr = last_cur_or_expr
 				}
-				return ret_type.clear_flag(.result)
+				return if expr.or_block.kind == .absent {
+					ret_type.clear_flag(.result)
+				} else {
+					ret_type.clear_flag(.option).clear_flag(.result)
+				}
 			} else {
 				c.expr_or_block_err(expr.or_block.kind, expr.name, expr.or_block.pos, false)
 			}
@@ -2179,7 +2339,11 @@ fn (mut c Checker) check_expr_option_or_result_call(expr ast.Expr, ret_type ast.
 							c.cur_or_expr = last_cur_or_expr
 						}
 					}
-					return ret_type.clear_flag(.result)
+					return if expr.or_block.kind == .absent {
+						ret_type.clear_flag(.result)
+					} else {
+						ret_type.clear_flag(.option).clear_flag(.result)
+					}
 				} else {
 					c.expr_or_block_err(expr.or_block.kind, expr.field_name, expr.or_block.pos,
 						true)
@@ -2341,10 +2505,8 @@ fn (mut c Checker) check_or_expr(node ast.OrExpr, ret_type ast.Type, expr_return
 	}
 	mut valid_stmts := node.stmts.filter(it !is ast.SemicolonStmt)
 	mut last_stmt := if valid_stmts.len > 0 { valid_stmts.last() } else { node.stmts.last() }
-	allow_none_as_option_value := ret_type.has_flag(.option)
-		&& (expr is ast.IndexExpr || expr is ast.CallExpr)
-	default_or_type := if ret_type.has_flag(.option)
-		&& (expr is ast.IndexExpr || expr is ast.CallExpr) {
+	allow_none_as_option_value := expr is ast.IndexExpr && ret_type.has_flag(.option)
+	default_or_type := if expr is ast.IndexExpr && ret_type.has_flag(.option) {
 		ret_type
 	} else {
 		expr_return_type.clear_option_and_result()
@@ -2375,7 +2537,8 @@ fn (mut c Checker) check_or_last_stmt(mut stmt ast.Stmt, ret_type ast.Type, defa
 				if last_stmt_typ.has_flag(.option) || last_stmt_typ == ast.none_type {
 					if stmt.expr in [ast.Ident, ast.SelectorExpr, ast.CallExpr, ast.None, ast.CastExpr]
 						&& !(last_stmt_typ == ast.none_type && allow_none_as_option_value
-						&& default_or_type.has_flag(.option)) {
+						&& default_or_type.has_flag(.option)) && !(last_stmt_typ == ast.none_type
+						&& c.inside_return && ret_type.has_flag(.option)) {
 						expected_type_name := c.table.type_to_str(default_or_type)
 						got_type_name := c.table.type_to_str(last_stmt_typ)
 						c.error('`or` block must provide a value of type `${expected_type_name}`, not `${got_type_name}`',
@@ -2752,11 +2915,7 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 			return field.typ
 		}
 		unwrapped_sym := c.table.sym(c.unwrap_generic(typ))
-		type_has_module_visibility := final_sym.kind in [.struct, .interface, .sum_type, .aggregate]
-		type_is_private := type_has_module_visibility && !sym.is_pub && sym.mod != 'builtin'
-			&& node.from_embed_types.len == 0 && !typ.has_flag(.generic)
-			&& !c.comptime.inside_comptime_if
-		if is_used_outside && (!field.is_pub || type_is_private) && sym.language != .c {
+		if is_used_outside && !field.is_pub && sym.language != .c {
 			c.error('field `${unwrapped_sym.name}.${field_name}` is not public', node.pos)
 		}
 		field_type := c.resolve_selector_field_type(typ, field_name, field)
@@ -2770,10 +2929,12 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 				if scope_field != unsafe { nil } {
 					sf_smartcast_type := c.exposed_smartcast_type(scope_field.orig_type,
 						scope_field.smartcasts.last(), scope_field.is_mut)
-					if c.inside_sql {
+					if c.inside_sql && node.or_block.kind == .absent {
 						node.typ = sf_smartcast_type
 					}
-					return sf_smartcast_type
+					if node.or_block.kind == .absent {
+						return sf_smartcast_type
+					}
 				}
 			}
 		}
@@ -2857,7 +3018,7 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 			return node.typ
 		}
 		if final_sym.kind == .struct {
-			if c.smartcast_mut_pos != token.Pos{} {
+			if c.smartcast_mut_pos != token.Pos{} && !c.implicit_mutability_enabled() {
 				c.note('smartcasting requires either an immutable value, or an explicit mut keyword before the value',
 					c.smartcast_mut_pos)
 			}
@@ -2866,7 +3027,7 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 			c.error(suggestion.say(unknown_field_msg), node.pos)
 			return ast.void_type
 		}
-		if c.smartcast_mut_pos != token.Pos{} {
+		if c.smartcast_mut_pos != token.Pos{} && !c.implicit_mutability_enabled() {
 			c.note('smartcasting requires either an immutable value, or an explicit mut keyword before the value',
 				c.smartcast_mut_pos)
 		}
@@ -3734,6 +3895,11 @@ fn (mut c Checker) asm_stmt(mut stmt ast.AsmStmt) {
 				'string', 'asciz', 'ascii'] { // all tcc-supported assembler directives
 				c.error('unknown assembler directive: `${template.name}`', template.pos)
 			}
+		} else if expected_operands := asm_expected_operand_count(stmt.arch, template.name) {
+			if template.args.len != expected_operands {
+				c.error('asm instruction `${template.name}` expects ${expected_operands} operands, but got ${template.args.len}',
+					template.pos)
+			}
 		}
 		for mut arg in template.args {
 			c.asm_arg(arg, stmt, aliases)
@@ -3741,6 +3907,16 @@ fn (mut c Checker) asm_stmt(mut stmt ast.AsmStmt) {
 	}
 	for mut clob in stmt.clobbered {
 		c.asm_arg(clob.reg, stmt, aliases)
+	}
+}
+
+fn asm_expected_operand_count(arch pref.Arch, name string) ?int {
+	if arch !in [.amd64, .i386] {
+		return none
+	}
+	return match name {
+		'mov' { 2 }
+		else { none }
 	}
 }
 
@@ -3896,9 +4072,10 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 			}
 		}
 		'pkgconfig' {
-			if c.pref.output_cross_c {
-				// do not add any flags, since we do not know what the target platform is for the cross platform builds
-				// and it is better to be as conservative as possible
+			if c.pref.output_cross_c || c.pref.os != pref.get_host_os() {
+				// Do not add host pkg-config flags to cross-target builds.
+				// They frequently inject include/library paths for the host OS
+				// (for example Linux OpenSSL headers when targeting Windows).
 				return
 			}
 			args := if node.main.contains('--') {
@@ -6091,6 +6268,12 @@ fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 		if x := c.table.global_scope.find_const(node.name) {
 			return x.typ
 		}
+		c_name := node.name.all_after('C.')
+		if !c.pref.translated && !c.file.is_translated && c_name.len > 0 && c_name[0] >= `a`
+			&& c_name[0] <= `z` && c_name !in c.table.export_names.values() {
+			c.error('undefined C identifier: `${node.name}`', node.pos)
+			return ast.int_type
+		}
 		return ast.int_type
 	}
 	if c.inside_sql {
@@ -6409,9 +6592,9 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 			if field != unsafe { nil } {
 				smartcasts << field.smartcasts
 			}
-			// smartcast either if the value is immutable or if the mut argument is explicitly given
-			if !is_mut || expr.is_mut || is_option_unwrap || orig_type.has_flag(.option)
-				|| allow_mut_selector_smartcast {
+			// smartcast either if the value is immutable or if mutability is allowed here
+			if !is_mut || expr.is_mut || c.implicit_mutability_enabled() || is_option_unwrap
+				|| orig_type.has_flag(.option) || allow_mut_selector_smartcast {
 				sc_type := if scope_smartcast_type != ast.no_type {
 					scope_smartcast_type
 				} else {
@@ -6438,12 +6621,15 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 			mut orig_type := 0
 			mut is_inherited := false
 			mut is_auto_heap := false
+			mut is_auto_deref := false
 			mut ct_type_var := ast.ComptimeVarKind.no_comptime
 			mut is_ct_type_unwrapped := false
 			if mut expr.obj is ast.Var {
 				is_ct_type_unwrapped = expr.obj.ct_type_var != ast.ComptimeVarKind.no_comptime
 				is_mut = expr.obj.is_mut
 				is_auto_heap = expr.obj.is_auto_heap
+				is_auto_deref = expr.obj.is_auto_deref && c.table.cur_fn != unsafe { nil }
+					&& c.table.cur_fn.is_method && c.table.cur_fn.receiver.name == expr.name
 				smartcasts << expr.obj.smartcasts
 				is_already_casted = expr.obj.pos.pos == expr.pos.pos
 				if orig_type == 0 {
@@ -6458,8 +6644,9 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 					.no_comptime
 				}
 			}
-			// smartcast either if the value is immutable or if the mut argument is explicitly given
-			if (!is_mut || expr.is_mut || is_option_unwrap) && !is_already_casted {
+			// smartcast either if the value is immutable or if mutability is allowed here
+			if (!is_mut || expr.is_mut || c.implicit_mutability_enabled()
+				|| is_option_unwrap) && !is_already_casted {
 				sc_type := if scope_smartcast_type != ast.no_type {
 					scope_smartcast_type
 				} else {
@@ -6476,6 +6663,7 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 									pos:               expr.pos
 									is_used:           true
 									is_mut:            expr.is_mut
+									is_auto_deref:     is_auto_deref
 									is_inherited:      is_inherited
 									is_auto_heap:      is_auto_heap
 									smartcasts:        [to_type]
@@ -6499,6 +6687,7 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 					pos:               expr.pos
 					is_used:           true
 					is_mut:            expr.is_mut || is_mut
+					is_auto_deref:     is_auto_deref
 					is_inherited:      is_inherited
 					is_auto_heap:      is_auto_heap
 					is_unwrapped:      is_option_unwrap
@@ -6512,7 +6701,7 @@ fn (mut c Checker) smartcast(mut expr ast.Expr, cur_type ast.Type, to_type_ ast.
 				} else {
 					scope.register(new_var)
 				}
-			} else if is_mut && !expr.is_mut {
+			} else if is_mut && !expr.is_mut && !c.implicit_mutability_enabled() {
 				c.smartcast_mut_pos = expr.pos
 			}
 		}
@@ -6709,6 +6898,14 @@ fn (mut c Checker) lock_expr(mut node ast.LockExpr) ast.Type {
 		mut expr_ := node.lockeds[i]
 		e_typ := c.expr(mut expr_)
 		id_name := node.lockeds[i].str()
+		if expr_ is ast.IndexExpr && (expr_ as ast.IndexExpr).left_type != 0 {
+			index_expr := expr_ as ast.IndexExpr
+			left_sym := c.table.final_sym(c.unwrap_generic(index_expr.left_type))
+			if left_sym.kind !in [.array, .array_fixed] {
+				c.error('`${id_name}` cannot be locked - only indexed elements of arrays or fixed arrays are supported',
+					node.lockeds[i].pos())
+			}
+		}
 		if !e_typ.has_flag(.shared_f) {
 			obj_type := if node.lockeds[i] is ast.Ident { 'variable' } else { 'struct element' }
 			c.error('`${id_name}` must be declared as `shared` ${obj_type} to be locked',
@@ -7116,6 +7313,35 @@ fn (mut c Checker) check_index(typ_sym &ast.TypeSymbol, index ast.Expr, index_ty
 	}
 }
 
+fn (mut c Checker) check_map_key_type(got ast.Type, expected ast.Type) bool {
+	if c.map_key_pointer_mismatch(got, expected) {
+		return false
+	}
+	return c.check_types(got, expected)
+}
+
+fn (c &Checker) map_key_pointer_mismatch(got ast.Type, expected ast.Type) bool {
+	got_final_sym := c.table.final_sym(got)
+	expected_final_sym := c.table.final_sym(expected)
+	if got_final_sym.idx != expected_final_sym.idx {
+		return false
+	}
+	if got.is_any_kind_of_pointer() != expected.is_any_kind_of_pointer() {
+		return true
+	}
+	return got.is_ptr() && expected.is_ptr() && got.nr_muls() != expected.nr_muls()
+}
+
+fn (c &Checker) map_key_expected_msg(got ast.Type, expected ast.Type, key_expr ast.Expr,
+	container string) string {
+	mut msg := c.expected_msg(got, expected)
+	if container.len > 0 && c.map_key_pointer_mismatch(got, expected) && got.is_ptr()
+		&& !expected.is_any_kind_of_pointer() && got.nr_muls() == expected.nr_muls() + 1 {
+		msg += '; did you mean `${container}[*${key_expr}]`?'
+	}
+	return msg
+}
+
 fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 	mut typ := c.expr(mut node.left)
 	if typ == 0 {
@@ -7241,6 +7467,10 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 		}
 	} else { // [1]
 		if typ_sym.kind == .map {
+			if node.is_gated {
+				c.error('`#[]` negative indexing is only supported for arrays, fixed arrays, and strings',
+					node.pos)
+			}
 			info := typ_sym.info as ast.Map
 			old_expected_type := c.expected_type
 			c.expected_type = info.key_type
@@ -7252,8 +7482,8 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 				got_typ_str, expected_typ_str := c.get_string_names_of(actual_index_type, key_type)
 				c.error('invalid key: cannot use `${got_typ_str}` as `${expected_typ_str}`, it must be unwrapped first',
 					node.index.pos())
-			} else if !c.check_types(index_type, key_type) {
-				err := c.expected_msg(index_type, key_type)
+			} else if !c.check_map_key_type(index_type, key_type) {
+				err := c.map_key_expected_msg(index_type, key_type, node.index, '${node.left}')
 				c.error('invalid key: ${err}', node.pos)
 			}
 			value_sym := c.table.sym(info.value_type)
@@ -7263,11 +7493,12 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 			}
 		} else {
 			index_type := c.expr(mut node.index)
-			// for [1] case #[1] is not allowed!
-			if node.is_gated == true {
-				c.error('`#[]` allowed only for ranges', node.pos)
+			if node.is_gated && (typ.is_ptr() || typ.is_pointer()
+				|| typ_sym.kind !in [.array, .array_fixed, .string]) {
+				c.error('`#[]` negative indexing is only supported for arrays, fixed arrays, and strings',
+					node.pos)
 			}
-			c.check_index(typ_sym, node.index, index_type, node.pos, false, false)
+			c.check_index(typ_sym, node.index, index_type, node.pos, false, node.is_gated)
 		}
 		value_type := c.table.value_type(typ)
 		if value_type != ast.void_type {
@@ -7610,7 +7841,8 @@ fn (mut c Checker) ensure_generic_type_specify_type_names(typ ast.Type, pos toke
 		}
 		.interface {
 			info := sym.info as ast.Interface
-			if info.generic_types.len > 0 && !typ.has_flag(.generic) && info.concrete_types.len == 0 {
+			if info.generic_types.len > 0 && !typ.has_flag(.generic) && info.concrete_types.len == 0
+				&& !is_container_typ {
 				c.error('`${sym.name}` type is generic interface, must specify the generic type names, e.g. ${sym.name}[T], ${sym.name}[int]',
 					pos)
 				return false
@@ -7876,6 +8108,7 @@ fn (mut c Checker) ensure_supported_map_key_types_in_type(typ ast.Type, pos toke
 // return true if a violation of a shared variable access rule is detected
 fn (mut c Checker) fail_if_unreadable(expr ast.Expr, typ ast.Type, what string) bool {
 	mut pos := token.Pos{}
+	mut shared_expr_name := ''
 	match expr {
 		ast.Ident {
 			if typ.has_flag(.shared_f) {
@@ -7920,11 +8153,13 @@ fn (mut c Checker) fail_if_unreadable(expr ast.Expr, typ ast.Type, what string) 
 		}
 		ast.IndexExpr {
 			pos = expr.left.pos().extend(expr.pos)
+			shared_expr_name = ast.Expr(expr).str()
+			if typ.has_flag(.shared_f)
+				&& (shared_expr_name in c.rlocked_names || shared_expr_name in c.locked_names) {
+				return false
+			}
 			if c.fail_if_unreadable(expr.left, expr.left_type, what) {
 				return true
-			}
-			if typ.has_flag(.shared_f) && expr.left is ast.SelectorExpr {
-				return false
 			}
 		}
 		ast.InfixExpr {
@@ -7941,8 +8176,14 @@ fn (mut c Checker) fail_if_unreadable(expr ast.Expr, typ ast.Type, what string) 
 		}
 	}
 	if typ.has_flag(.shared_f) {
-		c.error('you have to create a handle and `rlock` it to use a `shared` element as non-mut ${what}',
-			pos)
+		if shared_expr_name != '' && (c.locked_names.len > 0 || c.rlocked_names.len > 0) {
+			action := if what == 'argument' { 'passed' } else { 'used' }
+			c.error('`${shared_expr_name}` is `shared` and must be `rlock`ed or `lock`ed to be ${action} as non-mut ${what}',
+				pos)
+		} else {
+			c.error('you have to create a handle and `rlock` it to use a `shared` element as non-mut ${what}',
+				pos)
+		}
 		return true
 	}
 	return false

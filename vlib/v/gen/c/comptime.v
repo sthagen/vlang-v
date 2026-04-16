@@ -31,6 +31,17 @@ fn (g &Gen) veb_context_html_arg() string {
 
 fn (mut g Gen) comptime_selector(node ast.ComptimeSelector) {
 	left_type := g.resolved_expr_type(node.left, node.left_type)
+	if node.is_method && g.comptime.comptime_for_method != unsafe { nil } {
+		g.selector_expr(ast.SelectorExpr{
+			pos:                 node.pos
+			expr:                node.left
+			expr_type:           left_type
+			typ:                 g.type_resolver.get_type(node)
+			field_name:          g.comptime.comptime_for_method.name
+			has_hidden_receiver: true
+		})
+		return
+	}
 	is_interface_field := g.table.sym(left_type).kind == .interface
 	if is_interface_field {
 		g.write('*(')
@@ -260,6 +271,10 @@ fn (mut g Gen) comptime_call(mut node ast.ComptimeCall) {
 				if m.params[0].typ.is_ptr() && !node.left.obj.typ.is_ptr()
 					&& !node.left.obj.is_auto_deref {
 					g.write('&')
+				} else if !m.params[0].typ.is_ptr() && node.left.obj.typ.is_ptr() {
+					g.write('*'.repeat(node.left.obj.typ.nr_muls()))
+				} else if !m.params[0].typ.is_ptr() && node.left.obj.is_auto_deref {
+					g.write('*')
 				}
 			}
 		}
@@ -365,6 +380,16 @@ fn cgen_attrs(attrs []ast.Attr) []string {
 			s += ': ${arg}'
 		}
 		res << '_S("${cescape_nonascii(util.smart_quote(s, false))}")'
+	}
+	return res
+}
+
+fn cgen_vattrs(attrs []ast.Attr) []string {
+	mut res := []string{cap: attrs.len}
+	for attr in attrs {
+		name := cescape_nonascii(util.smart_quote(attr.name, false))
+		arg := cescape_nonascii(util.smart_quote(attr.arg, false))
+		res << '((VAttribute){.name=_S("${name}"),.has_arg=${attr.has_arg},.arg=_S("${arg}"),.kind=AttributeKind__${attr.kind}})'
 	}
 	return res
 }
@@ -928,11 +953,16 @@ fn (mut g Gen) comptime_for(node ast.ComptimeFor) {
 			g.writeln('\t${node.val_var}.location = _S("${mlocation}:${method.name_pos.line_nr + 1}:${method.name_pos.col}");')
 			if method.attrs.len == 0 {
 				g.writeln('\t${node.val_var}.attrs = builtin____new_array_with_default(0, 0, sizeof(string), 0);')
+				g.writeln('\t${node.val_var}.attributes = builtin____new_array_with_default(0, 0, sizeof(VAttribute), 0);')
 			} else {
 				attrs := cgen_attrs(method.attrs)
+				vattrs := cgen_vattrs(method.attrs)
 				g.writeln(
 					'\t${node.val_var}.attrs = builtin__new_array_from_c_array(${attrs.len}, ${attrs.len}, sizeof(string), _MOV((string[${attrs.len}]){' +
 					attrs.join(', ') + '}));\n')
+				g.writeln(
+					'\t${node.val_var}.attributes = builtin__new_array_from_c_array(${vattrs.len}, ${vattrs.len}, sizeof(VAttribute), _MOV((VAttribute[${vattrs.len}]){' +
+					vattrs.join(', ') + '}));\n')
 			}
 			if method.params.len < 2 {
 				// 0 or 1 (the receiver) args

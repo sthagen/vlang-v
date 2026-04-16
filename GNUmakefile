@@ -106,7 +106,9 @@ endif
 endif
 endif
 
-.PHONY: all clean rebuild check fresh_vc fresh_tcc fresh_legacy check_for_working_tcc etags ctags
+TCCBUILDSCRIPT = $(VROOT)/thirdparty/build_scripts/thirdparty-$(TCCOS)-$(TCCARCH)_tcc.sh
+
+.PHONY: all clean rebuild check fresh_vc fresh_tcc fresh_legacy latest_tcc_source check_for_working_tcc etags ctags
 
 ifdef prod
 VFLAGS+=-prod
@@ -119,7 +121,19 @@ ifeq ($(TCCARCH),arm)
 BOOTSTRAP_LDFLAGS := $(strip $(BOOTSTRAP_LDFLAGS) -latomic)
 endif
 endif
-BOOTSTRAP_VFLAGS := $(if $(strip $(CFLAGS)),-cflags "$(CFLAGS)") $(if $(strip $(BOOTSTRAP_LDFLAGS)),-ldflags "$(BOOTSTRAP_LDFLAGS)")
+BOOTSTRAP_CCOMPILER_VFLAG :=
+ifeq ($(LINUX),1)
+ifneq ($(filter $(TCCARCH),arm64 aarch64),)
+ifeq ($(filter -cc,$(VFLAGS)),)
+ifeq ($(findstring -cc=,$(VFLAGS)),)
+	# Bundled TCC can hang when bootstrapping V on Linux ARM64, so use the
+	# same system compiler as the initial `v1` build unless the user overrode it.
+	BOOTSTRAP_CCOMPILER_VFLAG := -cc "$(CC)"
+endif
+endif
+endif
+endif
+BOOTSTRAP_VFLAGS := $(BOOTSTRAP_CCOMPILER_VFLAG) $(if $(strip $(CFLAGS)),-cflags "$(CFLAGS)") $(if $(strip $(BOOTSTRAP_LDFLAGS)),-ldflags "$(BOOTSTRAP_LDFLAGS)")
 
 all: latest_vc latest_tcc latest_legacy
 ifdef WIN32
@@ -200,6 +214,23 @@ else
 latest_tcc:
 	@echo "Using local tcc"
 	@$(MAKE) --quiet check_for_working_tcc 2> /dev/null
+endif
+
+# Rebuild the bundled TCC in-place from upstream tinycc, while preserving the
+# V-specific libgc/openlibm files already stored in $(TMPTCC).
+latest_tcc_source: $(TMPTCC)/.git/config
+ifeq ($(HAS_GIT),1)
+ifneq (,$(wildcard $(TCCBUILDSCRIPT)))
+	@TCC_FOLDER='$(TMPTCC)' $(if $(strip $(TCC_COMMIT)),TCC_COMMIT='$(TCC_COMMIT)') CC='$(CC)' bash '$(TCCBUILDSCRIPT)'
+	@$(MAKE) --quiet check_for_working_tcc 2> /dev/null
+else
+	@echo 'No upstream TinyCC build script is available for thirdparty-$(TCCOS)-$(TCCARCH).'
+	@echo 'Use `make latest_tcc` to refresh the prebuilt bundle from $(TCCREPO).'
+	@exit 1
+endif
+else
+	@echo "git is required to bootstrap $(TMPTCC) before rebuilding it from source"
+	@exit 1
 endif
 
 fresh_tcc:
