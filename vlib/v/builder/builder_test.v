@@ -119,6 +119,67 @@ pub fn name() string {
 	assert run_v_ok('${os.quoted_path(vexe)} run ./src').trim_space() == 'somemoduletwo'
 }
 
+fn test_run_explicit_main_file_inside_src_resolves_nested_module_imports() {
+	os.chdir(test_path)!
+	project_dir := os.join_path(test_path, 'run_src_main_file_project')
+	os.mkdir_all(os.join_path(project_dir, 'src', 'infrastructure', 'database'))!
+	os.write_file(os.join_path(project_dir, 'src', 'infrastructure', 'database', 'database.v'), 'module database
+
+pub fn name() string {
+	return "database"
+}
+')!
+	os.write_file(os.join_path(project_dir, 'src', 'infrastructure', 'infrastructure.v'), 'module infrastructure
+')!
+	os.write_file(os.join_path(project_dir, 'src', 'main.v'), 'module main
+
+import infrastructure.database
+
+fn main() {
+	println(database.name())
+}
+')!
+
+	main_file := os.join_path('run_src_main_file_project', 'src', 'main.v')
+	assert run_v_ok('${os.quoted_path(vexe)} run ${os.quoted_path(main_file)}').trim_space() == 'database'
+}
+
+fn test_run_custom_base_url_uses_project_root_lookup() {
+	os.chdir(test_path)!
+	project_dir := os.join_path(test_path, 'run_base_url_project')
+	defer {
+		os.chdir(test_path) or {}
+	}
+	os.mkdir_all(os.join_path(project_dir, 'source', 'foo'))!
+	os.mkdir_all(os.join_path(project_dir, 'source', 'modules', 'dep'))!
+	os.write_file(os.join_path(project_dir, 'v.mod'),
+		"Module {\n\tname: 'run_base_url_project'\n\tbase_url: 'source'\n\tdescription: ''\n\tversion: ''\n\tlicense: ''\n\tdependencies: []\n}\n")!
+	os.write_file(os.join_path(project_dir, 'source', 'main.v'), 'module main
+import foo
+import dep
+
+fn main() {
+	println(foo.name() + "+" + dep.name())
+}
+')!
+	os.write_file(os.join_path(project_dir, 'source', 'foo', 'foo.v'), 'module foo
+
+pub fn name() string {
+	return "foo"
+}
+')!
+	os.write_file(os.join_path(project_dir, 'source', 'modules', 'dep', 'dep.v'), 'module dep
+
+pub fn name() string {
+	return "dep"
+}
+')!
+	os.chdir(project_dir)!
+	assert run_v_ok('${os.quoted_path(vexe)} run .').trim_space() == 'foo+dep'
+	assert run_v_ok('${os.quoted_path(vexe)} run source').trim_space() == 'foo+dep'
+	assert run_v_ok('${os.quoted_path(vexe)} run ./source').trim_space() == 'foo+dep'
+}
+
 fn test_thirdparty_object_build_with_multiline_cflags() {
 	mut env := os.environ()
 	existing_cflags := if 'CFLAGS' in env { env['CFLAGS'] } else { '' }
@@ -154,4 +215,44 @@ fn test_missing_library_is_reported_without_compiler_bug_hint() {
 	assert normalized_output.contains('C library `${lib_name}` was not found while linking the generated program.')
 	assert normalized_output.contains('Please install the corresponding development package/libraries')
 	assert !normalized_output.contains('This is a V compiler bug')
+}
+
+fn test_run_with_obscure_source_filenames() {
+	if os.user_os() == 'windows' {
+		return
+	}
+	obscure_dir := os.join_path(test_path, 'obscure_filenames')
+	os.rmdir_all(obscure_dir) or {}
+	os.mkdir_all(obscure_dir)!
+	source := "println('hi')\n"
+	for file_name in [
+		"quote's.v",
+		'"hi".v',
+		"'.v",
+		'".v',
+		'.v',
+		'..v',
+		'...v',
+		'-.v',
+		'.c.v',
+		'line\nfeed.v',
+	] {
+		src_file := os.join_path(obscure_dir, file_name)
+		os.write_file(src_file, source)!
+		display_name := file_name.replace('\n', '\\n')
+		res := os.execute('${os.quoted_path(vexe)} run ${os.quoted_path(src_file)}')
+		assert res.exit_code == 0, '${display_name}: ${res.output}'
+		assert res.output.trim_space() == 'hi', '${display_name}: ${res.output}'
+		assert os.read_file(src_file)! == source
+	}
+}
+
+fn test_macos_2048_build_does_not_force_deployment_target() {
+	$if !macos {
+		return
+	}
+	game_path := os.join_path(@VEXEROOT, 'examples', '2048', '2048.v')
+	flags_output := run_v_ok('${os.quoted_path(vexe)} -dump-c-flags - ${os.quoted_path(game_path)}')
+	assert flags_output.contains('-fobjc-arc')
+	assert !flags_output.contains('-mmacosx-version-min=')
 }

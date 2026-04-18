@@ -6,10 +6,85 @@ module c
 import v.ast
 import v.util
 
+struct IndexOperatorMethodInfo {
+	method        ast.Fn
+	name          string
+	receiver_type ast.Type
+}
+
+fn (mut g Gen) resolved_index_operator_receiver_type(receiver ast.Expr, receiver_type ast.Type) ast.Type {
+	mut resolved_type := g.recheck_concrete_type(g.resolved_expr_type(receiver, receiver_type))
+	if resolved_type == 0 {
+		resolved_type = receiver_type
+	}
+	if resolved_type == 0 || resolved_type.has_flag(.generic)
+		|| g.type_has_unresolved_generic_parts(resolved_type) {
+		resolved_type = g.resolved_expr_type(receiver, receiver_type)
+	}
+	if resolved_type == 0 {
+		resolved_type = receiver_type
+	}
+	return g.unwrap_generic(g.recheck_concrete_type(resolved_type))
+}
+
+fn (mut g Gen) index_operator_method_info(receiver ast.Expr, receiver_type ast.Type, op string) ?IndexOperatorMethodInfo {
+	resolved_receiver_type := g.resolved_index_operator_receiver_type(receiver, receiver_type)
+	recv :=
+		g.unwrap(if resolved_receiver_type != 0 { resolved_receiver_type } else { receiver_type })
+	mut method := ast.Fn{}
+	mut method_name := ''
+	if recv.sym.has_method(op) || recv.sym.has_method_with_generic_parent(op) {
+		method = recv.sym.find_method_with_generic_parent(op) or {
+			recv.sym.find_method(op) or { return none }
+		}
+		method_name = recv.sym.cname + '_' + util.replace_op(op)
+		if recv.sym.is_builtin() {
+			method_name = 'builtin__${method_name}'
+		}
+	} else if recv.unaliased_sym.has_method_with_generic_parent(op) {
+		method = recv.unaliased_sym.find_method_with_generic_parent(op) or { return none }
+		method_name = recv.unaliased_sym.cname + '_' + util.replace_op(op)
+		if recv.unaliased_sym.is_builtin() {
+			method_name = 'builtin__${method_name}'
+		}
+	} else {
+		return none
+	}
+	method_name = g.specialized_method_name_from_receiver(method, recv.typ, method_name)
+	return IndexOperatorMethodInfo{
+		method:        method
+		name:          method_name
+		receiver_type: recv.typ
+	}
+}
+
+fn (mut g Gen) index_operator_call(receiver ast.Expr, receiver_type ast.Type, index ast.Expr, index_type ast.Type, op string, value ast.Expr, value_type ast.Type) {
+	info := g.index_operator_method_info(receiver, receiver_type, op) or {
+		g.error('missing `${op}` overload for `${g.table.type_to_str(receiver_type)}`',
+			receiver.pos())
+		return
+	}
+	g.write(info.name)
+	g.write('(')
+	g.op_arg(receiver, info.method.params[0].typ, info.receiver_type)
+	g.write(', ')
+	g.op_arg(index, info.method.params[1].typ, index_type)
+	if op == '[]=' {
+		g.write(', ')
+		g.op_arg(value, info.method.params[2].typ, value_type)
+	}
+	g.write(')')
+}
+
 fn (mut g Gen) index_expr(node ast.IndexExpr) {
 	if node.index is ast.RangeExpr {
 		g.index_range_expr(node, node.index)
 	} else {
+		if node.is_index_operator {
+			g.index_operator_call(node.left, node.left_type, node.index, node.index_type, '[]',
+				ast.empty_expr, ast.void_type)
+			return
+		}
 		mut left_type := ast.Type(0)
 		if node.left is ast.Ident {
 			resolved_current_type := g.resolve_current_fn_generic_param_type(node.left.name)
@@ -256,6 +331,7 @@ fn (mut g Gen) index_of_array(node ast.IndexExpr, sym ast.TypeSymbol) {
 			elem_type
 		}
 	}
+
 	result_sym := g.table.final_sym(result_type)
 	elem_type_str := if elem_sym.kind == .function { 'voidptr' } else { g.styp(elem_type) }
 	result_type_str := if result_sym.kind == .function { 'voidptr' } else { g.styp(result_type) }
@@ -576,7 +652,6 @@ fn (mut g Gen) index_of_map(node ast.IndexExpr, sym ast.TypeSymbol) {
 			val_type = candidate_val_type
 		}
 	}
-	key_type_str := g.styp(key_type)
 	val_sym := g.table.final_sym(val_type)
 	left_is_shared := map_left_type.has_flag(.shared_f)
 	val_type_str := if val_sym.kind == .function {
@@ -615,15 +690,14 @@ fn (mut g Gen) index_of_map(node ast.IndexExpr, sym ast.TypeSymbol) {
 		if left_is_shared {
 			g.write('->val')
 		}
-		g.write(', &(${key_type_str}[]){')
+		g.write(', ')
 		old_is_arraymap_set := g.is_arraymap_set
 		old_is_assign_lhs := g.is_assign_lhs
 		g.is_arraymap_set = false
 		g.is_assign_lhs = false
-		g.expr(node.index)
+		g.write_map_key_arg(node.index, key_type)
 		g.is_arraymap_set = old_is_arraymap_set
 		g.is_assign_lhs = old_is_assign_lhs
-		g.write('}')
 		g.arraymap_set_pos = g.out.len
 		g.write(', &(${val_type_str}[]) { ')
 		if g.assign_op != .assign && val_type != ast.string_type {
@@ -646,12 +720,12 @@ fn (mut g Gen) index_of_map(node ast.IndexExpr, sym ast.TypeSymbol) {
 		if left_is_shared {
 			g.write('->val')
 		}
-		g.write(', &(${key_type_str}[]){')
+		g.write(', ')
 		old_is_assign_lhs := g.is_assign_lhs
 		g.is_assign_lhs = false
-		g.expr(node.index)
+		g.write_map_key_arg(node.index, key_type)
 		g.is_assign_lhs = old_is_assign_lhs
-		g.write('}, &(${val_type_str}[]){ ${zero} }))')
+		g.write(', &(${val_type_str}[]){ ${zero} }))')
 	} else {
 		zero := g.type_default(val_type)
 		is_gen_or_and_assign_rhs := gen_or && !g.discard_or_result
@@ -694,9 +768,8 @@ fn (mut g Gen) index_of_map(node ast.IndexExpr, sym ast.TypeSymbol) {
 				g.write('.val')
 			}
 		}
-		g.write('), &(${key_type_str}[]){')
-		g.expr(node.index)
-		g.write('}')
+		g.write('), ')
+		g.write_map_key_arg(node.index, key_type)
 		if gen_or {
 			g.write('))')
 		} else if is_fn_last_index_call {

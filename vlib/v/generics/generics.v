@@ -3,7 +3,6 @@ module generics
 // TODO do scopes need to be cloned?
 import v.pref
 import v.ast
-import arrays
 import strings
 
 // Stage for solving generics
@@ -69,8 +68,8 @@ pub fn (mut g Generics) stmts(mut nodes []ast.Stmt) []ast.Stmt {
 			}
 		}
 	}
-	for i in arrays.reverse_iterator(solved_indexes) {
-		nodes.delete(*i)
+	for idx := solved_indexes.len; idx > 0; idx-- {
+		nodes.delete(solved_indexes[idx - 1])
 	}
 	nodes << solved_generic_fns
 	return nodes
@@ -328,6 +327,7 @@ pub fn (mut g Generics) stmt(mut node ast.Stmt) ast.Stmt {
 		}
 		ast.TypeDecl {}
 	}
+
 	return node
 }
 
@@ -434,6 +434,7 @@ fn (mut g Generics) cc_type(typ ast.Type, is_prefix_struct bool) string {
 		}
 		else {}
 	}
+
 	if is_prefix_struct && sym.language == .c {
 		styp = styp[3..]
 		if sym.kind == .struct {
@@ -646,6 +647,7 @@ pub fn (mut g Generics) expr(mut node ast.Expr) ast.Expr {
 			if g.cur_concrete_types.len > 0 {
 				mut args := node.args.clone()
 				mut all_concrete_types := node.concrete_types.clone()
+				mut has_ct_args := false
 				for mut ct in all_concrete_types {
 					idx := g.cur_fn.generic_names.index(g.table.type_str(ct))
 					if idx != -1 {
@@ -658,6 +660,7 @@ pub fn (mut g Generics) expr(mut node ast.Expr) ast.Expr {
 						arg.ct_expr = false
 					}
 					arg.expr = g.expr(mut arg.expr)
+					has_ct_args = has_ct_args || arg.ct_expr
 					if mut arg.expr is ast.Ident {
 						// Solve concrete_types when the type of one argument was elem in `for elem in my_array` when my_array is T
 						forin_type := g.forin_types[arg.expr.name]
@@ -677,6 +680,8 @@ pub fn (mut g Generics) expr(mut node ast.Expr) ast.Expr {
 					receiver_type = receiver_type.clear_flag(.generic)
 				}
 				call_name := if node.is_fn_var {
+					node.name
+				} else if has_ct_args {
 					node.name
 				} else if node.is_method {
 					g.method_concrete_name(node.name, all_concrete_types, node.receiver_type)
@@ -701,8 +706,10 @@ pub fn (mut g Generics) expr(mut node ast.Expr) ast.Expr {
 				})
 			}
 			node.left = g.expr(mut node.left)
+			mut has_ct_args := false
 			for mut arg in node.args {
 				arg.expr = g.expr(mut arg.expr)
+				has_ct_args = has_ct_args || arg.ct_expr
 			}
 			node.or_block = g.expr(mut node.or_block) as ast.OrExpr
 			if node.is_method && g.table.sym(node.receiver_type).info is ast.Alias {
@@ -725,9 +732,17 @@ pub fn (mut g Generics) expr(mut node ast.Expr) ast.Expr {
 			}
 			if !node.is_fn_var {
 				node.name = if node.is_method {
-					g.method_concrete_name(node.name, node.concrete_types, node.receiver_type)
+					if has_ct_args {
+						node.name
+					} else {
+						g.method_concrete_name(node.name, node.concrete_types, node.receiver_type)
+					}
 				} else {
-					g.concrete_name(node.name, node.concrete_types)
+					if has_ct_args {
+						node.name
+					} else {
+						g.concrete_name(node.name, node.concrete_types)
+					}
 				}
 			}
 			return ast.Expr(ast.CallExpr{
@@ -858,6 +873,7 @@ pub fn (mut g Generics) expr(mut node ast.Expr) ast.Expr {
 								})
 							}
 						}
+
 						return ast.Expr(ast.Ident{
 							...node
 							obj:     ast.Var{
@@ -1181,6 +1197,17 @@ pub fn (mut g Generics) expr(mut node ast.Expr) ast.Expr {
 				sub_struct = g.expr(mut sub_struct) as ast.SqlExpr
 			}
 		}
+		ast.SqlQueryDataExpr {
+			items := g.sql_query_data_items(node.items)
+			if g.cur_concrete_types.len > 0 {
+				return ast.Expr(ast.SqlQueryDataExpr{
+					...node
+					items: items
+					typ:   g.unwrap_generic(node.typ)
+				})
+			}
+			node.items = items
+		}
 		ast.StringInterLiteral {
 			if g.cur_concrete_types.len > 0 {
 				mut exprs := node.exprs.clone()
@@ -1266,7 +1293,33 @@ pub fn (mut g Generics) expr(mut node ast.Expr) ast.Expr {
 		}
 		else {}
 	}
+
 	return node
+}
+
+fn (mut g Generics) sql_query_data_items(items []ast.SqlQueryDataItem) []ast.SqlQueryDataItem {
+	mut new_items := []ast.SqlQueryDataItem{cap: items.len}
+	for item in items {
+		mut item_copy := item
+		new_items << g.sql_query_data_item(mut item_copy)
+	}
+	return new_items
+}
+
+fn (mut g Generics) sql_query_data_item(mut item ast.SqlQueryDataItem) ast.SqlQueryDataItem {
+	match mut item {
+		ast.SqlQueryDataLeaf {
+			item.expr = g.expr(mut item.expr)
+		}
+		ast.SqlQueryDataIf {
+			for mut branch in item.branches {
+				branch.cond = g.expr(mut branch.cond)
+				branch.items = g.sql_query_data_items(branch.items)
+			}
+		}
+	}
+
+	return item
 }
 
 fn (mut g Generics) unwrap_generic(typ ast.Type) ast.Type {

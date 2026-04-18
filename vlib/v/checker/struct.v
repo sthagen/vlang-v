@@ -160,6 +160,11 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 					c.error('cannot copy map: call `clone` method (or use a reference)',
 						field.default_expr.pos())
 				}
+				if c.is_nocopy_struct(field.typ) && c.is_nocopy_struct(field.default_expr_typ)
+					&& field.default_expr !is ast.StructInit {
+					c.error('cannot copy @[nocopy] struct: use a reference instead',
+						field.default_expr.pos())
+				}
 				for mut symfield in struct_sym.info.fields {
 					if symfield.name == field.name {
 						symfield.default_expr_typ = field.default_expr_typ
@@ -197,6 +202,7 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 							ast.Type(0)
 						}
 					}
+
 					if elem_type == 0 {
 						pos := sym.info.get_name_pos() or { token.Pos{} }
 						if pos.file_idx != -1 {
@@ -701,17 +707,19 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 	}
 	if c.anon_struct_should_be_mut {
 		mut anon_type_sym := c.table.sym(node.typ)
-		if anon_type_sym.info is ast.Struct && anon_type_sym.info.is_anon {
+		if anon_type_sym.kind == .struct {
 			mut anon_info := anon_type_sym.info as ast.Struct
-			mut anon_fields := []ast.StructField{cap: anon_info.fields.len}
-			for field in anon_info.fields {
-				anon_fields << ast.StructField{
-					...field
-					is_mut: true
+			if anon_info.is_anon {
+				mut anon_fields := []ast.StructField{cap: anon_info.fields.len}
+				for field in anon_info.fields {
+					anon_fields << ast.StructField{
+						...field
+						is_mut: true
+					}
 				}
+				anon_info.fields = anon_fields
+				anon_type_sym.info = anon_info
 			}
-			anon_info.fields = anon_fields
-			anon_type_sym.info = anon_info
 		}
 	}
 	// Make sure the first letter is capital, do not allow e.g. `x := string{}`,
@@ -919,6 +927,7 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 						ast.SelectorExpr { init_field.expr.or_block.kind != .absent }
 						else { false }
 					}
+
 					if got_type.has_flag(.option) && !has_or_block {
 						c.error('cannot assign an Option value to a non-option struct field',
 							init_field.pos)
@@ -954,7 +963,13 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 					c.error('cannot assign a const map to mut struct field, call `clone` method (or use a reference)',
 						init_field.expr.pos())
 				}
+				if c.is_nocopy_struct(exp_type) && c.is_nocopy_struct(got_type)
+					&& init_field.expr !is ast.StructInit {
+					c.error('cannot copy @[nocopy] struct: use a reference instead',
+						init_field.expr.pos())
+				}
 				if exp_type_sym.kind == .array && got_type_sym.kind == .array {
+					init_field_expr_pos := init_field.expr.pos()
 					if init_field.expr is ast.IndexExpr && init_field.expr.left is ast.Ident
 						&& ((init_field.expr as ast.IndexExpr).left.is_mut()
 						|| field_info.is_mut) && init_field.expr.index is ast.RangeExpr
@@ -962,9 +977,8 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 						// `a: arr[..]` auto add clone() -> `a: arr[..].clone()`
 						c.add_error_detail_with_pos('To silence this notice, use either an explicit `a[..].clone()`,
 or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
-							init_field.expr.pos())
-						c.note('an implicit clone of the slice was done here',
-							init_field.expr.pos())
+							init_field_expr_pos)
+						c.note('an implicit clone of the slice was done here', init_field_expr_pos)
 						mut right := ast.CallExpr{
 							name:           'clone'
 							kind:           .clone
@@ -1168,6 +1182,7 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 		}
 		else {}
 	}
+
 	if node.has_update_expr {
 		update_type := c.recheck_concrete_type(c.expr(mut node.update_expr))
 		node.update_expr_type = update_type
@@ -1290,10 +1305,14 @@ fn (mut c Checker) check_uninitialized_struct_fields_and_embeds(node ast.StructI
 					if field.typ.is_any_kind_of_pointer() {
 						info.fields[i].default_expr_typ = field.typ
 					}
-				} else if field.default_expr is ast.Ident && field.default_expr.info is ast.IdentFn {
-					c.expr(mut field.default_expr)
 				} else {
-					if const_field := c.table.global_scope.find_const('${field.default_expr}') {
+					is_ident_fn_default := field.default_expr is ast.Ident
+						&& field.default_expr.info is ast.IdentFn
+					if is_ident_fn_default {
+						mut default_expr := field.default_expr
+						c.expr(mut default_expr)
+						field.default_expr = default_expr
+					} else if const_field := c.table.global_scope.find_const('${field.default_expr}') {
 						info.fields[i].default_expr_typ = const_field.typ
 					} else if type_sym.info is ast.Struct && type_sym.info.is_anon {
 						c.expected_type = field.typ

@@ -35,25 +35,52 @@ fn comptime_power_value(left ast.ComptTimeConstValue, right ast.ComptTimeConstVa
 	return none
 }
 
+fn (mut c Checker) is_string_array_type(typ ast.Type) bool {
+	final_typ := c.table.unaliased_type(c.unwrap_generic(typ))
+	sym := c.table.final_sym(final_typ)
+	if sym.info is ast.Array {
+		return c.table.unaliased_type(sym.info.elem_type) == ast.string_type
+	}
+	return false
+}
+
+fn (mut c Checker) check_comptime_method_string_auto_expand(mut node ast.ComptimeCall) bool {
+	if c.comptime.comptime_for_method == unsafe { nil } || node.args.len == 0
+		|| node.args.any(it.expr is ast.ArrayDecompose) {
+		return false
+	}
+	method := c.comptime.comptime_for_method
+	if method.params.len - 1 < node.args.len {
+		return false
+	}
+	last_arg := node.args.last()
+	if !c.is_string_array_type(last_arg.typ) {
+		return false
+	}
+	next_param := method.params[node.args.len].typ
+	if c.is_string_array_type(next_param) {
+		return false
+	}
+	c.error('to auto-expand `[]string` arguments in comptime method calls, use `...${last_arg.expr}`',
+		last_arg.pos)
+	return true
+}
+
 fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 	if node.left !is ast.EmptyExpr {
 		node.left_type = c.expr(mut node.left)
 	}
 	if node.kind == .compile_error {
-		// Add call stack information for `$compile_error()`
-		mut call_stack := []errors.CallStackItem{}
-		// Only add call stack if we're inside a function (not at module level)
+		mut err_pos := node.pos
+		// During generic rechecks, report the instantiation site instead of the
+		// `$compile_error()` directive inside the generic body.
 		if c.fn_level > 0 && c.table.cur_fn != unsafe { nil } {
 			call_key := c.build_generic_call_key(c.table.cur_fn.fkey(), c.table.cur_concrete_types)
-			pos := c.generic_call_positions[call_key] or { c.table.cur_fn.name_pos }
-			// Use the file path from the position, not the current file
-			file_path := if pos.file_idx >= 0 { c.table.filelist[pos.file_idx] } else { c.file.path }
-			call_stack << errors.CallStackItem{
-				file_path: file_path
-				pos:       pos
+			if pos := c.generic_call_positions[call_key] {
+				err_pos = pos
 			}
 		}
-		c.error(c.comptime_call_msg(node), node.pos, call_stack: call_stack)
+		c.error(c.comptime_call_msg(node), err_pos)
 		return ast.void_type
 	} else if node.kind == .compile_warn {
 		c.warn(c.comptime_call_msg(node), node.pos)
@@ -235,6 +262,9 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 		for i, mut arg in node.args {
 			// check each arg expression
 			node.args[i].typ = c.expr(mut arg.expr)
+		}
+		if c.check_comptime_method_string_auto_expand(mut node) {
+			return ast.void_type
 		}
 		c.markused_comptimecall(mut node)
 		c.stmts_ending_with_expression(mut node.or_block.stmts, c.expected_or_type)
@@ -427,6 +457,7 @@ fn (mut c Checker) comptime_for(mut node ast.ComptimeFor) {
 					return
 				}
 			}
+
 			has_different_types := fields.len > 1
 				&& !fields.all(c.check_basic(it.typ, fields[0].typ))
 			if fields.len == 0 {
@@ -1009,6 +1040,7 @@ fn (mut c Checker) eval_comptime_const_expr_with_locals(expr ast.Expr, nlevel in
 			return none
 		}
 	}
+
 	return none
 }
 
@@ -1236,10 +1268,19 @@ fn (mut c Checker) check_compatible_types(left_type ast.Type, left_name string, 
 	} else if expr is ast.TypeNode {
 		typ := c.get_expr_type(expr)
 		right_type := c.unwrap_generic(typ)
+		mut right_sym := c.table.sym(right_type)
+		if right_sym.kind == .generic_inst {
+			gi := right_sym.info as ast.GenericInst
+			if gi.parent_idx > 0 && gi.parent_idx < c.table.type_symbols.len
+				&& c.table.type_symbols[gi.parent_idx].kind == .interface
+				&& !gi.concrete_types.any(c.type_has_unresolved_generic_parts(it)) {
+				c.table.generic_insts_to_concrete()
+				right_sym = c.table.sym(right_type)
+			}
+		}
 		if c.type_resolver.bind_matching_generic_type(resolved_left_type, right_type) {
 			return true
 		}
-		right_sym := c.table.sym(right_type)
 		if right_sym.kind == .placeholder || right_type.has_flag(.generic) {
 			c.error('unknown type `${right_sym.name}`', expr.pos)
 		}
@@ -1248,7 +1289,8 @@ fn (mut c Checker) check_compatible_types(left_type ast.Type, left_name string, 
 				&& c.table.does_type_implement_interface(resolved_left_type, right_type)
 		}
 		if right_sym.info is ast.FnType && c.comptime.comptime_for_method_var == left_name {
-			return c.table.fn_signature(right_sym.info.func,
+			right_fn_type := right_sym.info as ast.FnType
+			return c.table.fn_signature(right_fn_type.func,
 				skip_receiver: true
 				type_only:     true
 			) == c.table.fn_signature(c.comptime.comptime_for_method,
@@ -1480,6 +1522,7 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 									return false, false
 								}
 							}
+
 							sb.write_string('${is_true}')
 							return is_true, false
 						}
@@ -1507,6 +1550,7 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 												return false, false
 											}
 										}
+
 										match cond.op {
 											.eq {
 												sb.write_string('${is_true}')
@@ -1558,6 +1602,7 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 												return false, false
 											}
 										}
+
 										sb.write_string('${is_true}')
 										return is_true, true
 									} else if cond.left.field_name == 'return_type' {
@@ -1589,6 +1634,7 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 													return false, false
 												}
 											}
+
 											sb.write_string('${is_true}')
 											return is_true, false
 										} else {
@@ -1613,11 +1659,12 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 									return is_true, true
 								}
 								else {
-									c.error('definition of `${ast.Expr(cond.left)}` is unknown at compile time',
+									c.error('definition of `${cond.left}` is unknown at compile time',
 										cond.pos)
 									return false, false
 								}
 							}
+
 							c.error('invalid \$if condition: SelectorExpr', cond.pos)
 							return false, false
 						}
@@ -1650,6 +1697,7 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 											return false, false
 										}
 									}
+
 									sb.write_string('${is_true}')
 									return is_true, true
 								}
@@ -1664,6 +1712,7 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 							return false, false
 						}
 					}
+
 					c.error('invalid \$if condition', cond.pos)
 					return false, false
 				}
@@ -1809,6 +1858,7 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 						'is_expand_simple_interpolation' { method.is_expand_simple_interpolation }
 						else { false }
 					}
+
 					sb.write_string('${is_true}')
 					return is_true, true
 				}
@@ -1822,6 +1872,7 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 			return false, false
 		}
 	}
+
 	c.error('invalid \$if condition ${cond}', cond.pos())
 	return false, false
 }

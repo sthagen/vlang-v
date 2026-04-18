@@ -902,6 +902,7 @@ fn (mut w Walker) expr(node_ ast.Expr) {
 					}
 				}
 			}
+
 			if node.obj is ast.Var && node.obj.is_unwrapped {
 				w.used_option++
 			}
@@ -1015,6 +1016,39 @@ fn (mut w Walker) expr(node_ ast.Expr) {
 			w.expr(node.order_expr)
 			w.expr(node.limit_expr)
 			w.expr(node.where_expr)
+			w.mark_by_type(node.typ)
+			w.uses_orm = true
+		}
+		ast.SqlQueryDataExpr {
+			for item in node.items {
+				match item {
+					ast.SqlQueryDataLeaf {
+						w.expr(item.expr)
+					}
+					ast.SqlQueryDataIf {
+						for branch in item.branches {
+							w.expr(branch.cond)
+							for branch_item in branch.items {
+								match branch_item {
+									ast.SqlQueryDataLeaf {
+										w.expr(branch_item.expr)
+									}
+									ast.SqlQueryDataIf {
+										for nested_branch in branch_item.branches {
+											w.expr(nested_branch.cond)
+											for nested_item in nested_branch.items {
+												if nested_item is ast.SqlQueryDataLeaf {
+													w.expr(nested_item.expr)
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
 			w.mark_by_type(node.typ)
 			w.uses_orm = true
 		}
@@ -1483,6 +1517,7 @@ pub fn (mut w Walker) call_expr(mut node ast.CallExpr) {
 			ast.SumType { rsym.info.parent_type }
 			else { ast.Type(0) }
 		}
+
 		if parent_type != 0 && parent_type.has_flag(.generic) {
 			generic_fn_name := '${int(parent_type.set_nr_muls(0))}.${node.name}'
 			if generic_fn_name in w.all_fns {
@@ -1628,6 +1663,7 @@ fn (w &Walker) generic_parent_method_fkey(sym ast.TypeSymbol, method_name string
 		}
 		else {}
 	}
+
 	return '', ast.no_type
 }
 
@@ -2403,6 +2439,7 @@ fn (mut w Walker) mark_resource_dependencies() {
 	if w.uses_channel {
 		w.fn_by_name('sync.new_channel_st')
 		w.fn_by_name('sync.channel_select')
+		w.fn_by_name('sync.channel_select_lang')
 	}
 	if w.uses_lock {
 		w.mark_by_sym_name('sync.RwMutex')

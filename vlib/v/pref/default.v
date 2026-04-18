@@ -4,6 +4,7 @@
 module pref
 
 import os
+import strings
 import v.vcache
 
 pub const default_module_path = os.vmodules_dir()
@@ -12,6 +13,13 @@ pub fn new_preferences() &Preferences {
 	mut p := &Preferences{}
 	p.fill_with_defaults()
 	return p
+}
+
+fn (p &Preferences) default_thread_stack_size() int {
+	return match p.arch {
+		.arm32, .rv32, .i386, .ppc, .wasm32 { 2 * 1024 * 1024 }
+		else { 8 * 1024 * 1024 }
+	}
 }
 
 fn (mut p Preferences) expand_lookup_paths() {
@@ -232,6 +240,9 @@ pub fn (mut p Preferences) fill_with_defaults() {
 	}
 	p.find_cc_if_cross_compiling()
 	p.resolve_default_arch()
+	if !p.thread_stack_size_set_by_flag {
+		p.thread_stack_size = p.default_thread_stack_size()
+	}
 	p.ccompiler_type = cc_from_string(p.ccompiler)
 	p.disable_tcc_shared_backtraces()
 	p.is_test = p.path.ends_with('_test.v') || p.path.ends_with('_test.vv')
@@ -299,10 +310,44 @@ fn (p &Preferences) default_output_name(rpath string) string {
 		// The file name is just `.v` or `.vsh` or `.*`
 		base = filename
 	}
+	if needs_safe_default_output_name(base, filename, rpath) {
+		base = safe_default_output_name(filename)
+	}
 	if p.raw_vsh_tmp_prefix != '' {
 		return p.raw_vsh_tmp_prefix + '.' + base
 	}
 	return base
+}
+
+fn needs_safe_default_output_name(base string, filename string, rpath string) bool {
+	if base == '' || base in ['.', '..', '-'] {
+		return true
+	}
+	if base == filename && filename.starts_with('.') && !os.is_dir(rpath) {
+		return true
+	}
+	if base.ends_with('.c') || base.ends_with('.js') || base.ends_with('.wasm') {
+		return true
+	}
+	for ch in base {
+		if ch < ` ` || ch == 127 {
+			return true
+		}
+	}
+	return false
+}
+
+fn safe_default_output_name(filename string) string {
+	mut sanitized := strings.new_builder(filename.len + 4)
+	for ch in filename {
+		if ch < ` ` || ch == 127 {
+			sanitized.write_u8(`_`)
+		} else {
+			sanitized.write_u8(ch)
+		}
+	}
+	sanitized.write_string('.out')
+	return sanitized.str()
 }
 
 fn (mut p Preferences) find_cc_if_cross_compiling() {
@@ -330,7 +375,7 @@ fn (mut p Preferences) find_cc_if_cross_compiling() {
 }
 
 fn (mut p Preferences) try_to_use_tcc_by_default() {
-	bundled_tcc := usable_bundled_tcc_compiler(os.dir(vexe_path()), p.is_musl)
+	bundled_tcc := usable_bundled_tcc_compiler(os.dir(vexe_path()))
 	if p.ccompiler == 'tcc' {
 		p.ccompiler = if bundled_tcc != '' { bundled_tcc } else { 'tcc' }
 		return
@@ -350,32 +395,24 @@ fn (mut p Preferences) try_to_use_tcc_by_default() {
 	}
 }
 
-fn usable_bundled_tcc_compiler(vroot string, is_musl bool) string {
+fn usable_bundled_tcc_compiler(vroot string) string {
 	vtccexe := os.join_path(vroot, 'thirdparty', 'tcc', 'tcc.exe')
-	if !os.exists(vtccexe) {
+	if !os.is_file(vtccexe) || !os.is_executable(vtccexe) {
 		return ''
 	}
-	if is_musl {
-		tcc_probe := os.execute('${os.quoted_path(vtccexe)} -v')
-		if tcc_probe.exit_code != 0 {
-			return ''
-		}
+	// Unsupported hosts can still have a placeholder `thirdparty/tcc/` checkout.
+	tcc_probe := os.execute('${os.quoted_path(vtccexe)} -v')
+	if tcc_probe.exit_code != 0 {
+		return ''
 	}
 	return vtccexe
-}
-
-fn host_uses_musl() bool {
-	$if linux {
-		return os.execute('ldd --version').output.contains('musl')
-	}
-	return false
 }
 
 // default_tcc_compiler returns the bundled TinyCC path when it exists and works on the host.
 pub fn default_tcc_compiler() string {
 	vexe := vexe_path()
 	vroot := os.dir(vexe)
-	return usable_bundled_tcc_compiler(vroot, host_uses_musl())
+	return usable_bundled_tcc_compiler(vroot)
 }
 
 pub fn (mut p Preferences) default_c_compiler() {

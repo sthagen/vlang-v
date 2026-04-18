@@ -90,6 +90,42 @@ or for data that you want to share between different routes.
 A new `Context` struct is created every time a request is received,
 so it can contain different data for each request.
 
+## Parallel picoev workers
+
+The default non-SSL picoev backend can start more than one event loop by setting
+`nr_workers` in `RunParams`:
+
+```v
+module main
+
+import runtime
+import veb
+
+pub struct Context {
+	veb.Context
+}
+
+pub struct App {}
+
+pub fn (app &App) index(mut ctx Context) veb.Result {
+	return ctx.text('Hello from parallel veb')
+}
+
+fn main() {
+	mut app := &App{}
+	veb.run_at[App, Context](mut app,
+		host:       '0.0.0.0'
+		port:       8080
+		nr_workers: runtime.nr_jobs()
+	) or { panic(err) }
+}
+```
+
+`nr_workers` defaults to `1` to preserve the historical single-loop behavior.
+It only affects the default non-SSL picoev backend and currently requires Linux
+or Termux. When running with `-d new_veb`, the fasthttp backend is already
+multi-threaded and ignores `nr_workers`.
+
 ## HTTPS
 
 To serve HTTPS directly from `veb`, pass an `mbedtls.SSLConnectConfig` in `RunParams`:
@@ -231,6 +267,8 @@ parameters are passed as arguments. V will cast the parameter to any of V's prim
 To pass a parameter to an endpoint, you simply define it inside an attribute, e. g.
 `@['/hello/:user]`.
 After it is defined in the attribute, you have to add it as a function parameter.
+Parameters after `ctx` are populated from strings, so they currently must be `string`,
+integer, or `bool`.
 
 **Example:**
 
@@ -967,6 +1005,8 @@ fn main() {
 
 You can do everything with a controller struct as with a regular `App` struct.
 Register middleware, add static files and you can even register other controllers!
+Static assets registered on either the main app or a controller keep working when
+controllers are mounted, including controllers mounted at `'/'`.
 
 ### Routing
 

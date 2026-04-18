@@ -51,10 +51,8 @@ pub mut:
 	pos                         int = -1 // current position in the file, first character is s.text[0]
 	line_nr                     int // current line number
 	last_nl_pos                 int = -1 // for calculating column
-	is_inside_string            bool // set to true in a string, *at the start* of an $var or ${expr}
+	is_inside_string            bool // set to true in a string, *at the start* of a ${expr}
 	is_nested_string            bool // '${'abc':-12s}'
-	is_inter_start              bool // for hacky string interpolation TODO simplify
-	is_inter_end                bool
 	str_helper_tokens           []u8 = []u8{cap: 16} // ', ", 0 (string interpolation with lcbr), { (block)
 	line_comment                string
 	last_lt                     int = -1 // position of latest <
@@ -293,6 +291,51 @@ fn (s &Scanner) num_lit(start int, end int) string {
 	}
 }
 
+@[direct_array_access; inline]
+fn (s &Scanner) number_prefixed_identifier_name(start_pos int, end_pos int) string {
+	if end_pos <= start_pos || !digit_table[s.text[start_pos]] {
+		return ''
+	}
+	mut ident_start := start_pos
+	for ident_start < end_pos
+		&& (digit_table[s.text[ident_start]] || s.text[ident_start] == num_sep) {
+		ident_start++
+	}
+	if ident_start >= end_pos || !letter_table[s.text[ident_start]] {
+		return ''
+	}
+	for i in ident_start .. end_pos {
+		if !util.func_char_table[s.text[i]] {
+			return ''
+		}
+	}
+	if s.next_non_space_char(end_pos) !in [`:`, `=`, `,`, `)`, `]`, `}`, `.`, `;`, `\0`] {
+		return ''
+	}
+	return s.text[start_pos..end_pos]
+}
+
+@[direct_array_access; inline]
+fn (s &Scanner) next_non_space_char(pos int) u8 {
+	for i in pos .. s.text.len {
+		if util.non_whitespace_table[s.text[i]] {
+			return s.text[i]
+		}
+	}
+	return `\0`
+}
+
+@[inline]
+fn (s &Scanner) pos_from_bounds(start_pos int, end_pos int) token.Pos {
+	return token.Pos{
+		len:      end_pos - start_pos
+		line_nr:  s.line_nr
+		pos:      start_pos
+		col:      u16_col(start_pos - s.last_nl_pos - 1)
+		file_idx: s.file_idx
+	}
+}
+
 @[direct_array_access]
 fn (mut s Scanner) ident_bin_number() string {
 	mut has_wrong_digit := false
@@ -445,6 +488,16 @@ fn (mut s Scanner) ident_dec_number() string {
 	if s.text[s.pos - 1] == num_sep {
 		s.pos--
 		s.error('cannot use `_` at the end of a numeric literal')
+	}
+	if has_wrong_digit {
+		invalid_ident := s.number_prefixed_identifier_name(start_pos, s.pos)
+		if invalid_ident != '' {
+			s.error_with_pos('identifier name `${invalid_ident}` cannot start with a number', s.pos_from_bounds(start_pos,
+				s.pos))
+			number := s.num_lit(start_pos, s.pos)
+			s.pos--
+			return number
+		}
 	}
 	mut call_method := false // true for, e.g., 5.str(), 5.5.str(), 5e5.str()
 	mut is_range := false // true for, e.g., 5..10
@@ -681,17 +734,6 @@ pub fn (mut s Scanner) text_scan() token.Token {
 		if s.pos >= s.text.len || s.should_abort {
 			return s.end_of_file()
 		}
-		// End of ${var}, start next string
-		if s.is_inter_end {
-			if s.text[s.pos] == s.quote {
-				s.is_inter_end = false
-				s.str_helper_tokens.delete_last()
-				return s.new_token(.string, '', 1)
-			}
-			s.is_inter_end = false
-			ident_string := s.ident_string()
-			return s.new_token(.string, ident_string, ident_string.len + 2) // + two quotes
-		}
 		s.skip_whitespace()
 		// end of file
 		if s.pos >= s.text.len {
@@ -703,36 +745,9 @@ pub fn (mut s Scanner) text_scan() token.Token {
 		// name or keyword
 		if util.name_char_table[c] {
 			name := s.ident_name()
-			// tmp hack to detect . in ${}
-			// Check if not .eof to prevent panic
-			next_char := s.look_ahead(1)
 			kind := token.scanner_matcher.find(name)
-			// '$type' '$struct'... will be recognized as ident (not keyword token)
-			if kind != -1 && !(s.is_inter_start && next_char == s.quote) {
+			if kind != -1 {
 				return s.new_token(unsafe { token.Kind(kind) }, name, name.len)
-			}
-			// 'asdf $b' => "b" is the last name in the string, dont start parsing string
-			// at the next ', skip it
-			if s.is_inside_string {
-				if next_char == s.quote {
-					s.is_inter_end = true
-					s.is_inter_start = false
-					s.is_inside_string = false
-				}
-			}
-			// end of `$expr`
-			// allow `'$a.b'` and `'$a.c()'`
-			if s.is_inter_start && next_char == `\\`
-				&& s.look_ahead(2) !in [`x`, `n`, `r`, `\\`, `t`, `e`, `"`, `'`] {
-				s.warn('unknown escape sequence \\${s.look_ahead(2)}')
-			}
-			if s.is_inter_start && next_char == `(` {
-				if s.look_ahead(2) != `)` {
-					s.warn('use `\${f(expr)}` instead of `\$f(expr)`')
-				}
-			} else if s.is_inter_start && next_char != `.` {
-				s.is_inter_end = true
-				s.is_inter_start = false
 			}
 			return s.new_token(.name, name, name.len)
 		} else if digit_table[c] || (c == `.` && digit_table[nextc]) {
@@ -752,18 +767,6 @@ pub fn (mut s Scanner) text_scan() token.Token {
 			}
 			num := s.ident_number()
 			return s.new_token(.number, num, num.len)
-		}
-		// Handle `'$fn()'`
-		if c == `)` && s.is_inter_start {
-			next_char := s.look_ahead(1)
-			if next_char != `.` {
-				s.is_inter_end = true
-				s.is_inter_start = false
-				if next_char == s.quote {
-					s.is_inside_string = false
-				}
-				return s.new_token(.rpar, '', 1)
-			}
 		}
 		// all other tokens
 		match c {
@@ -876,7 +879,6 @@ pub fn (mut s Scanner) text_scan() token.Token {
 				}
 			}
 			`}` {
-				// s = `hello $name !`
 				// s = `hello ${name} !`
 				if s.str_helper_tokens.len > 0 {
 					s.str_helper_tokens.delete_last()
@@ -1170,6 +1172,7 @@ pub fn (mut s Scanner) text_scan() token.Token {
 			}
 			else {}
 		}
+
 		$if windows {
 			if c == `\0` {
 				return s.end_of_file()
@@ -1313,14 +1316,6 @@ pub fn (mut s Scanner) ident_string() string {
 			&& s.count_symbol_before(s.pos - 2, backslash) & 1 == 0 {
 			s.is_inside_string = true
 			// so that s.pos points to $ at the next step
-			s.pos -= 2
-			break
-		}
-		// $var
-		if prevc == `$` && util.name_char_table[c] && !is_raw
-			&& s.count_symbol_before(s.pos - 2, backslash) & 1 == 0 {
-			s.is_inside_string = true
-			s.is_inter_start = true
 			s.pos -= 2
 			break
 		}
@@ -1846,8 +1841,6 @@ pub fn (mut s Scanner) prepare_for_new_text(text string) {
 	s.is_inside_toplvl_statement = false
 	s.is_inside_string = false
 	s.is_nested_string = false
-	s.is_inter_start = false
-	s.is_inter_end = false
 	s.last_lt = -1
 	s.quote = 0
 }

@@ -213,10 +213,11 @@ pub mut:
 @[minify]
 pub struct Interface {
 pub mut:
-	types   []Type // all types that implement this interface
-	fields  []StructField
-	methods []Fn
-	embeds  []Type
+	types     []Type // all types that implement this interface immutably
+	mut_types []Type // all types that require a mutable interface binding
+	fields    []StructField
+	methods   []Fn
+	embeds    []Type
 	// `I1 is I2` conversions
 	conversions shared map[int][]Type
 	// generic interface support
@@ -226,6 +227,26 @@ pub mut:
 	concrete_types []Type
 	parent_type    Type
 	name_pos       token.Pos
+}
+
+pub fn (info &Interface) has_implementor(typ Type, include_mut_types bool) bool {
+	if info.types.any(it.idx() == typ.idx()) {
+		return true
+	}
+	return include_mut_types && info.mut_types.any(it.idx() == typ.idx())
+}
+
+pub fn (info &Interface) implementor_types(include_mut_types bool) []Type {
+	mut implementors := info.types.clone()
+	if !include_mut_types {
+		return implementors
+	}
+	for typ in info.mut_types {
+		if !implementors.any(it.idx() == typ.idx()) {
+			implementors << typ
+		}
+	}
+	return implementors
 }
 
 pub struct Enum {
@@ -1472,6 +1493,7 @@ pub fn (t &Table) type_size(typ Type) (int, int) {
 			align = t.pointer_size
 		}
 	}
+
 	sym.size = size
 	sym.align = align
 	return size, align
@@ -1798,6 +1820,7 @@ pub fn (t &Table) type_to_str_using_aliases(typ Type, import_aliases map[string]
 		}
 		.aggregate {}
 	}
+
 	mut nr_muls := typ.nr_muls()
 	if typ.has_flag(.shared_f) {
 		nr_muls--
@@ -2028,6 +2051,7 @@ pub fn (t &TypeSymbol) find_method_with_generic_parent(name string) ?Fn {
 		}
 		else {}
 	}
+
 	if m := t.find_method(name) {
 		if generic_names.len == concrete_types.len && concrete_types.len > 0 {
 			return specialize_method_with_concrete_types(m, generic_names, concrete_types)
@@ -2072,6 +2096,7 @@ pub fn (t &TypeSymbol) find_method_with_generic_parent(name string) ?Fn {
 		}
 		else {}
 	}
+
 	return none
 }
 
@@ -2277,6 +2302,7 @@ pub fn (t &TypeSymbol) get_methods() []Fn {
 		}
 		else {}
 	}
+
 	for method in inherited_methods {
 		if method.name in existing_method_names {
 			continue

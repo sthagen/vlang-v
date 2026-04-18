@@ -262,6 +262,7 @@ pub fn (mut g Gen) fn_decl(node ast.FnDecl) {
 			}
 		}
 	}
+
 	if rt.has_flag(.result) {
 		g.v_error('result types are not implemented', node.return_type_pos)
 		retl << .i32_t // &IError
@@ -1623,6 +1624,9 @@ pub fn (mut g Gen) expr_stmt(node ast.Stmt, expected ast.Type) {
 		ast.AsmStmt {
 			// assumed expected == void
 			g.asm_stmt(node)
+		}
+		ast.EmptyStmt {
+			// EmptyStmt nodes are emitted by earlier compiler passes for eliminated statements.
 		}
 		else {
 			g.w_error('wasm.expr_stmt(): unhandled node: ' + node.type_name())

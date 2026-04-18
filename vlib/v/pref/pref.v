@@ -61,7 +61,6 @@ pub enum Backend {
 	js_node         // The JavaScript NodeJS backend
 	js_browser      // The JavaScript browser backend
 	js_freestanding // The JavaScript freestanding backend
-	native          // The Native backend
 	wasm            // The WebAssembly backend
 }
 
@@ -255,7 +254,8 @@ pub mut:
 	fast_math           bool // -fast-math will pass either -ffast-math or /fp:fast (for msvc) to the C backend
 	// checker settings:
 	checker_match_exhaustive_cutoff_limit int = 12
-	thread_stack_size                     int = 8388608 // Change with `-thread-stack-size 4194304`. Note: on macos it was 524288, which is too small for more complex programs with many nested callexprs.
+	thread_stack_size                     int = 8388608 // Change with `-thread-stack-size 4194304`. The final default is adjusted in fill_with_defaults() based on the target architecture.
+	thread_stack_size_set_by_flag         bool
 	// wasm settings:
 	wasm_stack_top    int = 1024 + (16 * 1024) // stack size for webassembly backend
 	wasm_validate     bool // validate webassembly code, by calling `wasm-validate`
@@ -366,6 +366,56 @@ fn set_icon_path(mut res Preferences, raw_path string, option_name string) {
 	res.build_options << '-icon "${res.icon_path}"'
 }
 
+const internal_v_commands = [
+	'run',
+	'crun',
+	'build',
+	'build-module',
+	'help',
+	'version',
+	'new',
+	'init',
+	'install',
+	'link',
+	'list',
+	'outdated',
+	'remove',
+	'search',
+	'show',
+	'unlink',
+	'update',
+	'upgrade',
+	'vlib-docs',
+	'interpret',
+	'translate',
+]
+
+fn has_following_positional_arg(args []string, start int) bool {
+	for idx := start; idx < args.len; idx++ {
+		if !args[idx].starts_with('-') {
+			return true
+		}
+	}
+	return false
+}
+
+fn optional_arg_value(args []string, idx int, command string, known_external_commands []string, def string) (string, bool) {
+	next := args[idx + 1] or { return def, false }
+	if next == '-' {
+		return next, true
+	}
+	if next.starts_with('-') {
+		return def, false
+	}
+	if command == ''
+		&& (next in known_external_commands || next in internal_v_commands || next.ends_with('.v')
+		|| next.ends_with('.vsh') || os.is_dir(next)
+		|| !has_following_positional_arg(args, idx + 2)) {
+		return def, false
+	}
+	return next, true
+}
+
 pub fn parse_args_and_show_errors(known_external_commands []string, args []string, show_output bool) (&Preferences, string) {
 	mut res := &Preferences{}
 	use_v2_requested := '-v2' in args
@@ -387,6 +437,7 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 
 	mut no_skip_unused := false
 	mut command, mut command_idx := '', 0
+	mut build_vsh_source := false
 	for i := 0; i < args.len; i++ {
 		arg := args[i]
 		if inline_icon_path := inline_icon_option_value(arg) {
@@ -437,6 +488,7 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 						exit(1)
 					}
 				}
+
 				i++
 			}
 			'-show-timings' {
@@ -586,6 +638,7 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 						exit(1)
 					}
 				}
+
 				effective_gc_mode := if gc_mode == '' { 'boehm' } else { gc_mode }
 				res.build_options << '${arg} ${effective_gc_mode}'
 				i++
@@ -735,10 +788,14 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 				res.relaxed_gcc14 = false
 			}
 			'-prof', '-profile' {
-				res.profile_file = cmdline.option(args[i..], arg, '-')
+				profile_file, profile_file_consumed := optional_arg_value(args, i, command,
+					known_external_commands, '-')
+				res.profile_file = profile_file
 				res.is_prof = true
 				res.build_options << '${arg} ${res.profile_file}'
-				i++
+				if profile_file_consumed {
+					i++
+				}
 			}
 			'-cov', '-coverage' {
 				res.coverage_dir = cmdline.option(args[i..], arg, '-')
@@ -790,6 +847,10 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 			'-m32', '-m64' {
 				res.m64 = arg[2] == `6`
 				res.cflags += ' ${arg}'
+				res.build_options << arg
+				if arg == '-m32' && res.arch == ._auto {
+					res.arch = .i386
+				}
 			}
 			'-color' {
 				res.use_color = .always
@@ -886,8 +947,7 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 				res.build_options << arg
 			}
 			'-native' {
-				res.backend = .native
-				res.build_options << arg
+				eprintln_exit('The native backend has been removed. Use `v -v2 -b arm64` or `v -v2 -b x64` instead.')
 			}
 			'-interpret' {
 				res.backend = .interpret
@@ -988,6 +1048,7 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 			'-thread-stack-size' {
 				res.thread_stack_size =
 					cmdline.option(args[i..], arg, res.thread_stack_size.str()).int()
+				res.thread_stack_size_set_by_flag = true
 				i++
 			}
 			'-cc' {
@@ -1026,7 +1087,7 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 					continue
 				}
 				b := backend_from_string(sbackend) or {
-					eprintln_exit('Unknown V backend: ${sbackend}\nValid -backend choices are: c, go, interpret, js, js_node, js_browser, js_freestanding, native, wasm')
+					eprintln_exit('Unknown V backend: ${sbackend}\nValid -backend choices are: c, go, interpret, js, js_node, js_browser, js_freestanding, wasm')
 				}
 				if b == .wasm {
 					res.compile_defines << 'wasm'
@@ -1096,6 +1157,12 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 			}
 			else {
 				if command == 'build' && is_source_file(arg) {
+					if arg.ends_with('.vsh') {
+						command, command_idx = arg, i
+						build_vsh_source = true
+						res.skip_running = true
+						continue
+					}
 					eprintln_exit('Use `v ${arg}` instead.')
 				}
 				if is_source_file(arg) && arg.ends_with('.vsh') {
@@ -1223,7 +1290,8 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 		eprintln_cond(show_output && !res.is_quiet,
 			'`-bare-builtin-dir` must be used with `-freestanding`')
 	}
-	if command.ends_with('.vsh') || (res.raw_vsh_tmp_prefix != '' && !res.is_run) {
+	if !build_vsh_source
+		&& (command.ends_with('.vsh') || (res.raw_vsh_tmp_prefix != '' && !res.is_run)) {
 		// `v build.vsh gcc` is the same as `v run build.vsh gcc`,
 		// i.e. compiling, then running the script, passing the args
 		// after it to the script:
@@ -1340,7 +1408,7 @@ pub fn backend_from_string(s string) !Backend {
 		'js_browser' { .js_browser }
 		'js_freestanding' { .js_freestanding }
 		'wasm' { .wasm }
-		'native' { .native }
+		'native' { eprintln_exit('The native backend has been removed. Use `v -v2 -b arm64` or `v -v2 -b x64` instead.') }
 		'go' { .golang }
 		else { error('Unknown backend type ${s}') }
 	}

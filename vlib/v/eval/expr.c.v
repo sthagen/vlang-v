@@ -439,6 +439,7 @@ pub fn (mut e Eval) expr(expr ast.Expr, expecting ast.Type) Object {
 					e.error('unknown selector expression: ${exp.type_name()}')
 				}
 			}
+
 			e.error(exp.str())
 		}
 		ast.ArrayInit {
@@ -601,11 +602,12 @@ pub fn (mut e Eval) expr(expr ast.Expr, expecting ast.Type) Object {
 		ast.ChanInit, ast.Comment, ast.ComptimeCall, ast.ComptimeSelector, ast.ComptimeType,
 		ast.ConcatExpr, ast.DumpExpr, ast.EmptyExpr, ast.EnumVal, ast.GoExpr, ast.SpawnExpr,
 		ast.IfGuardExpr, ast.IsRefType, ast.Likely, ast.LockExpr, ast.MapInit, ast.MatchExpr,
-		ast.Nil, ast.None, ast.OffsetOf, ast.RangeExpr, ast.SelectExpr, ast.SqlExpr, ast.TypeNode,
-		ast.TypeOf, ast.LambdaExpr {
+		ast.Nil, ast.None, ast.OffsetOf, ast.RangeExpr, ast.SelectExpr, ast.SqlExpr,
+		ast.SqlQueryDataExpr, ast.TypeNode, ast.TypeOf, ast.LambdaExpr {
 			e.error('unhandled expression ${typeof(expr).name}')
 		}
 	}
+
 	return empty
 }
 
@@ -652,6 +654,7 @@ fn (e &Eval) get_escape(r rune) rune {
 			`e`
 		}
 	}
+
 	if res == `e` {
 		e.error('unknown escape: `${r}`')
 	}

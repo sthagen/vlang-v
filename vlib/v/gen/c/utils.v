@@ -93,6 +93,58 @@ fn (mut g Gen) promote_literal_array_type(typ ast.Type) ast.Type {
 	return typ
 }
 
+fn (mut g Gen) infer_branch_expr_type(stmts []ast.Stmt) ast.Type {
+	if stmts.len == 0 {
+		return ast.void_type
+	}
+	last_stmt := stmts.last()
+	if last_stmt !is ast.ExprStmt {
+		return ast.void_type
+	}
+	expr_stmt := last_stmt as ast.ExprStmt
+	mut default_typ := expr_stmt.typ
+	if default_typ == 0 || default_typ == ast.void_type {
+		default_typ = expr_stmt.expr.type()
+	}
+	mut resolved_typ := g.resolved_expr_type(expr_stmt.expr, default_typ)
+	if resolved_typ == 0 || resolved_typ == ast.void_type {
+		resolved_typ = g.type_resolver.get_type_or_default(expr_stmt.expr, default_typ)
+	}
+	if resolved_typ == 0 || resolved_typ == ast.void_type {
+		resolved_typ = default_typ
+	}
+	if resolved_typ == 0 || resolved_typ == ast.void_type {
+		return ast.void_type
+	}
+	return g.unwrap_generic(g.recheck_concrete_type(resolved_typ))
+}
+
+fn (mut g Gen) infer_if_expr_type(node ast.IfExpr) ast.Type {
+	if node.typ != 0 && node.typ != ast.void_type {
+		return g.unwrap_generic(g.recheck_concrete_type(node.typ))
+	}
+	for branch in node.branches {
+		branch_typ := g.infer_branch_expr_type(branch.stmts)
+		if branch_typ != 0 && branch_typ != ast.void_type {
+			return branch_typ
+		}
+	}
+	return ast.void_type
+}
+
+fn (mut g Gen) infer_match_expr_type(node ast.MatchExpr) ast.Type {
+	if node.return_type != 0 && node.return_type != ast.void_type {
+		return g.unwrap_generic(g.recheck_concrete_type(node.return_type))
+	}
+	for branch in node.branches {
+		branch_typ := g.infer_branch_expr_type(branch.stmts)
+		if branch_typ != 0 && branch_typ != ast.void_type {
+			return branch_typ
+		}
+	}
+	return ast.void_type
+}
+
 fn (mut g Gen) recheck_concrete_type(typ ast.Type) ast.Type {
 	if typ == 0 {
 		return typ
@@ -113,6 +165,7 @@ fn (mut g Gen) recheck_concrete_type(typ ast.Type) ast.Type {
 		}
 		else {}
 	}
+
 	if !typ.has_flag(.generic) && !g.type_has_unresolved_generic_parts(typ) {
 		return typ
 	}
@@ -172,6 +225,19 @@ fn (g Gen) expr_has_or_block(expr ast.Expr) bool {
 	}
 }
 
+fn (g &Gen) is_auto_deref_source_ident(expr ast.Expr) bool {
+	if expr is ast.Ident {
+		ident := expr as ast.Ident
+		if ident.obj is ast.Var && ident.obj.is_auto_deref {
+			return true
+		}
+		if source_var := ident.scope.find_var(ident.name) {
+			return source_var.is_auto_deref
+		}
+	}
+	return false
+}
+
 fn (mut g Gen) resolved_scope_var_type(expr ast.Ident) ast.Type {
 	mut scope := if expr.scope != unsafe { nil } {
 		expr.scope.innermost(expr.pos.pos)
@@ -199,12 +265,25 @@ fn (mut g Gen) resolved_scope_var_type(expr ast.Ident) ast.Type {
 				v.is_unwrapped = false
 			}
 		}
-		if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 && !v.is_arg
-			&& v.expr !is ast.EmptyExpr && v.pos.pos > 0 && v.pos.pos < expr.pos.pos
-			&& !(v.expr is ast.Ident && v.expr.name == expr.name) {
+		if !v.is_arg && v.expr !is ast.EmptyExpr && v.pos.pos > 0 && v.pos.pos < expr.pos.pos
+			&& !(v.expr is ast.Ident && v.expr.name == expr.name)
+			&& ((g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0)
+			|| v.typ.has_flag(.generic)
+			|| g.type_has_unresolved_generic_parts(v.typ)) {
 			resolved_expr_type := g.resolved_expr_type(v.expr, v.typ)
 			if resolved_expr_type != 0 {
 				refreshed_expr_type = g.unwrap_generic(g.recheck_concrete_type(resolved_expr_type))
+				if g.type_has_unresolved_generic_parts(refreshed_expr_type) {
+					call_like_type := g.resolved_call_like_expr_type(v.expr)
+					if call_like_type != 0 && !call_like_type.has_flag(.generic)
+						&& !g.type_has_unresolved_generic_parts(call_like_type) {
+						refreshed_expr_type = call_like_type
+					}
+				}
+				// Keep `mut x := param` as a value copy when re-resolving locals.
+				if g.is_auto_deref_source_ident(v.expr) && refreshed_expr_type.is_ptr() {
+					refreshed_expr_type = refreshed_expr_type.deref()
+				}
 				// If the variable was initialized with an `or {}` block that
 				// unwraps the option/result, clear the flag from the resolved type
 				if refreshed_expr_type.has_option_or_result() && g.expr_has_or_block(v.expr) {
@@ -247,14 +326,28 @@ fn (mut g Gen) resolved_scope_var_type(expr ast.Ident) ast.Type {
 						parent_v.typ = refreshed_parent_type
 					}
 				}
-				if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 && !parent_v.is_arg
-					&& parent_v.expr !is ast.EmptyExpr && parent_v.pos.pos > 0
+				if !parent_v.is_arg && parent_v.expr !is ast.EmptyExpr && parent_v.pos.pos > 0
 					&& parent_v.pos.pos < expr.pos.pos && !(parent_v.expr is ast.Ident
-					&& parent_v.expr.name == expr.name) {
+					&& parent_v.expr.name == expr.name)
+					&& ((g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0)
+					|| parent_v.typ.has_flag(.generic)
+					|| g.type_has_unresolved_generic_parts(parent_v.typ)) {
 					resolved_parent_expr_type := g.resolved_expr_type(parent_v.expr, parent_v.typ)
 					if resolved_parent_expr_type != 0 {
-						parent_v.typ =
+						mut refreshed_parent_type :=
 							g.unwrap_generic(g.recheck_concrete_type(resolved_parent_expr_type))
+						if g.type_has_unresolved_generic_parts(parent_v.typ) {
+							call_like_type := g.resolved_call_like_expr_type(parent_v.expr)
+							if call_like_type != 0 && !call_like_type.has_flag(.generic)
+								&& !g.type_has_unresolved_generic_parts(call_like_type) {
+								parent_v.typ = call_like_type
+							}
+						}
+						if g.is_auto_deref_source_ident(parent_v.expr)
+							&& refreshed_parent_type.is_ptr() {
+							refreshed_parent_type = refreshed_parent_type.deref()
+						}
+						parent_v.typ = refreshed_parent_type
 					}
 				}
 				if v.is_unwrapped {
@@ -295,10 +388,22 @@ fn (mut g Gen) resolved_scope_var_type(expr ast.Ident) ast.Type {
 					}
 					return g.unwrap_generic(g.recheck_concrete_type(smartcast_type))
 				}
-				if parent_v.expr !is ast.EmptyExpr {
+				if parent_v.expr !is ast.EmptyExpr
+					&& ((g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0)
+					|| parent_v.typ.has_flag(.generic)
+					|| g.type_has_unresolved_generic_parts(parent_v.typ)) {
 					resolved_parent_type := g.resolved_expr_type(parent_v.expr, parent_v.typ)
 					if resolved_parent_type != 0 {
-						return g.unwrap_generic(g.recheck_concrete_type(resolved_parent_type))
+						resolved_parent :=
+							g.unwrap_generic(g.recheck_concrete_type(resolved_parent_type))
+						if g.type_has_unresolved_generic_parts(resolved_parent) {
+							call_like_type := g.resolved_call_like_expr_type(parent_v.expr)
+							if call_like_type != 0 && !call_like_type.has_flag(.generic)
+								&& !g.type_has_unresolved_generic_parts(call_like_type) {
+								return call_like_type
+							}
+						}
+						return resolved_parent
 					}
 				}
 				if parent_v.typ != 0 {
@@ -541,6 +646,7 @@ fn (mut g Gen) resolved_call_like_expr_type(expr ast.Expr) ast.Type {
 		}
 		else {}
 	}
+
 	return 0
 }
 
@@ -615,10 +721,13 @@ fn (mut g Gen) resolved_expr_type(expr ast.Expr, default_typ ast.Type) ast.Type 
 					}
 				}
 				if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0
-					&& expr.obj.expr is ast.Ident && expr.obj.expr.or_expr.kind != .absent {
-					resolved_or_type := g.resolved_or_block_value_type(expr.obj.expr.or_expr)
-					if resolved_or_type != 0 {
-						return resolved_or_type
+					&& expr.obj.expr is ast.Ident {
+					ident_expr := expr.obj.expr as ast.Ident
+					if ident_expr.or_expr.kind != .absent {
+						resolved_or_type := g.resolved_or_block_value_type(ident_expr.or_expr)
+						if resolved_or_type != 0 {
+							return resolved_or_type
+						}
 					}
 				}
 				if expr.obj.ct_type_var == .generic_param {
@@ -678,12 +787,22 @@ fn (mut g Gen) resolved_expr_type(expr ast.Expr, default_typ ast.Type) ast.Type 
 						return scope_type
 					}
 				}
-				if expr.obj.expr !is ast.EmptyExpr && (expr.obj.ct_type_var == .generic_var
+				if expr.obj.expr !is ast.EmptyExpr
+					&& (expr.obj.ct_type_var == .generic_var || expr.obj.typ.has_flag(.generic)
+					|| g.type_has_unresolved_generic_parts(expr.obj.typ)
 					|| ((g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0)
 					&& expr.obj.expr !in [ast.IntegerLiteral, ast.FloatLiteral, ast.StringLiteral, ast.BoolLiteral, ast.CharLiteral])) {
 					if !(expr.obj.expr is ast.Ident && expr.obj.expr.name == expr.name) {
-						resolved := g.resolved_expr_type(expr.obj.expr, expr.obj.typ)
+						mut resolved := g.resolved_expr_type(expr.obj.expr, expr.obj.typ)
 						if resolved != 0 {
+							resolved = g.unwrap_generic(g.recheck_concrete_type(resolved))
+							if g.type_has_unresolved_generic_parts(resolved) {
+								call_like_type := g.resolved_call_like_expr_type(expr.obj.expr)
+								if call_like_type != 0 && !call_like_type.has_flag(.generic)
+									&& !g.type_has_unresolved_generic_parts(call_like_type) {
+									return call_like_type
+								}
+							}
 							return g.unwrap_generic(resolved)
 						}
 					}
@@ -761,10 +880,12 @@ fn (mut g Gen) resolved_expr_type(expr ast.Expr, default_typ ast.Type) ast.Type 
 									generic_names, concrete_types, true)
 								if resolved_field_type != source_field_type {
 									field_type = resolved_field_type
-								} else if converted_field_type := muttable.convert_generic_type(source_field_type,
-									generic_names, concrete_types)
-								{
-									field_type = converted_field_type
+								} else {
+									if converted_field_type := muttable.convert_generic_type(source_field_type,
+										generic_names, concrete_types)
+									{
+										field_type = converted_field_type
+									}
 								}
 							}
 						}
@@ -787,10 +908,12 @@ fn (mut g Gen) resolved_expr_type(expr ast.Expr, default_typ ast.Type) ast.Type 
 											generic_names, sym.info.concrete_types, true)
 										if resolved_field_type != source_field_type {
 											field_type = resolved_field_type
-										} else if converted_field_type := muttable.convert_generic_type(source_field_type,
-											generic_names, sym.info.concrete_types)
-										{
-											field_type = converted_field_type
+										} else {
+											if converted_field_type := muttable.convert_generic_type(source_field_type,
+												generic_names, sym.info.concrete_types)
+											{
+												field_type = converted_field_type
+											}
 										}
 									}
 								}
@@ -799,6 +922,7 @@ fn (mut g Gen) resolved_expr_type(expr ast.Expr, default_typ ast.Type) ast.Type 
 						}
 						else {}
 					}
+
 					$if trace_ci_fixes ? {
 						if g.file.path.contains('binary_search_tree.v') && expr.expr is ast.Ident
 							&& expr.expr.name == 'tree' {
@@ -893,6 +1017,18 @@ fn (mut g Gen) resolved_expr_type(expr ast.Expr, default_typ ast.Type) ast.Type 
 			}
 			if expr.op in [.left_shift, .right_shift, .amp, .pipe, .xor] && left_type != 0 {
 				return g.unwrap_generic(left_type)
+			}
+		}
+		ast.IfExpr {
+			inferred_typ := g.infer_if_expr_type(expr)
+			if inferred_typ != 0 && inferred_typ != ast.void_type {
+				return inferred_typ
+			}
+		}
+		ast.MatchExpr {
+			inferred_typ := g.infer_match_expr_type(expr)
+			if inferred_typ != 0 && inferred_typ != ast.void_type {
+				return inferred_typ
 			}
 		}
 		ast.CallExpr {
@@ -1120,6 +1256,7 @@ fn (mut g Gen) resolved_expr_type(expr ast.Expr, default_typ ast.Type) ast.Type 
 		}
 		else {}
 	}
+
 	resolved := g.type_resolver.get_type_or_default(expr, default_typ)
 	if resolved != 0 {
 		return g.unwrap_generic(resolved)

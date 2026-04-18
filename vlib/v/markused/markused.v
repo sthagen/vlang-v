@@ -53,10 +53,7 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 			println('> used_fn, found matching symbol: ${m}')
 		}
 	}
-	if pref_.backend == .native {
-		// Note: this is temporary, until the native backend supports more features!
-		all_fn_root_names << 'main.main'
-	} else {
+	{
 		mut core_fns := [
 			'main.main',
 		]
@@ -121,6 +118,7 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 			core_fns << 'builtin.closure.closure_init'
 			core_fns << 'builtin.closure.closure_create'
 			core_fns << 'builtin.closure.closure_data'
+			core_fns << 'builtin.closure.closure_try_destroy'
 		}
 		if table.used_features.arr_map {
 			include_panic_deps = true

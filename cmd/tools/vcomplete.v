@@ -293,6 +293,7 @@ const auto_complete_flags_cover = [
 	'-H',
 	'--percentages',
 	'-P',
+	'--lcov',
 	'--show_test_files',
 	'-S',
 	'--absolute',
@@ -532,6 +533,7 @@ fn auto_complete(args []string) {
 		}
 		else {}
 	}
+
 	exit(0)
 }
 
@@ -652,6 +654,7 @@ fn auto_complete_request(args []string) []string {
 					}
 				}
 			}
+
 			// Clear the list if the result is identical to the part examined
 			// (the flag must have already been completed)
 			if list.len == 1 && part == list[0] {
@@ -797,6 +800,7 @@ Register-ArgumentCompleter -Native -CommandName v -ScriptBlock {
 		}
 		else {}
 	}
+
 	return setup
 }
 

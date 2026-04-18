@@ -52,6 +52,16 @@ fn test_cross_compile_keeps_explicit_cc() {
 	assert second.ccompiler == custom_cc
 }
 
+fn test_mac_is_alias_for_macos() {
+	os_kind := pref.os_from_string('mac') or {
+		assert false, err.msg()
+		return
+	}
+	assert os_kind == .macos
+	assert pref.OS.macos.is_target_of('mac')
+	assert !pref.OS.linux.is_target_of('mac')
+}
+
 fn test_disable_explicit_mutability_flag() {
 	target := os.join_path(vroot, 'examples', 'hello_world.v')
 	prefs, _ := pref.parse_args_and_show_errors([], ['-disable-explicit-mutability', target], false)
@@ -62,6 +72,35 @@ fn test_disable_explicit_mutability_flag() {
 		false)
 	assert prefs2.disable_explicit_mutability
 	assert prefs2.build_options.contains('--disable-explicit-mutability')
+}
+
+fn test_profile_flag_does_not_consume_direct_compile_target() {
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	prefs, command := pref.parse_args_and_show_errors([], ['-profile', target], false)
+	assert command == target
+	assert prefs.path == target
+	assert prefs.is_prof
+	assert prefs.profile_file == '-'
+}
+
+fn test_profile_flag_does_not_consume_run_command() {
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	prefs, command := pref.parse_args_and_show_errors([], ['-profile', 'run', target], false)
+	assert command == 'run'
+	assert prefs.path == target
+	assert prefs.is_run
+	assert prefs.is_prof
+	assert prefs.profile_file == '-'
+}
+
+fn test_profile_flag_still_accepts_explicit_output_file() {
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	prefs, command := pref.parse_args_and_show_errors([], ['-profile', 'profile.txt', target],
+		false)
+	assert command == target
+	assert prefs.path == target
+	assert prefs.is_prof
+	assert prefs.profile_file == 'profile.txt'
 }
 
 fn new_wasm_preferences() pref.Preferences {
@@ -146,6 +185,22 @@ fn test_musl_keeps_explicit_gc_selection() {
 	assert prefs.gc_mode == .boehm_full_opt
 }
 
+fn test_m32_sets_i386_arch_when_not_explicitly_set() {
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	prefs, _ := pref.parse_args_and_show_errors([], ['', '-m32', target], false)
+	assert !prefs.m64
+	assert prefs.arch == .i386
+	assert prefs.build_options.contains('-m32')
+}
+
+fn test_m32_does_not_override_explicit_arch() {
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	prefs, _ := pref.parse_args_and_show_errors([], ['', '-arch', 'amd64', '-m32', target], false)
+	assert !prefs.m64
+	assert prefs.arch == .amd64
+	assert prefs.build_options.contains('-m32')
+}
+
 fn test_v_cmds_and_flags() {
 	build_cmd_res := os.execute('${vexe} build ${vroot}/examples/hello_world.v')
 	assert build_cmd_res.output.trim_space() == 'Use `v ${vroot}/examples/hello_world.v` instead.'
@@ -165,6 +220,39 @@ fn test_v_cmds_and_flags() {
 
 	no_bm_files_res := os.execute('${vexe} build-module')
 	assert no_bm_files_res.output.trim_space() == 'v build-module: no module specified'
+}
+
+fn test_build_command_compiles_vsh_without_running_it() {
+	test_dir := os.join_path(os.vtmp_dir(), 'v_pref_build_vsh_${os.getpid()}')
+	os.rmdir_all(test_dir) or {}
+	os.mkdir_all(test_dir)!
+	defer {
+		os.rmdir_all(test_dir) or {}
+	}
+	script_path := os.join_path(test_dir, 'build_only.vsh')
+	marker_path := os.join_path(test_dir, 'marker.txt')
+	mut exe_path := os.join_path(test_dir, 'build_only')
+	$if windows {
+		exe_path += '.exe'
+	}
+	os.write_file(script_path, "import os
+
+fn main() {
+	marker_path := os.join_path(@DIR, 'marker.txt')
+	os.write_file(marker_path, 'ran') or { panic(err) }
+	println('ran')
+}
+")!
+	build_res := os.execute('${os.quoted_path(vexe)} -silent build ${os.quoted_path(script_path)}')
+	assert build_res.exit_code == 0, build_res.output
+	assert build_res.output == ''
+	assert !os.exists(marker_path)
+	assert os.is_file(exe_path)
+
+	run_res := os.execute(os.quoted_path(exe_path))
+	assert run_res.exit_code == 0, run_res.output
+	assert run_res.output.trim_space() == 'ran'
+	assert os.read_file(marker_path)! == 'ran'
 }
 
 const tfile = os.join_path(os.vtmp_dir(), 'unknown_options_output.c')

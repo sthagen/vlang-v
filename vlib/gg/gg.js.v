@@ -231,10 +231,11 @@ pub:
 	resized_fn FNEvent   = unsafe { nil }
 	scroll_fn  FNEvent   = unsafe { nil }
 	// wait_events       bool // set this to true for UIs, to save power
-	fullscreen    bool
-	scale         f32 = 1.0
-	sample_count  int
-	swap_interval int = 1 // 1 = 60fps, 2 = 30fps etc. Ignored by the JS backend; frame pacing follows requestAnimationFrame.
+	fullscreen     bool
+	scale          f32 = 1.0
+	sample_count   int
+	texture_filter TextureFilter = .linear
+	swap_interval  int           = 1 // 1 = 60fps, 2 = 30fps etc. Ignored by the JS backend; frame pacing follows requestAnimationFrame.
 	// ved needs this
 	// init_text bool
 	font_path             string
@@ -520,6 +521,7 @@ fn (mut g Context) handle_mouse_event(event JS.MouseEvent, typ DOMEventType) Eve
 			e.mouse_button = .invalid
 		}
 	}
+
 	e.mouse_x = int(event.offsetX)
 	e.mouse_y = int(event.offsetY)
 	e.mouse_dx = int(event.movementX)

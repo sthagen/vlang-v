@@ -430,6 +430,7 @@ fn (f &Fmt) should_insert_newline_before_node(node ast.Node, prev_node ast.Node)
 			}
 			else {}
 		}
+
 		match node {
 			// Attributes are not respected in the stmts position, so this requires manual checking
 			ast.StructDecl, ast.EnumDecl, ast.FnDecl {
@@ -459,6 +460,7 @@ pub fn (mut f Fmt) node_str(node ast.Node) string {
 		ast.Expr { f.expr(node) }
 		else { panic('´f.node_str()´ is not implemented for ${node}.') }
 	}
+
 	str := f.out.after(pos)
 	f.out.go_back_to(pos)
 	f.empty_line = was_empty_line
@@ -741,6 +743,9 @@ pub fn (mut f Fmt) expr(node_ ast.Expr) {
 		ast.SqlExpr {
 			f.sql_expr(node)
 		}
+		ast.SqlQueryDataExpr {
+			f.sql_query_data_expr(node)
+		}
 		ast.StringLiteral {
 			f.string_literal(node)
 		}
@@ -788,7 +793,7 @@ pub fn (mut f Fmt) expr(node_ ast.Expr) {
 
 fn expr_is_single_line(expr ast.Expr) bool {
 	match expr {
-		ast.Comment, ast.IfExpr, ast.MapInit, ast.MatchExpr {
+		ast.Comment, ast.IfExpr, ast.MapInit, ast.MatchExpr, ast.SqlQueryDataExpr {
 			return false
 		}
 		ast.AnonFn {
@@ -829,7 +834,7 @@ fn expr_is_single_line(expr ast.Expr) bool {
 				stmt := expr.stmts[0]
 				if stmt is ast.ExprStmt && stmt.expr is ast.CallExpr
 					&& (stmt.expr as ast.CallExpr).comments.len > 0 {
-					if comment := stmt.expr.comments[0] {
+					if comment := (stmt.expr as ast.CallExpr).comments[0] {
 						if !comment.is_multi {
 							return false
 						}
@@ -841,6 +846,7 @@ fn expr_is_single_line(expr ast.Expr) bool {
 		}
 		else {}
 	}
+
 	return true
 }
 
@@ -1670,21 +1676,60 @@ pub fn (mut f Fmt) sql_stmt_line(node ast.SqlStmtLine) {
 		.insert {
 			f.writeln('insert ${node.object_var} into ${table_name}')
 		}
+		.upsert {
+			f.writeln('upsert ${node.object_var} into ${table_name}')
+		}
 		.update {
-			f.write('update ${table_name} set ')
-			for i, col in node.updated_columns {
-				f.write('${col} = ')
-				f.expr(node.update_exprs[i])
-				if i < node.updated_columns.len - 1 {
-					f.write(', ')
-				} else {
-					f.write(' ')
+			if node.is_dynamic {
+				f.write('dynamic update ${table_name} set ')
+				f.expr(node.update_data_expr)
+				f.write(' ')
+				f.write('where ')
+				f.expr(node.where_expr)
+				f.writeln('')
+			} else {
+				mut has_multiline_update_expr := false
+				for expr in node.update_exprs {
+					if f.node_str(expr).contains('\n') {
+						has_multiline_update_expr = true
+						break
+					}
 				}
-				f.wrap_long_line(3, true)
+				if has_multiline_update_expr {
+					f.writeln('update ${table_name} set')
+					// SQL block lines use a manual extra tab, so nested update values need two
+					// formatter indent levels to stay visually nested.
+					f.indent += 2
+					for i, col in node.updated_columns {
+						f.write('${col} = ')
+						f.expr(node.update_exprs[i])
+						if i < node.updated_columns.len - 1 {
+							f.write(',')
+						}
+						f.writeln('')
+					}
+					f.indent -= 2
+				} else {
+					f.write('update ${table_name} set ')
+					for i, col in node.updated_columns {
+						f.write('${col} = ')
+						f.expr(node.update_exprs[i])
+						if i < node.updated_columns.len - 1 {
+							f.write(', ')
+						} else {
+							f.write(' ')
+						}
+						f.wrap_long_line(3, true)
+					}
+				}
+				if has_multiline_update_expr {
+					f.write('\twhere ')
+				} else {
+					f.write('where ')
+				}
+				f.expr(node.where_expr)
+				f.writeln('')
 			}
-			f.write('where ')
-			f.expr(node.where_expr)
-			f.writeln('')
 		}
 		.delete {
 			f.write('delete from ${table_name} where ')
@@ -1706,6 +1751,7 @@ pub fn (mut f Fmt) type_decl(node ast.TypeDecl) {
 		ast.FnTypeDecl { f.fn_type_decl(node) }
 		ast.SumTypeDecl { f.sum_type_decl(node) }
 	}
+
 	f.writeln('')
 }
 
@@ -1849,6 +1895,8 @@ pub fn (mut f Fmt) array_decompose(node ast.ArrayDecompose) {
 }
 
 pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
+	typed_fixed_literal := node.is_fixed && node.has_val && node.typ != 0
+		&& node.typ != ast.void_type
 	if node.is_fixed && node.is_option {
 		f.write('?')
 	}
@@ -1883,6 +1931,14 @@ pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
 		}
 		f.write('}')
 		return
+	}
+	if typed_fixed_literal && f.array_init_depth == 0 {
+		fixed_literal_type := if node.literal_typ != ast.void_type {
+			node.literal_typ
+		} else {
+			node.typ.clear_option_and_result()
+		}
+		f.write(f.type_to_str_using_aliases(fixed_literal_type, f.mod2alias))
 	}
 	// `[1,2,3]`
 	f.write('[')
@@ -2044,6 +2100,9 @@ pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
 	// `[100]u8`
 	if node.is_fixed {
 		if node.has_val {
+			if typed_fixed_literal {
+				return
+			}
 			if node.from_to_fixed_size {
 				f.write('.to_fixed_size()')
 			} else {
@@ -2897,8 +2956,9 @@ fn (mut f Fmt) match_branch(branch ast.MatchBranch, single_line bool, is_comptim
 
 pub fn (mut f Fmt) match_expr(node ast.MatchExpr) {
 	dollar := if node.is_comptime { '$' } else { '' }
+	cond, cond_or_expr := match_cond_with_trailing_or_expr(node.cond)
 	f.write('${dollar}match ')
-	f.expr(node.cond)
+	f.expr(cond)
 	f.writeln(' {')
 	f.indent++
 	f.comments(node.comments)
@@ -2929,6 +2989,63 @@ pub fn (mut f Fmt) match_expr(node ast.MatchExpr) {
 	}
 	f.indent--
 	f.write('}')
+	f.or_expr(cond_or_expr)
+}
+
+fn match_cond_with_trailing_or_expr(expr ast.Expr) (ast.Expr, ast.OrExpr) {
+	match expr {
+		ast.CallExpr {
+			if expr.or_block.kind == .block {
+				mut cond := expr
+				or_expr := cond.or_block
+				cond.or_block = ast.OrExpr{}
+				return ast.Expr(cond), or_expr
+			}
+		}
+		ast.Ident {
+			if expr.or_expr.kind == .block {
+				mut cond := expr
+				or_expr := cond.or_expr
+				cond.or_expr = ast.OrExpr{}
+				return ast.Expr(cond), or_expr
+			}
+		}
+		ast.IndexExpr {
+			if expr.or_expr.kind == .block {
+				mut cond := expr
+				or_expr := cond.or_expr
+				cond.or_expr = ast.OrExpr{}
+				return ast.Expr(cond), or_expr
+			}
+		}
+		ast.ParExpr {
+			cond, or_expr := match_cond_with_trailing_or_expr(expr.expr)
+			if or_expr.kind == .block {
+				mut par_expr := expr
+				par_expr.expr = cond
+				return ast.Expr(par_expr), or_expr
+			}
+		}
+		ast.PrefixExpr {
+			if expr.op == .arrow && expr.or_block.kind == .block {
+				mut cond := expr
+				or_expr := cond.or_block
+				cond.or_block = ast.OrExpr{}
+				return ast.Expr(cond), or_expr
+			}
+		}
+		ast.SelectorExpr {
+			if expr.or_block.kind == .block {
+				mut cond := expr
+				or_expr := cond.or_block
+				cond.or_block = ast.OrExpr{}
+				return ast.Expr(cond), or_expr
+			}
+		}
+		else {}
+	}
+
+	return expr, ast.OrExpr{}
 }
 
 pub fn (mut f Fmt) offset_of(node ast.OffsetOf) {
@@ -3023,6 +3140,7 @@ pub fn (mut f Fmt) prefix_expr(node ast.PrefixExpr) {
 					.not_is { f.write(' is ') }
 					else {}
 				}
+
 				f.expr(node.right.expr.right)
 				return
 			}
@@ -3059,6 +3177,7 @@ pub fn (mut f Fmt) select_expr(node ast.SelectExpr) {
 				ast.ExprStmt { f.expr(branch.stmt.expr) }
 				else { f.stmt(branch.stmt) }
 			}
+
 			f.single_line_if = false
 			f.write(' {')
 		}
@@ -3136,10 +3255,14 @@ pub fn (mut f Fmt) sql_expr(node ast.SqlExpr) {
 	f.write('sql ')
 	f.expr(node.db_expr)
 	f.writeln(' {')
+	f.write('\t')
+	if node.is_dynamic {
+		f.write('dynamic ')
+	}
 	if node.is_insert {
-		f.write('\tinsert ')
+		f.write('insert ')
 	} else {
-		f.write('\tselect ')
+		f.write('select ')
 	}
 	if node.has_distinct {
 		f.write('distinct ')
@@ -3182,6 +3305,7 @@ pub fn (mut f Fmt) sql_expr(node ast.SqlExpr) {
 			.right { f.write('right join ') }
 			.full_outer { f.write('full outer join ') }
 		}
+
 		join_sym := f.table.sym(join.table_expr.typ)
 		mut join_table_name := join_sym.name
 		if !join_table_name.starts_with('C.') && !join_table_name.starts_with('JS.') {
@@ -3212,6 +3336,75 @@ pub fn (mut f Fmt) sql_expr(node ast.SqlExpr) {
 	f.writeln('')
 	f.write('}')
 	f.or_expr(node.or_expr)
+}
+
+pub fn (mut f Fmt) sql_query_data_expr(node ast.SqlQueryDataExpr) {
+	if node.items.len == 0 {
+		f.write('{}')
+		return
+	}
+	f.writeln('{')
+	f.indent++
+	for idx, item in node.items {
+		f.write_indent()
+		f.sql_query_data_item(item)
+		if idx < node.items.len - 1 {
+			f.writeln(',')
+		} else {
+			f.writeln('')
+		}
+	}
+	f.indent--
+	f.write_indent()
+	f.write('}')
+}
+
+fn (mut f Fmt) sql_query_data_item(item ast.SqlQueryDataItem) {
+	match item {
+		ast.SqlQueryDataLeaf {
+			f.expr(item.expr)
+		}
+		ast.SqlQueryDataIf {
+			for idx, branch in item.branches {
+				if idx == 0 {
+					f.write('if ')
+					f.expr(branch.cond)
+					f.write(' ')
+				} else if branch.cond is ast.EmptyExpr {
+					f.write('else ')
+				} else {
+					f.write('else if ')
+					f.expr(branch.cond)
+					f.write(' ')
+				}
+				f.sql_query_data_branch_items(branch.items)
+				if idx < item.branches.len - 1 {
+					f.write(' ')
+				}
+			}
+		}
+	}
+}
+
+fn (mut f Fmt) sql_query_data_branch_items(items []ast.SqlQueryDataItem) {
+	if items.len == 0 {
+		f.write('{}')
+		return
+	}
+	f.writeln('{')
+	f.indent++
+	for idx, item in items {
+		f.write_indent()
+		f.sql_query_data_item(item)
+		if idx < items.len - 1 {
+			f.writeln(',')
+		} else {
+			f.writeln('')
+		}
+	}
+	f.indent--
+	f.write_indent()
+	f.write('}')
 }
 
 pub fn (mut f Fmt) char_literal(node ast.CharLiteral) {

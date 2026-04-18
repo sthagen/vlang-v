@@ -59,7 +59,7 @@ pub:
 pub mut:
 	// how the http response should be handled by veb's backend
 	return_type       ContextReturnType = .normal
-	req               http.Request
+	req               http.Request @[skip]
 	custom_mime_types map[string]string
 	// TCP connection to client. Only for advanced usage!
 	conn &net.TcpConn = unsafe { nil }
@@ -368,6 +368,7 @@ fn (mut ctx Context) serve_compressed_static(content_type string, file_path stri
 			c, '.gz', 'gzip'
 		}
 	}
+
 	compressed_path := static_compression_cache_path(file_path, ext)
 	// Try to save compressed version for future requests
 	mut write_success := true
@@ -513,7 +514,7 @@ pub fn (mut ctx Context) takeover_conn() {
 			write_timeout: 30 * time.second
 		}
 	} else if ctx.conn != unsafe { nil } {
-		// For the picoev backend: the connection exists but uses non-blocking I/O.
+		// The connection exists but uses non-blocking I/O.
 		// Switch to blocking mode for reliable SSE writes.
 		fd := ctx.conn.handle
 		$if !windows {

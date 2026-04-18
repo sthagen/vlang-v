@@ -12,6 +12,52 @@ module c
 import v.ast
 import v.util
 
+// When a smartcast variable's original type is a sumtype with an explicit
+// str() method, generate a call to the sumtype's str() with the original
+// un-smartcasted variable, bypassing the variant's auto-generated str().
+// Returns true if handled, false if the caller should use the normal path.
+fn (mut g Gen) gen_sumtype_str_for_smartcast(expr ast.Expr) bool {
+	if expr is ast.Ident && expr.obj is ast.Var && expr.obj.smartcasts.len > 0 {
+		orig := g.unwrap_generic(expr.obj.typ)
+		orig_sym := g.table.sym(orig)
+		if orig_sym.kind == .sum_type && orig_sym.has_method('str') {
+			str_fn_name := g.get_str_fn(orig)
+			_, str_method_expects_ptr, _ := orig_sym.str_method_info()
+			g.write2(str_fn_name, '(')
+			if expr.obj.is_auto_deref || orig.is_ptr() || expr.obj.is_mut {
+				if str_method_expects_ptr {
+					// pointer variable, str() expects pointer - pass as-is
+				} else {
+					g.write('*')
+				}
+			}
+			g.write(c_name(expr.name))
+			g.write(')')
+			return true
+		}
+	} else if expr is ast.SelectorExpr {
+		scope := g.file.scope.innermost(expr.pos.pos)
+		field := scope.find_struct_field(expr.expr.str(), expr.expr_type, expr.field_name)
+		if field != unsafe { nil } && field.smartcasts.len > 0 {
+			orig := g.unwrap_generic(field.orig_type)
+			orig_sym := g.table.sym(orig)
+			if orig_sym.kind == .sum_type && orig_sym.has_method('str') {
+				str_fn_name := g.get_str_fn(orig)
+				_, str_method_expects_ptr, _ := orig_sym.str_method_info()
+				g.write2(str_fn_name, '(')
+				if !str_method_expects_ptr && orig.is_ptr() {
+					g.write('*')
+				}
+				g.prevent_sum_type_unwrapping_once = true
+				g.expr(expr)
+				g.write(')')
+				return true
+			}
+		}
+	}
+	return false
+}
+
 fn (mut g Gen) is_type_name_string_expr(expr ast.Expr) bool {
 	return match expr {
 		ast.SelectorExpr {
@@ -56,6 +102,7 @@ fn (g Gen) should_clear_option_flag(expr ast.Expr) bool {
 		ast.Ident { expr }
 		else { return false }
 	}
+
 	match ident.obj {
 		ast.Var {
 			if ident.obj.is_unwrapped {
@@ -70,6 +117,7 @@ fn (g Gen) should_clear_option_flag(expr ast.Expr) bool {
 		}
 		else {}
 	}
+
 	return false
 }
 
@@ -83,7 +131,8 @@ fn int_ref_interpolates_as_value(expr ast.Expr, typ ast.Type, fmt u8) bool {
 	return match expr {
 		ast.Ident {
 			if expr.obj is ast.Var {
-				expr.obj.is_arg || (expr.obj.expr is ast.PrefixExpr && expr.obj.expr.op == .amp)
+				expr.obj.is_arg || expr.obj.expr is ast.AsCast
+					|| (expr.obj.expr is ast.PrefixExpr && expr.obj.expr.op == .amp)
 			} else {
 				false
 			}
@@ -221,6 +270,7 @@ fn (mut g Gen) str_format(node ast.StringInterLiteral, i int, fmts []u8) (u64, s
 				// ast.f64_type { fmt_type = .si_g64 }
 				else { fmt_type = .si_g64 }
 			}
+
 			remove_tail_zeros = true
 		} else if fspec in [`e`, `E`] {
 			match typ {
@@ -434,7 +484,9 @@ fn (mut g Gen) str_val(node ast.StringInterLiteral, i int, fmts []u8) {
 				}
 			}
 		}
-		if exp_typ.has_flag(.option) && expr is ast.Ident && g.is_comptime_for_var(expr) {
+		if !is_comptime_for_var && g.gen_sumtype_str_for_smartcast(expr) {
+			// handled
+		} else if exp_typ.has_flag(.option) && expr is ast.Ident && g.is_comptime_for_var(expr) {
 			str_fn_name := g.get_str_fn(exp_typ.clear_flag(.option))
 			g.write('${str_fn_name}(*(${g.base_type(exp_typ)}*)(')
 			old_inside_opt_or_res := g.inside_opt_or_res
@@ -500,6 +552,10 @@ fn (mut g Gen) string_inter_literal(node ast.StringInterLiteral) {
 	mut node_ := unsafe { node }
 	mut fmts := node_.fmts.clone()
 	for i, mut expr in node_.exprs {
+		if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 && !node_.need_fmts[i]
+			&& fmts[i] != `_` {
+			fmts[i] = `_`
+		}
 		mut field_typ := if g.is_type_name_string_expr(expr) {
 			ast.string_type
 		} else if mut expr is ast.AsCast {
@@ -624,6 +680,9 @@ fn (mut g Gen) string_inter_literal(node ast.StringInterLiteral) {
 			else {}
 		}
 	}
+	if g.gen_simple_string_inter_literal(node_, fmts) {
+		return
+	}
 	g.write2('builtin__str_intp(', node.vals.len.str())
 	g.write(', _MOV((StrIntpData[]){')
 	for i, val in node.vals {
@@ -703,4 +762,83 @@ fn (mut g Gen) string_inter_literal(node ast.StringInterLiteral) {
 		}
 	}
 	g.write('}))')
+}
+
+const simple_string_interpolation_default_precision = 987698
+
+fn (mut g Gen) gen_simple_string_inter_literal(node ast.StringInterLiteral, fmts []u8) bool {
+	if node.exprs.len == 0 || node.expr_types.len < node.exprs.len {
+		return false
+	}
+	for i in 0 .. node.exprs.len {
+		if i >= node.need_fmts.len || node.need_fmts[i] || i >= fmts.len || fmts[i] == `_` {
+			return false
+		}
+		if node.expr_types[i].is_any_kind_of_pointer() || node.expr_types[i].is_int_valptr()
+			|| node.expr_types[i].is_float_valptr() {
+			return false
+		}
+		if i < node.fwidths.len && node.fwidths[i] != 0 {
+			return false
+		}
+		if i < node.fwidth_exprs.len && node.fwidth_exprs[i] !is ast.EmptyExpr {
+			return false
+		}
+		if i < node.precisions.len
+			&& node.precisions[i] != simple_string_interpolation_default_precision {
+			return false
+		}
+		if i < node.precision_exprs.len && node.precision_exprs[i] !is ast.EmptyExpr {
+			return false
+		}
+		if i < node.pluss.len && node.pluss[i] {
+			return false
+		}
+		if i < node.fills.len && node.fills[i] {
+			return false
+		}
+	}
+	if node.exprs.len == 1 && node.vals.len == 2 && node.vals[0].len == 0 && node.vals[1].len == 0 {
+		if !g.gen_sumtype_str_for_smartcast(node.exprs[0]) {
+			g.gen_expr_to_string(node.exprs[0], node.expr_types[0])
+		}
+		return true
+	}
+	mut part_count := 0
+	for i, val in node.vals {
+		if val.len > 0 {
+			part_count++
+		}
+		if i < node.exprs.len {
+			part_count++
+		}
+	}
+	if part_count <= 0 {
+		return false
+	}
+	g.write('builtin__string_plus_many(${part_count}, _MOV((string[${part_count}]){')
+	mut written_parts := 0
+	for i, val in node.vals {
+		if val.len > 0 {
+			if written_parts > 0 {
+				g.write(', ')
+			}
+			mut escaped_val := cescape_nonascii(util.smart_quote(val, false))
+			escaped_val = escaped_val.replace('\0', '\\0')
+			g.write2('_S("', escaped_val)
+			g.write('")')
+			written_parts++
+		}
+		if i < node.exprs.len {
+			if written_parts > 0 {
+				g.write(', ')
+			}
+			if !g.gen_sumtype_str_for_smartcast(node.exprs[i]) {
+				g.gen_expr_to_string(node.exprs[i], node.expr_types[i])
+			}
+			written_parts++
+		}
+	}
+	g.write('}))')
+	return true
 }

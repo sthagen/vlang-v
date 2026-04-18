@@ -156,10 +156,10 @@ pub struct Context {
 mut:
 	content_type string          = 'text/plain'
 	status       string          = '200 OK'
-	ctx          context.Context = context.EmptyContext{}
+	ctx          context.Context = context.EmptyContext{} @[skip]
 pub mut:
 	// HTTP Request
-	req http.Request
+	req http.Request @[skip]
 	// TODO: Response
 	done bool
 	// time.ticks() from start of vweb connection handle.
@@ -230,6 +230,9 @@ pub fn (mut ctx Context) send_response_to_client(mimetype string, res string) bo
 		return false
 	}
 	ctx.done = true
+	if voidptr(ctx.conn) == unsafe { nil } {
+		return false
+	}
 
 	mut resp := http.Response{
 		body: res
@@ -827,11 +830,11 @@ fn handle_route[T](mut app T, url urllib.URL, host string, routes &map[string]Ro
 							}
 
 							if route.middleware == '' {
-								app.$method(args)
+								app.$method(...args)
 							} else if validate_app_middleware(mut app, route.middleware,
 								method.name)
 							{
-								app.$method(args)
+								app.$method(...args)
 							}
 						} else {
 							if route.middleware == '' {
@@ -871,9 +874,9 @@ fn handle_route[T](mut app T, url urllib.URL, host string, routes &map[string]Ro
 							}
 						}
 						if route.middleware == '' {
-							app.$method(method_args)
+							app.$method(...method_args)
 						} else if validate_app_middleware(mut app, route.middleware, method.name) {
-							app.$method(method_args)
+							app.$method(...method_args)
 						}
 						return
 					}

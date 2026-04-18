@@ -358,11 +358,13 @@ pub fn (mut g JsGen) gen_js_main_for_tests() {
 
 		if g.pref.is_stats {
 			g.writeln('main__BenchedTests_testing_step_start(bt,new string("${tcname}"))')
+			g.writeln('try {')
 		}
-
-		g.writeln('try { let res = ${tcname}(); if (res instanceof Promise) { await res; } } catch (_e) {} ')
+		g.writeln('let res = ${tcname}(); if (res instanceof Promise) { await res; }')
 		if g.pref.is_stats {
+			g.writeln('} finally {')
 			g.writeln('main__BenchedTests_testing_step_end(bt);')
+			g.writeln('}')
 		}
 	}
 
@@ -1081,6 +1083,9 @@ fn (mut g JsGen) expr(node_ ast.Expr) {
 		ast.SqlExpr {
 			// TODO
 		}
+		ast.SqlQueryDataExpr {
+			// TODO
+		}
 		ast.StringInterLiteral {
 			g.gen_string_inter_literal(node)
 		}
@@ -1140,6 +1145,7 @@ fn (mut g JsGen) assert_subexpression_to_ctemp(expr ast.Expr, expr_type ast.Type
 		}
 		else {}
 	}
+
 	return unsupported_ctemp_assert_transform
 }
 
@@ -1197,6 +1203,7 @@ fn (mut g JsGen) gen_assert_metainfo(node ast.AssertStmt) string {
 		}
 		else {}
 	}
+
 	return metaname
 }
 
@@ -1247,6 +1254,7 @@ fn (mut g JsGen) gen_assert_single_expr(expr ast.Expr, typ ast.Type) {
 			}
 		}
 	}
+
 	// g.writeln(' /* typeof: ' + expr.type_name() + ' type: ' + typ.str() + ' */ ')
 }
 
@@ -1339,6 +1347,33 @@ fn (mut g JsGen) gen_assign_stmt(stmt ast.AssignStmt, semicolon bool) {
 			}
 			if stmt.op == .decl_assign {
 				g.write(if g.inside_loop || is_mut { 'let ' } else { 'const ' })
+			}
+			if left is ast.IndexExpr && left.is_index_operator {
+				if stmt.op == .assign {
+					g.index_operator_call(left.left, left.left_type, left.index, left.index_type,
+						'[]=', val, stmt.right_types[i])
+				} else {
+					infix_op := token.assign_op_to_infix_op(stmt.op)
+					op_expr := ast.InfixExpr{
+						left:          ast.Expr(left)
+						right:         val
+						op:            infix_op
+						pos:           stmt.pos
+						left_type:     left.typ
+						right_type:    stmt.right_types[i]
+						promoted_type: left.typ
+					}
+					g.index_operator_call(left.left, left.left_type, left.index, left.index_type,
+						'[]=', ast.Expr(op_expr), left.typ)
+				}
+				if semicolon {
+					if g.inside_loop {
+						g.write('; ')
+					} else {
+						g.writeln(';')
+					}
+				}
+				continue
 			}
 
 			mut array_set := false
@@ -1445,7 +1480,9 @@ fn (mut g JsGen) gen_assign_stmt(stmt ast.AssignStmt, semicolon bool) {
 				continue
 			}
 
-			is_ptr := stmt.op == .assign && stmt.right_types[i].is_ptr() && !array_set
+			left_type := if stmt.left_types.len > i { stmt.left_types[i] } else { ast.no_type }
+			is_ptr := stmt.op == .assign && left_type.is_ptr() && !left_type.has_option_or_result()
+				&& !array_set
 			if is_ptr {
 				g.write('.val')
 			}
@@ -1573,6 +1610,7 @@ fn (mut g JsGen) gen_branch_stmt(it ast.BranchStmt) {
 				verror('unexpected branch stmt: ${it.kind}')
 			}
 		}
+
 		return
 	}
 	g.write(it.kind.str())
@@ -1657,6 +1695,7 @@ fn (mut g JsGen) cc_type(typ ast.Type, _is_prefix_struct bool) string {
 		}
 		else {}
 	}
+
 	if styp.starts_with('JS__') {
 		styp = styp[4..]
 	}
@@ -3016,6 +3055,11 @@ fn (mut g JsGen) gen_if_expr(node ast.IfExpr) {
 }
 
 fn (mut g JsGen) gen_index_expr(expr ast.IndexExpr) {
+	if expr.is_index_operator {
+		g.index_operator_call(expr.left, expr.left_type, expr.index, expr.index_type, '[]',
+			ast.empty_expr, ast.void_type)
+		return
+	}
 	left_sym := g.table.sym(expr.left_type)
 	// TODO: Handle splice setting if it's implemented
 	if expr.index is ast.RangeExpr {
@@ -3122,6 +3166,7 @@ fn (mut g JsGen) should_wrap_js_selector_rvalue(expr ast.Expr, expected_type ast
 		ast.SelectorExpr {}
 		else { return false }
 	}
+
 	target_sym := g.table.final_sym(g.unwrap_generic(expected_type))
 	if target_sym.language == .js || target_sym.name.starts_with('JS.') {
 		return false
@@ -3303,6 +3348,7 @@ fn (mut g JsGen) gen_infix_expr(it ast.InfixExpr) {
 					''
 				}
 			}
+
 			g.write('.${name} (')
 			g.expr(it.right)
 			g.gen_deref_ptr(it.right_type)
@@ -3484,7 +3530,7 @@ fn (mut g JsGen) gen_selector_expr(it ast.SelectorExpr) {
 				if node.field_name == 'name' {
 					g.type_name(it.name_type)
 					return
-				} else if node.field_name == 'idx' {
+				} else if node.field_name in ['idx', 'typ'] {
 					g.write('new int(')
 					g.write('${int(g.unwrap_generic(it.name_type))}')
 					g.write(')')
@@ -3893,11 +3939,66 @@ fn replace_op(s string) string {
 		'**' { '_pow' }
 		'/' { '_div' }
 		'%' { '_mod' }
+		'[]' { '_index' }
+		'[]=' { '_index_set' }
 		'<' { '_lt' }
 		'>' { '_gt' }
 		'==' { '_eq' }
 		else { '' }
 	}
+}
+
+struct JsIndexOperatorMethodInfo {
+	method        ast.Fn
+	name          string
+	receiver_type ast.Type
+}
+
+fn (mut g JsGen) resolved_index_operator_receiver_type(receiver ast.Expr, receiver_type ast.Type) ast.Type {
+	_ = receiver
+	return g.unwrap_generic(receiver_type)
+}
+
+fn (mut g JsGen) index_operator_method_info(receiver ast.Expr, receiver_type ast.Type, op string) ?JsIndexOperatorMethodInfo {
+	resolved_receiver_type := g.resolved_index_operator_receiver_type(receiver, receiver_type)
+	receiver_info := g.unwrap(if resolved_receiver_type != 0 {
+		resolved_receiver_type
+	} else {
+		receiver_type
+	})
+	mut method := ast.Fn{}
+	if receiver_info.sym.has_method(op) || receiver_info.sym.has_method_with_generic_parent(op) {
+		method = receiver_info.sym.find_method_with_generic_parent(op) or {
+			receiver_info.sym.find_method(op) or { return none }
+		}
+	} else if receiver_info.unaliased_sym.has_method_with_generic_parent(op) {
+		method = receiver_info.unaliased_sym.find_method_with_generic_parent(op) or { return none }
+	} else {
+		return none
+	}
+	method_name := g.styp(receiver_info.unaliased.set_nr_muls(0)) + '_' + util.replace_op(op)
+	return JsIndexOperatorMethodInfo{
+		method:        method
+		name:          method_name
+		receiver_type: receiver_info.typ
+	}
+}
+
+fn (mut g JsGen) index_operator_call(receiver ast.Expr, receiver_type ast.Type, index ast.Expr, index_type ast.Type, op string, value ast.Expr, value_type ast.Type) {
+	info := g.index_operator_method_info(receiver, receiver_type, op) or {
+		verror('missing `${op}` overload for `${g.table.type_to_str(receiver_type)}`')
+		return
+	}
+	g.write(info.name)
+	g.write('(')
+	g.op_arg(receiver, info.method.params[0].typ, info.receiver_type)
+	g.write(', ')
+	g.op_arg(index, info.method.params[1].typ, index_type)
+	if op == '[]=' {
+		g.write(', ')
+		g.op_arg(value, info.method.params[2].typ, value_type)
+	}
+	g.write(')')
 }
 
 fn (mut g JsGen) gen_postfix_index_expr(expr ast.IndexExpr, op token.Kind) {
@@ -3956,6 +4057,7 @@ fn (mut g JsGen) gen_postfix_index_expr(expr ast.IndexExpr, op token.Kind) {
 					verror('unreachable')
 				}
 			}
+
 			g.write('new ${g.styp(key_typ)}(')
 
 			g.expr(expr.left)
@@ -3973,6 +4075,7 @@ fn (mut g JsGen) gen_postfix_index_expr(expr ast.IndexExpr, op token.Kind) {
 					verror('not yet implemented')
 				}
 			}
+
 			g.write(')')
 		}
 	} else if left_sym_kind == .string {

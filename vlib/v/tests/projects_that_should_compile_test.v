@@ -93,6 +93,31 @@ fn test_running_subdir_project_with_parent_vmod_works() {
 	assert res.output.trim_space() == 'built'
 }
 
+fn test_running_module_with_same_module_subdirs_setting_works() {
+	root := os.join_path(os.vtmp_dir(), 'v_same_module_subdirs_${os.getpid()}')
+	os.rmdir_all(root) or {}
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	os.mkdir_all(os.join_path(root, 'app', 'foo', 'src', 'internal', 'nested'))!
+	os.write_file(os.join_path(root, 'app', 'main.v'),
+		'module main\n\nimport foo\n\nfn main() {\n\tprintln(foo.answer())\n}\n')!
+	os.write_file(os.join_path(root, 'app', 'foo', 'v.mod'),
+		"Module {\n\tname: 'foo'\n\tsubdirs: ['internal']\n}\n")!
+	os.write_file(os.join_path(root, 'app', 'foo', 'src', 'foo.v'),
+		'module foo\n\npub fn answer() int {\n\treturn secret()\n}\n')!
+	os.write_file(os.join_path(root, 'app', 'foo', 'src', 'internal', 'nested', 'secret.v'),
+		'module foo\n\nfn secret() int {\n\treturn 42\n}\n')!
+	old_dir := os.getwd()
+	defer {
+		os.chdir(old_dir) or {}
+	}
+	os.chdir(root)!
+	res := os.execute('${os.quoted_path(@VEXE)} run app/main.v')
+	assert res.exit_code == 0, res.output
+	assert res.output.trim_space() == '42'
+}
+
 fn test_module_resolution_is_independent_of_working_directory() {
 	workspace := setup_module_resolution_workdir_fixture()
 	defer {
@@ -123,4 +148,52 @@ fn test_custom_print_should_compile_with_no_builtin() {
 	}
 	_ = vrun_ok('-o ${os.quoted_path(output_path)} -no-builtin', source_path)
 	assert os.exists(output_path)
+}
+
+fn test_generic_recursive_self_method_call_should_compile() {
+	source_path := os.join_path(os.vtmp_dir(),
+		'generic_recursive_self_method_call_${os.getpid()}.v')
+	output_path := os.join_path(os.vtmp_dir(), 'generic_recursive_self_method_call_${os.getpid()}')
+	mut expected_output_path := output_path
+	$if windows {
+		expected_output_path += '.exe'
+	}
+	source := [
+		'struct Decoder {}',
+		'',
+		'struct StructTypePointer[T] {',
+		'mut:',
+		'\tval &T',
+		'}',
+		'',
+		'pub fn decode[T](val string) !T {',
+		'\tmut decoder := Decoder{}',
+		'',
+		'\tmut result := T{}',
+		'\tdecoder.decode_value(mut result)!',
+		'\treturn result',
+		'}',
+		'',
+		'fn (mut decoder Decoder) decode_value[T](mut val T) ! {',
+		'\t\$if T.indirections != 0 {',
+		'\t\tunsafe {',
+		'\t\t\t*val = 2',
+		'\t\t}',
+		'\t} \$else \$if T is \$struct {',
+		'\t\tdecode_value(mut val.val)!',
+		'\t}',
+		'}',
+		'',
+		'fn main() {',
+		"\tassert *decode[StructTypePointer[int]]('2')!.val == 2",
+		'}',
+	].join_lines()
+	write_file(source_path, source)
+	defer {
+		os.rm(source_path) or {}
+		os.rm(output_path) or {}
+		os.rm(expected_output_path) or {}
+	}
+	_ = vrun_ok('-o ${os.quoted_path(output_path)}', source_path)
+	assert os.exists(expected_output_path)
 }

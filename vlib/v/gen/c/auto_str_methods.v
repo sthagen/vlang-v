@@ -450,6 +450,15 @@ fn (mut g Gen) gen_str_for_interface(info ast.Interface, styp string, typ_str st
 		}
 
 		// str_intp
+		if sub_sym.kind == .function {
+			res := 'builtin__str_intp(2, _MOV((StrIntpData[]){
+				{_S("${clean_interface_v_type_name}("), ${si_s_code}, {.d_s = ${func_name}()}, 0, 0, 0},
+				{_S(")"), 0, {0}, 0, 0, 0}
+			}))'
+			fn_builder.write_string2('\tif (x._typ == _${styp}_${sub_sym.cname}_index)',
+				' return ${res};\n')
+			continue
+		}
 		deref := if sym_has_str_method && str_method_expects_ptr { ' ' } else { '*' }
 		if typ == ast.string_type {
 			mut val := '${func_name}(${deref}(${sub_sym.cname}*)x._${sub_sym.cname}'
@@ -877,6 +886,9 @@ fn (mut g Gen) gen_str_for_map(info ast.Map, styp string, str_fn_name string) {
 
 	if key_sym.kind == .string {
 		g.auto_str_funcs.writeln('\t\tstring key = *(string*)builtin__DenseArray_key(&m.key_values, i);')
+	} else if key_sym.kind == .array_fixed {
+		g.auto_str_funcs.writeln('\t\t${key_styp} key;')
+		g.auto_str_funcs.writeln('\t\tmemcpy(key, builtin__DenseArray_key(&m.key_values, i), sizeof(${key_styp}));')
 	} else {
 		g.auto_str_funcs.writeln('\t\t${key_styp} key = *(${key_styp}*)builtin__DenseArray_key(&m.key_values, i);')
 	}
@@ -1167,12 +1179,16 @@ fn (mut g Gen) gen_str_for_struct(info ast.Struct, lang ast.Language, styp strin
 		// handle circular ref type of struct to the struct itself
 		if styp == field_styp && !allow_circular {
 			if is_field_array {
+				tmpvar := g.new_tmp_var()
 				if is_opt_field {
 					arr_styp := g.base_type(field.typ)
-					fn_body.write_string('${it_field_name}.state != 2 && (*(${arr_styp}*)${it_field_name}.data).len > 0 ? ${funcprefix}_S("[<circular>]") : ${funcprefix}_S("[]")')
+					fn_body_surrounder.add('\tstring ${tmpvar} = ${funcprefix}builtin__autostr_array_circular(${it_field_name}.state != 2 ? (*(${arr_styp}*)${it_field_name}.data).len : 0);',
+						'\tbuiltin__string_free(&${tmpvar});')
 				} else {
-					fn_body.write_string('${it_field_name}.len > 0 ? ${funcprefix}_S("[<circular>]") : ${funcprefix}_S("[]")')
+					fn_body_surrounder.add('\tstring ${tmpvar} = ${funcprefix}builtin__autostr_array_circular(${it_field_name}.len);',
+						'\tbuiltin__string_free(&${tmpvar});')
 				}
+				fn_body.write_string(tmpvar)
 			} else {
 				fn_body.write_string('${funcprefix}_S("<circular>")')
 			}

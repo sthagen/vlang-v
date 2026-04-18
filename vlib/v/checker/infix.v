@@ -136,25 +136,39 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 	}
 
 	// `if n is ast.Ident && n.is_mut { ... }`
+	// Walk the left side of && chains to find `is` checks for smartcasting.
+	// NOTE: Uses a regular loop with explicit casts instead of
+	// `for mut left_node is ast.InfixExpr` to avoid a codegen bug where
+	// reassignment inside such a loop overwrites the pointed-to InfixExpr
+	// struct instead of reassigning the Expr variable.
 	if !c.inside_sql && node.op == .and {
-		mut left_node := node.left
-		for mut left_node is ast.InfixExpr {
-			if left_node.op == .and && mut left_node.right is ast.InfixExpr {
-				if left_node.right.op == .key_is {
+		mut left_expr := node.left
+		for {
+			if left_expr !is ast.InfixExpr {
+				break
+			}
+			mut left_infix := unsafe { &(left_expr as ast.InfixExpr) }
+			if left_infix.op == .and && left_infix.right is ast.InfixExpr {
+				mut right_infix := unsafe { &(left_infix.right as ast.InfixExpr) }
+				if right_infix.op == .key_is {
 					// search last `n is ast.Ident` in the left
-					from_type := c.expr(mut left_node.right.left)
-					to_type := c.expr(mut left_node.right.right)
-					c.autocast_in_if_conds(mut node.right, left_node.right.left, from_type, to_type)
+					from_type := c.expr(mut right_infix.left)
+					to_type := c.expr(mut right_infix.right)
+					c.autocast_in_if_conds(mut node.right, right_infix.left, from_type, to_type)
 				}
 			}
-			if left_node.op == .key_is {
+			if left_infix.op == .key_is {
 				// search `n is ast.Ident`
-				from_type := c.expr(mut left_node.left)
-				to_type := c.expr(mut left_node.right)
-				c.autocast_in_if_conds(mut node.right, left_node.left, from_type, to_type)
+				from_type := c.expr(mut left_infix.left)
+				to_type := c.expr(mut left_infix.right)
+				c.autocast_in_if_conds(mut node.right, left_infix.left, from_type, to_type)
 				break
-			} else if left_node.op == .and {
-				left_node = left_node.left
+			} else if left_infix.op == .and {
+				if left_infix.left is ast.InfixExpr {
+					left_expr = left_infix.left
+				} else {
+					break
+				}
 			} else {
 				break
 			}
@@ -181,7 +195,11 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				}
 			}
 		} else if mut node.right is ast.ArrayInit {
-			if node.right.exprs.len == 0 && node.right.elem_type == ast.void_type {
+			left_value_type := c.table.value_type(c.unwrap_generic(left_type))
+			if node.right.is_fixed
+				&& c.table.final_sym(c.unwrap_generic(left_value_type)).kind == .interface {
+				c.expected_type = ast.void_type
+			} else if node.right.exprs.len == 0 && node.right.elem_type == ast.void_type {
 				// handle arr << [] where [] is empty
 				info := c.table.sym(left_type).array_info()
 				node.right.elem_type = info.elem_type
@@ -302,6 +320,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		}
 		else {}
 	}
+
 	eq_ne := node.op in [.eq, .ne]
 	// Single side check
 	// Place these branches according to ops' usage frequency to accelerate.
@@ -447,6 +466,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					}
 				}
 			}
+
 			node.promoted_type = ast.bool_type
 			return ast.bool_type
 		}
@@ -548,6 +568,13 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				if left_sym.has_method_with_generic_parent(op_str) {
 					if method := left_sym.find_method_with_generic_parent(op_str) {
 						return_type = method.return_type
+						left_info := left_sym.info
+						if left_info is ast.Struct {
+							if left_info.concrete_types.len > 0 {
+								c.table.register_fn_concrete_types(method.fkey(),
+									left_info.concrete_types)
+							}
+						}
 					} else {
 						return_type = left_type
 					}
@@ -566,6 +593,13 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				if right_sym.has_method_with_generic_parent(op_str) {
 					if method := right_sym.find_method_with_generic_parent(op_str) {
 						return_type = method.return_type
+						right_info := right_sym.info
+						if right_info is ast.Struct {
+							if right_info.concrete_types.len > 0 {
+								c.table.register_fn_concrete_types(method.fkey(),
+									right_info.concrete_types)
+							}
+						}
 					} else {
 						return_type = right_type
 					}
@@ -656,6 +690,18 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 							return_type = method.return_type
 						}
 					}
+				}
+				exact_left_sym := c.table.sym(unwrapped_left_type)
+				exact_right_sym := c.table.sym(unwrapped_right_type)
+				has_operator_overload := exact_left_sym.has_method_with_generic_parent(op_str)
+					|| left_final_sym.has_method_with_generic_parent(op_str)
+					|| exact_right_sym.has_method_with_generic_parent(op_str)
+					|| right_final_sym.has_method_with_generic_parent(op_str)
+				if has_operator_overload && exact_left_sym.kind in [.alias, .struct]
+					&& exact_right_sym.kind in [.alias, .struct]
+					&& !c.check_same_type_ignoring_pointers(unwrapped_left_type, unwrapped_right_type) {
+					c.error('infix expr: cannot use `${exact_right_sym.name}` (right expression) as `${exact_left_sym.name}`',
+						left_right_pos)
 				}
 				return_sym := c.table.sym(return_type)
 				if return_sym.info !is ast.Alias {
@@ -833,6 +879,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					ast.no_type
 				}
 			}
+
 			if typ != ast.no_type {
 				$if trace_ci_fixes ? {
 					source_path := if node.pos.file_idx >= 0
@@ -849,6 +896,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 							ast.None { 'none' }
 							else { typeof(right_expr).name }
 						}
+
 						eprintln('infix is left=${node.left} left_type=${c.table.type_to_str(left_type)} right_kind=${right_kind} right_type=${c.table.type_to_str(typ)} variant_var=${c.comptime.comptime_for_variant_var} file=${c.file.path} source=${source_path} line=${
 							node.pos.line_nr + 1}')
 					}
@@ -871,12 +919,32 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 						c.error('`${op}` can only be used to test for none in sql', node.pos)
 					}
 				} else if left_final_sym.kind !in [.interface, .sum_type]
-					&& !c.comptime.is_comptime(node.left) {
+					&& !c.comptime.is_comptime(node.left) && !c.is_orig_sumtype(node.left) {
 					c.error('`${op}` can only be used with interfaces and sum types', node.pos) // can be used in sql too, but keep err simple
 				} else if mut left_sym.info is ast.SumType {
-					if typ !in left_sym.info.variants
-						&& c.unwrap_generic(typ) !in left_sym.info.variants {
+					variant_typ := if left_type.nr_muls() > 0
+						&& typ.nr_muls() <= left_type.nr_muls() {
+						typ.set_nr_muls(0)
+					} else {
+						typ
+					}
+					if variant_typ !in left_sym.info.variants
+						&& c.unwrap_generic(variant_typ) !in left_sym.info.variants {
 						c.error('`${left_sym.name}` has no variant `${typ_sym.name}`', right_pos)
+					}
+				} else if c.is_orig_sumtype(node.left) {
+					// Variable is smartcast but original type is a sum type;
+					// allow the `is` check using the original type's variants.
+					if node.left is ast.Ident && node.left.obj is ast.Var {
+						orig_t := (node.left.obj as ast.Var).orig_type
+						orig_sym := c.table.sym(orig_t)
+						if orig_sym.info is ast.SumType {
+							if typ !in orig_sym.info.variants
+								&& c.unwrap_generic(typ) !in orig_sym.info.variants {
+								c.error('`${orig_sym.name}` has no variant `${typ_sym.name}`',
+									right_pos)
+							}
+						}
 					}
 				} else if left_sym.info is ast.Interface {
 					if typ_sym.kind != .interface && !c.type_implements(typ, left_type, right_pos) {
@@ -947,6 +1015,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		}
 		else {}
 	}
+
 	// Do an ambiguous expression check for << >> and &, since they all have the same precedence (unlike in C)
 	if !c.is_builtin_mod && node.op in [.amp, .left_shift, .right_shift] {
 		if mut node.left is ast.InfixExpr {
@@ -1189,8 +1258,9 @@ fn (mut c Checker) maybe_wrap_index_expr_smartcast(mut expr ast.Expr, expr_type 
 	if isnil(c.fn_scope) || expr_type in [ast.no_type, ast.void_type] {
 		return expr_type
 	}
-	if expr is ast.IndexExpr {
-		index_expr := expr as ast.IndexExpr
+	expr0 := expr
+	if expr0 is ast.IndexExpr {
+		index_expr := expr0
 		scope := c.fn_scope.innermost(index_expr.pos.pos)
 		expr_key := smartcast_index_expr_scope_key(index_expr)
 		if var := scope.find_var(expr_key) {
@@ -1198,12 +1268,12 @@ fn (mut c Checker) maybe_wrap_index_expr_smartcast(mut expr ast.Expr, expr_type 
 				cast_type := c.exposed_smartcast_type(var.orig_type, var.smartcasts.last(),
 					var.is_mut)
 				if cast_type != expr_type {
-					expr = ast.AsCast{
+					expr = ast.Expr(ast.AsCast{
 						expr:      ast.Expr(index_expr)
 						typ:       cast_type
 						expr_type: expr_type
 						pos:       index_expr.pos
-					}
+					})
 				}
 				return cast_type
 			}
@@ -1323,6 +1393,7 @@ fn (mut c Checker) check_sort_external_variable_access(node ast.Expr) bool {
 			return true
 		}
 	}
+
 	return true
 }
 

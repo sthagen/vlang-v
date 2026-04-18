@@ -288,13 +288,27 @@ fn insert_template_code(fn_name string, tmpl_str_start string, line string) stri
 					i += 2
 					continue
 				}
-				// Keep package-version URLs like `jquery@3.6.0` unchanged.
-				if i + 1 < rewritten_line.len && rewritten_line[i + 1].is_digit() {
-					sb.write_u8(`@`)
-					i++
-					continue
+				if i + 1 < rewritten_line.len {
+					next := rewritten_line[i + 1]
+					if next == `{` {
+						sb.write_u8(`$`)
+						i++
+						continue
+					}
+					if is_tmpl_ident_start(next) {
+						// Bare @ident: find the end of the identifier and wrap with ${}
+						mut end := i + 2
+						for end < rewritten_line.len && is_tmpl_ident_part(rewritten_line[end]) {
+							end++
+						}
+						sb.write_string('\${')
+						sb.write_string(rewritten_line[i + 1..end])
+						sb.write_u8(`}`)
+						i = end
+						continue
+					}
 				}
-				sb.write_u8(`$`)
+				sb.write_u8(`@`)
 				i++
 				continue
 			}
@@ -307,6 +321,7 @@ fn insert_template_code(fn_name string, tmpl_str_start string, line string) stri
 			}
 			else {}
 		}
+
 		sb.write_u8(ch)
 		i++
 	}
@@ -355,6 +370,7 @@ fn normalize_keyword_template_interpolations(line string) string {
 struct TmplControlLine {
 	header              string
 	inline_body         string
+	prefix              string
 	has_inline_body     bool
 	opens_brace_block   bool
 	closes_inline_block bool
@@ -364,28 +380,39 @@ fn parse_tmpl_control_line(line string, directive string) TmplControlLine {
 	pos := line.index(directive) or { return TmplControlLine{} }
 	remainder := line[pos + directive.len..].trim_space()
 	if remainder.len == 0 {
-		return TmplControlLine{}
+		return TmplControlLine{
+			prefix: line[..pos]
+		}
 	}
 	if remainder.ends_with('{') {
 		return TmplControlLine{
 			header:            remainder[..remainder.len - 1].trim_space()
+			prefix:            line[..pos]
 			opens_brace_block: true
 		}
 	}
 	if !remainder.ends_with('}') {
 		return TmplControlLine{
 			header: remainder
+			prefix: line[..pos]
 		}
 	}
-	close_pos := remainder.last_index('}') or { return TmplControlLine{
-		header: remainder
-	} }
-	open_pos := remainder.index('{') or { return TmplControlLine{
-		header: remainder
-	} }
+	close_pos := remainder.last_index('}') or {
+		return TmplControlLine{
+			header: remainder
+			prefix: line[..pos]
+		}
+	}
+	open_pos := remainder.index('{') or {
+		return TmplControlLine{
+			header: remainder
+			prefix: line[..pos]
+		}
+	}
 	return TmplControlLine{
 		header:              remainder[..open_pos].trim_space()
 		inline_body:         remainder[open_pos + 1..close_pos].trim_space()
+		prefix:              line[..pos]
 		has_inline_body:     open_pos + 1 < close_pos
 		opens_brace_block:   true
 		closes_inline_block: true
@@ -398,38 +425,50 @@ fn parse_tmpl_else_line(line string) TmplControlLine {
 	if remainder.len == 0 {
 		return TmplControlLine{
 			header: 'else'
+			prefix: line[..pos]
 		}
 	}
 	if remainder.ends_with('{') {
 		suffix := remainder[..remainder.len - 1].trim_space()
 		return TmplControlLine{
 			header:            if suffix.len == 0 { 'else' } else { 'else ${suffix}' }
+			prefix:            line[..pos]
 			opens_brace_block: true
 		}
 	}
 	if !remainder.ends_with('}') {
 		return TmplControlLine{
 			header: if remainder.len == 0 { 'else' } else { 'else ${remainder}' }
+			prefix: line[..pos]
 		}
 	}
 	close_pos := remainder.last_index('}') or {
 		return TmplControlLine{
 			header: if remainder.len == 0 { 'else' } else { 'else ${remainder}' }
+			prefix: line[..pos]
 		}
 	}
 	open_pos := remainder.index('{') or {
 		return TmplControlLine{
 			header: if remainder.len == 0 { 'else' } else { 'else ${remainder}' }
+			prefix: line[..pos]
 		}
 	}
 	suffix := remainder[..open_pos].trim_space()
 	return TmplControlLine{
 		header:              if suffix.len == 0 { 'else' } else { 'else ${suffix}' }
 		inline_body:         remainder[open_pos + 1..close_pos].trim_space()
+		prefix:              line[..pos]
 		has_inline_body:     open_pos + 1 < close_pos
 		opens_brace_block:   true
 		closes_inline_block: true
 	}
+}
+
+enum TmplBraceBlockKind {
+	control
+	div
+	span
 }
 
 fn (mut p Parser) append_tmpl_line_info(template_file string, tmpl_line int, count int) {
@@ -606,9 +645,8 @@ fn veb_tmpl_${fn_name}() string {
 		state = .html
 	}
 
-	mut in_span := false
 	mut in_html_comment := false
-	mut simple_brace_block_depth := 0
+	mut brace_block_kinds := []TmplBraceBlockKind{}
 	mut end_of_line_pos := 0
 	mut start_of_line_pos := 0
 	mut tline_number := -1 // keep the original line numbers, even after insert/delete ops on lines; `i` changes
@@ -723,49 +761,39 @@ fn veb_tmpl_${fn_name}() string {
 			i--
 			continue
 		}
-		if state == .simple && simple_brace_block_depth > 0 && trimmed_line == '}' {
+		if trimmed_line == '}' && brace_block_kinds.len > 0 && brace_block_kinds.last() == .control {
 			source.writeln(tmpl_str_end)
 			// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
 			p.append_tmpl_line_info(template_file, tline_number, 2)
 			source.writeln('}')
 			p.append_tmpl_line_info(template_file, tline_number, 1)
 			source.write_string(tmpl_str_start)
-			simple_brace_block_depth--
+			brace_block_kinds.delete_last()
 			continue
 		}
 		if line.contains('@if ') {
-			if state == .simple {
-				control := parse_tmpl_control_line(line, '@if')
-				source.writeln(tmpl_str_end)
-				// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
-				p.append_tmpl_line_info(template_file, tline_number, 2)
-				source.writeln('if ${control.header} {')
-				p.append_tmpl_line_info(template_file, tline_number, 1)
-				source.write_string(tmpl_str_start)
-				if control.has_inline_body {
-					source.writeln(insert_template_code(fn_name, tmpl_str_start,
-						control.inline_body))
-					p.append_tmpl_line_info(template_file, tline_number, 1)
-				}
-				if control.closes_inline_block {
-					source.writeln(tmpl_str_end)
-					// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
-					p.append_tmpl_line_info(template_file, tline_number, 2)
-					source.writeln('}')
-					p.append_tmpl_line_info(template_file, tline_number, 1)
-					source.write_string(tmpl_str_start)
-				} else if control.opens_brace_block {
-					simple_brace_block_depth++
-				}
-				continue
-			}
+			control := parse_tmpl_control_line(line, '@if')
 			source.writeln(tmpl_str_end)
 			// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
 			p.append_tmpl_line_info(template_file, tline_number, 2)
-			pos := line.index('@if') or { continue }
-			source.writeln('if ' + line[pos + 4..] + '{')
+			source.writeln('if ${control.header} {')
 			p.append_tmpl_line_info(template_file, tline_number, 1)
 			source.write_string(tmpl_str_start)
+			if control.has_inline_body {
+				source.writeln(insert_template_code(fn_name, tmpl_str_start, control.prefix +
+					control.inline_body))
+				p.append_tmpl_line_info(template_file, tline_number, 1)
+			}
+			if control.closes_inline_block {
+				source.writeln(tmpl_str_end)
+				// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
+				p.append_tmpl_line_info(template_file, tline_number, 2)
+				source.writeln('}')
+				p.append_tmpl_line_info(template_file, tline_number, 1)
+				source.write_string(tmpl_str_start)
+			} else if control.opens_brace_block {
+				brace_block_kinds << .control
+			}
 			continue
 		}
 		if line.contains('@end') {
@@ -775,75 +803,60 @@ fn veb_tmpl_${fn_name}() string {
 			source.writeln('}')
 			p.append_tmpl_line_info(template_file, tline_number, 1)
 			source.write_string(tmpl_str_start)
+			if brace_block_kinds.len > 0 && brace_block_kinds.last() == .control {
+				brace_block_kinds.delete_last()
+			}
 			continue
 		}
 		if line.contains('@else') {
-			if state == .simple {
-				control := parse_tmpl_else_line(line)
-				source.writeln(tmpl_str_end)
-				// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
-				p.append_tmpl_line_info(template_file, tline_number, 2)
-				source.writeln('} ${control.header} {')
-				p.append_tmpl_line_info(template_file, tline_number, 1)
-				source.write_string(tmpl_str_start)
-				if control.has_inline_body {
-					source.writeln(insert_template_code(fn_name, tmpl_str_start,
-						control.inline_body))
-					p.append_tmpl_line_info(template_file, tline_number, 1)
-				}
-				if control.closes_inline_block {
-					source.writeln(tmpl_str_end)
-					// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
-					p.append_tmpl_line_info(template_file, tline_number, 2)
-					source.writeln('}')
-					p.append_tmpl_line_info(template_file, tline_number, 1)
-					source.write_string(tmpl_str_start)
-				}
-				continue
-			}
+			control := parse_tmpl_else_line(line)
 			source.writeln(tmpl_str_end)
 			// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
 			p.append_tmpl_line_info(template_file, tline_number, 2)
-			pos := line.index('@else') or { continue }
-			source.writeln('}' + line[pos + 1..] + '{')
+			source.writeln('} ${control.header} {')
 			p.append_tmpl_line_info(template_file, tline_number, 1)
-			// source.writeln(' } else { ')
 			source.write_string(tmpl_str_start)
+			if control.has_inline_body {
+				source.writeln(insert_template_code(fn_name, tmpl_str_start, control.prefix +
+					control.inline_body))
+				p.append_tmpl_line_info(template_file, tline_number, 1)
+			}
+			if control.closes_inline_block {
+				source.writeln(tmpl_str_end)
+				// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
+				p.append_tmpl_line_info(template_file, tline_number, 2)
+				source.writeln('}')
+				p.append_tmpl_line_info(template_file, tline_number, 1)
+				source.write_string(tmpl_str_start)
+				if brace_block_kinds.len > 0 && brace_block_kinds.last() == .control {
+					brace_block_kinds.delete_last()
+				}
+			}
 			continue
 		}
 		if line.contains('@for') {
-			if state == .simple {
-				control := parse_tmpl_control_line(line, '@for')
-				source.writeln(tmpl_str_end)
-				// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
-				p.append_tmpl_line_info(template_file, tline_number, 2)
-				source.writeln('for ${control.header} {')
-				p.append_tmpl_line_info(template_file, tline_number, 1)
-				source.write_string(tmpl_str_start)
-				if control.has_inline_body {
-					source.writeln(insert_template_code(fn_name, tmpl_str_start,
-						control.inline_body))
-					p.append_tmpl_line_info(template_file, tline_number, 1)
-				}
-				if control.closes_inline_block {
-					source.writeln(tmpl_str_end)
-					// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
-					p.append_tmpl_line_info(template_file, tline_number, 2)
-					source.writeln('}')
-					p.append_tmpl_line_info(template_file, tline_number, 1)
-					source.write_string(tmpl_str_start)
-				} else if control.opens_brace_block {
-					simple_brace_block_depth++
-				}
-				continue
-			}
+			control := parse_tmpl_control_line(line, '@for')
 			source.writeln(tmpl_str_end)
 			// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
 			p.append_tmpl_line_info(template_file, tline_number, 2)
-			pos := line.index('@for') or { continue }
-			source.writeln('for ' + line[pos + 4..] + '{')
+			source.writeln('for ${control.header} {')
 			p.append_tmpl_line_info(template_file, tline_number, 1)
 			source.write_string(tmpl_str_start)
+			if control.has_inline_body {
+				source.writeln(insert_template_code(fn_name, tmpl_str_start, control.prefix +
+					control.inline_body))
+				p.append_tmpl_line_info(template_file, tline_number, 1)
+			}
+			if control.closes_inline_block {
+				source.writeln(tmpl_str_end)
+				// tmpl_str_end contains '\n', so writeln creates 2 lines: ')' and empty
+				p.append_tmpl_line_info(template_file, tline_number, 2)
+				source.writeln('}')
+				p.append_tmpl_line_info(template_file, tline_number, 1)
+				source.write_string(tmpl_str_start)
+			} else if control.opens_brace_block {
+				brace_block_kinds << .control
+			}
 			continue
 		}
 		if state == .simple {
@@ -891,7 +904,7 @@ fn veb_tmpl_${fn_name}() string {
 						tmpl_path: template_file
 						tmpl_line: tline_number
 					}
-					in_span = true
+					brace_block_kinds << .span
 					continue
 				} else if line_t.starts_with('.') && line.ends_with('{') {
 					// `.header {` => `<div class='header'>`
@@ -903,6 +916,7 @@ fn veb_tmpl_${fn_name}() string {
 						tmpl_path: template_file
 						tmpl_line: tline_number
 					}
+					brace_block_kinds << .div
 					continue
 				} else if line_t.starts_with('#') && line.ends_with('{') {
 					// `#header {` => `<div id='header'>`
@@ -912,14 +926,18 @@ fn veb_tmpl_${fn_name}() string {
 						tmpl_path: template_file
 						tmpl_line: tline_number
 					}
+					brace_block_kinds << .div
 					continue
 				} else if line_t == '}' {
 					source.write_string(strings.repeat(`\t`, line.len - line_t.len)) // add the necessary indent to keep <div><div><div> code clean
-					if in_span {
+					if brace_block_kinds.len > 0 && brace_block_kinds.last() == .span {
 						source.writeln('</span>')
-						in_span = false
+						brace_block_kinds.delete_last()
 					} else {
 						source.writeln('</div>')
+						if brace_block_kinds.len > 0 && brace_block_kinds.last() == .div {
+							brace_block_kinds.delete_last()
+						}
 					}
 					p.template_line_map << ast.TemplateLineInfo{
 						tmpl_path: template_file

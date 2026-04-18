@@ -101,6 +101,7 @@ fn (mut p Parser) eval_array_fixed_sizes(mut size_expr ast.Expr) (int, bool) {
 			p.error_with_pos('fixed array size cannot use non-constant value', size_expr.pos())
 		}
 	}
+
 	return fixed_size, size_unresolved
 }
 
@@ -109,12 +110,22 @@ fn (mut p Parser) parse_array_type(expecting token.Kind, is_option bool) ast.Typ
 	// fixed array
 	if p.tok.kind != .rsbr {
 		mut fixed_size := 0
-		mut size_expr := p.expr(0)
 		mut size_unresolved := true
-		if p.pref.is_fmt {
-			fixed_size = 987654321
+		mut size_expr := ast.empty_expr
+		if p.allow_auto_fixed_array_size && p.tok.kind == .dotdot && p.peek_tok.kind == .rsbr {
+			size_expr = ast.RangeExpr{
+				pos:  p.tok.pos()
+				low:  ast.empty_expr
+				high: ast.empty_expr
+			}
+			p.next()
 		} else {
-			fixed_size, size_unresolved = p.eval_array_fixed_sizes(mut size_expr)
+			size_expr = p.expr(0)
+			if p.pref.is_fmt {
+				fixed_size = 987654321
+			} else {
+				fixed_size, size_unresolved = p.eval_array_fixed_sizes(mut size_expr)
+			}
 		}
 		p.check(.rsbr)
 		p.fixed_array_dim++
@@ -193,16 +204,15 @@ fn (mut p Parser) parse_map_type() ast.Type {
 	}
 	key_sym := p.table.sym(key_type)
 	is_alias := key_sym.kind == .alias
-	key_type_supported := key_type in [ast.string_type_idx, ast.voidptr_type_idx]
-		|| key_sym.kind in [.enum, .placeholder, .any]
-		|| ((key_type.is_int() || key_type.is_float() || is_alias) && !key_type.is_ptr())
+	key_type_supported := p.table.supports_map_key_type(key_type)
+		|| key_sym.kind in [.placeholder, .any]
 	if !key_type_supported {
 		if is_alias {
 			p.error('cannot use the alias type as the parent type is unsupported')
 			return 0
 		}
 		s := p.table.type_to_str(key_type)
-		p.error_with_pos('maps only support string, integer, float, rune, enum or voidptr keys for now (not `${s}`)',
+		p.error_with_pos('maps only support string, integer, float, rune, enum, fixed array or voidptr keys for now (not `${s}`)',
 			p.tok.pos())
 		return 0
 	}
@@ -466,6 +476,7 @@ fn (mut p Parser) parse_language() ast.Language {
 			ast.Language.v
 		}
 	}
+
 	if language != .v {
 		p.next()
 		p.check(.dot)
@@ -993,6 +1004,7 @@ fn (mut p Parser) find_type_or_add_placeholder(name string, language ast.Languag
 			}
 			else {}
 		}
+
 		return typ
 	}
 	// not found - add placeholder
@@ -1118,6 +1130,7 @@ fn (mut p Parser) parse_generic_inst_type(name string, name_pos token.Pos) ast.T
 				}
 			}
 		}
+
 		// mod.Foo[int] -> mod
 		// mod.submod.Foo[int] -> mod.submod
 		mod := name.all_before_last('.')

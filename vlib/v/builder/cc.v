@@ -120,9 +120,18 @@ fn c_error_looks_like_cpp_header(c_output string) bool {
 	lower_output := c_output.to_lower()
 	for marker in [
 		"unknown type name 'namespace'",
+		"unknown type name 'class'",
+		"unknown type name 'template'",
 		'unknown type name `namespace`',
+		'unknown type name `class`',
+		'unknown type name `template`',
 		'error: namespace',
 		'namespace does not name a type',
+		"'operator' declared as",
+		'`operator` declared as',
+		"before 'operator'",
+		'before `operator`',
+		'before "operator"',
 	] {
 		if lower_output.contains(marker) {
 			return true
@@ -130,7 +139,14 @@ fn c_error_looks_like_cpp_header(c_output string) bool {
 	}
 	for line in lower_output.split_into_lines() {
 		trimmed_line := line.trim_space()
-		if trimmed_line.starts_with('namespace ') || trimmed_line.contains('| namespace ') {
+		if trimmed_line.starts_with('namespace ') || trimmed_line.contains('| namespace ')
+			|| trimmed_line.starts_with('class ') || trimmed_line.contains('| class ')
+			|| trimmed_line.starts_with('public:') || trimmed_line.contains('| public:')
+			|| trimmed_line.starts_with('private:') || trimmed_line.contains('| private:')
+			|| trimmed_line.starts_with('protected:') || trimmed_line.contains('| protected:')
+			|| trimmed_line.contains('template<') || trimmed_line.contains('template <')
+			|| trimmed_line.contains('operator[]') || trimmed_line.contains('operator []')
+			|| trimmed_line.contains('::') {
 			return true
 		}
 	}
@@ -350,6 +366,95 @@ pub mut:
 	ldflags      []string // `-labcd' from `v -ldflags "-labcd"`
 }
 
+fn ccompiler_type_from_name_with_ok(ccompiler string) (pref.CompilerType, bool) {
+	cc_file_name := os.file_name(ccompiler).to_lower_ascii()
+	if cc_file_name.contains('tcc') || cc_file_name.contains('tinyc') {
+		return pref.CompilerType.tinyc, true
+	}
+	if cc_file_name.contains('gcc') {
+		return pref.CompilerType.gcc, true
+	}
+	if cc_file_name.contains('clang') {
+		return pref.CompilerType.clang, true
+	}
+	if cc_file_name.contains('emcc') {
+		return pref.CompilerType.emcc, true
+	}
+	if cc_file_name == 'cl' || cc_file_name == 'cl.exe' || cc_file_name.contains('msvc') {
+		return pref.CompilerType.msvc, true
+	}
+	if cc_file_name.contains('mingw') {
+		return pref.CompilerType.mingw, true
+	}
+	if cc_file_name.contains('++') {
+		return pref.CompilerType.cplusplus, true
+	}
+	return pref.CompilerType.tinyc, false
+}
+
+fn ccompiler_type_from_name(ccompiler string) ?pref.CompilerType {
+	resolved, ok := ccompiler_type_from_name_with_ok(ccompiler)
+	return if ok { resolved } else { none }
+}
+
+fn ccompiler_type_from_version_output_with_ok(output string) (pref.CompilerType, bool) {
+	if output == '' {
+		return pref.CompilerType.tinyc, false
+	}
+	lower_output := output.to_lower_ascii()
+	if lower_output.contains('tiny c compiler') || lower_output.contains('tinycc')
+		|| lower_output.contains('\ntcc') || lower_output.starts_with('tcc') {
+		return pref.CompilerType.tinyc, true
+	}
+	if lower_output.contains('clang') {
+		return pref.CompilerType.clang, true
+	}
+	if lower_output.contains('gcc version') || lower_output.contains('(gcc)')
+		|| lower_output.contains('free software foundation') || lower_output.contains('gcc ') {
+		return pref.CompilerType.gcc, true
+	}
+	if lower_output.contains('emscripten') || lower_output.contains('emcc') {
+		return pref.CompilerType.emcc, true
+	}
+	if (lower_output.contains('microsoft') && lower_output.contains('c/c++'))
+		|| lower_output.contains('msvc') {
+		return pref.CompilerType.msvc, true
+	}
+	return pref.CompilerType.tinyc, false
+}
+
+fn ccompiler_type_from_version_output(output string) ?pref.CompilerType {
+	resolved, ok := ccompiler_type_from_version_output_with_ok(output)
+	return if ok { resolved } else { none }
+}
+
+fn resolve_ccompiler_type(ccompiler string, fallback pref.CompilerType) pref.CompilerType {
+	resolved_by_name, name_ok := ccompiler_type_from_name_with_ok(ccompiler)
+	if name_ok {
+		return resolved_by_name
+	}
+	quoted_ccompiler := os.quoted_path(ccompiler)
+	for version_flag in ['--version', '-v'] {
+		res := os.execute('${quoted_ccompiler} ${version_flag} 2>&1')
+		resolved_by_version, version_ok := ccompiler_type_from_version_output_with_ok(res.output)
+		if version_ok {
+			return resolved_by_version
+		}
+	}
+	return fallback
+}
+
+fn cc_from_pref_ccompiler_type(cc_type pref.CompilerType) CC {
+	return match cc_type {
+		.tinyc { .tcc }
+		.gcc, .mingw { .gcc }
+		.clang { .clang }
+		.emcc { .emcc }
+		.msvc { .msvc }
+		.cplusplus { .unknown }
+	}
+}
+
 fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 	mut ccoptions := CcompilerOptions{}
 
@@ -400,40 +505,20 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 	}
 	ccoptions.debug_mode = v.pref.is_debug
 	ccoptions.guessed_compiler = v.pref.ccompiler
-	if ccoptions.guessed_compiler == 'cc' {
-		cc_ver := os.execute('cc --version').output
-		if cc_ver.replace('\n', '').contains('Free Software Foundation, Inc.This is free software;') {
-			// Also covers `g++`, `g++-9`, `g++-11` etc.
-			ccoptions.cc = .gcc
-		} else if cc_ver.contains('clang version ') {
-			ccoptions.cc = .clang
-		} else {
-			if v.pref.is_verbose {
-				eprintln('failed to detect C compiler from version info `${cc_ver}`')
-			}
-			eprintln('Compilation with unknown C compiler')
-			ccoptions.cc = .unknown
-		}
+	v.pref.ccompiler_type = resolve_ccompiler_type(ccompiler, v.pref.ccompiler_type)
+	cc_file_name := os.file_name(ccompiler).to_lower_ascii()
+	ccoptions.cc = if cc_file_name.contains('icc') || ccoptions.guessed_compiler == 'icc' {
+		.icc
 	} else {
-		cc_file_name := os.file_name(ccompiler)
-		ccoptions.cc = match true {
-			// vfmt off
-			cc_file_name.contains('tcc') || ccoptions.guessed_compiler == 'tcc' { .tcc }
-			cc_file_name.contains('gcc') || cc_file_name.contains('g++') || ccoptions.guessed_compiler == 'gcc' { .gcc }
-			cc_file_name.contains('clang') || ccoptions.guessed_compiler == 'clang' { .clang }
-			cc_file_name == 'cl' || cc_file_name == 'cl.exe' || cc_file_name.contains('msvc') || ccoptions.guessed_compiler == 'msvc' || v.pref.ccompiler_type == .msvc { .msvc }
-			cc_file_name.contains('icc') || ccoptions.guessed_compiler == 'icc' { .icc }
-			cc_file_name.contains('emcc') || ccoptions.guessed_compiler == 'emcc' { .emcc }
-			else { .unknown }
-			// vfmt on
-		}
-		if ccoptions.cc == .unknown {
-			eprintln('Compilation with unknown C compiler `${cc_file_name}`')
-		}
+		cc_from_pref_ccompiler_type(v.pref.ccompiler_type)
+	}
+	if ccoptions.cc == .unknown {
+		eprintln('Compilation with unknown C compiler `${cc_file_name}`')
 	}
 
 	// Add -fwrapv to handle UB overflows
-	if ccoptions.cc in [.gcc, .clang, .tcc] && v.pref.os in [.macos, .linux, .openbsd, .windows] {
+	if ccoptions.cc in [.gcc, .clang, .tcc]
+		&& v.pref.os in [.macos, .linux, .openbsd, .freebsd, .windows] {
 		ccoptions.args << '-fwrapv'
 	}
 
@@ -617,7 +702,10 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 		ccoptions.wargs << '-Wno-write-strings'
 	}
 	if v.pref.is_liveshared || v.pref.is_livemain {
-		if v.pref.os == .linux && v.pref.build_mode != .build_module {
+		if v.pref.os in [.linux, .android, .termux] && v.pref.build_mode != .build_module {
+			// The live reload shared library resolves symbols from the host executable.
+			// Termux/Android need the same export behavior as Linux, otherwise plain
+			// `-live` can crash while `-cg -live` happens to work via debug linker flags.
 			ccoptions.linker_flags << '-rdynamic'
 		}
 		if v.pref.os == .macos {
@@ -862,7 +950,9 @@ fn (mut v Builder) setup_output_name() {
 pub fn (mut v Builder) tcc_quoted_path(p string) string {
 	if v.ccoptions.cc == .tcc && !v.pref.no_rsp {
 		// tcc has a bug, that prevents it from being able to parse names quoted with ' in .rsp files :-|
-		return '"${p}"'
+		mut escaped := p.replace('\\', '\\\\')
+		escaped = escaped.replace('"', '\\"')
+		return '"${escaped}"'
 	}
 	return os.quoted_path(p)
 }
@@ -1115,10 +1205,21 @@ pub fn (mut v Builder) cc() {
 		all_args := v.all_args(v.ccoptions)
 		v.dump_c_options(all_args)
 		rsp_args := all_args.map(v.rsp_safe_arg(it))
-		str_args := if v.pref.no_rsp {
-			rsp_args.join(' ').replace('\n', ' ')
+		shell_args := rsp_args.join(' ')
+		mut str_args := if v.pref.no_rsp {
+			shell_args.replace('\n', ' ')
 		} else {
-			rsp_args.join(' ')
+			shell_args
+		}
+		mut should_use_rsp := !v.pref.no_rsp
+		if should_use_rsp {
+			for arg in rsp_args {
+				if arg.contains("'\\''") || arg.contains('\n') || arg.contains('\r') {
+					should_use_rsp = false
+					str_args = shell_args
+					break
+				}
+			}
 		}
 		mut cmd := '${v.quote_compiler_name(ccompiler)} ${str_args}'
 		if v.pref.parallel_cc {
@@ -1129,7 +1230,7 @@ pub fn (mut v Builder) cc() {
 		}
 		mut response_file := ''
 		mut response_file_content := str_args
-		if !v.pref.no_rsp {
+		if should_use_rsp {
 			response_file = '${v.out_name_c}.rsp'
 			response_file_content = str_args.replace('\\', '\\\\')
 			rspexpr := '@${response_file}'
@@ -1747,7 +1848,8 @@ fn missing_compiler_info() string {
 }
 
 fn is_tcc_compilation_failure(ccompiler string, cc_kind CC, output string) bool {
-	return cc_kind == .tcc || is_tcc_compiler_name(ccompiler) || is_tcc_error_output(output)
+	return cc_kind == .tcc || is_tcc_compiler_name(ccompiler) || is_tcc_alias_compiler(ccompiler)
+		|| is_tcc_error_output(output)
 }
 
 fn is_tcc_compiler_name(ccompiler string) bool {

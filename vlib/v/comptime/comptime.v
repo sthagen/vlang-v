@@ -129,6 +129,7 @@ pub fn (mut c Comptime) stmt(mut node ast.Stmt) ast.Stmt {
 		}
 		ast.TypeDecl {}
 	}
+
 	return node
 }
 
@@ -183,10 +184,13 @@ pub fn (mut c Comptime) is_true(expr ast.Expr) !bool {
 						return c.check_type_equality(expr.left.typ, expr.right)!
 					} else if expr.left is ast.SelectorExpr {
 						if expr.left.field_name == 'typ' && expr.left.expr is ast.Ident {
-							if expr.left.expr.info is ast.IdentFn {
-								if expr.right is ast.TypeNode {
-									return expr.left.expr.info.typ == expr.right.typ
-								}
+							ident_typ := match expr.left.expr.info {
+								ast.IdentFn { expr.left.expr.info.typ }
+								ast.IdentVar { expr.left.expr.info.typ }
+							}
+
+							if ident_typ != ast.no_type {
+								return c.check_type_equality(ident_typ, expr.right)!
 							}
 						} else if expr.left.field_name == 'unaliased_typ' {
 							if expr.left.expr is ast.Ident {
@@ -217,6 +221,7 @@ pub fn (mut c Comptime) is_true(expr ast.Expr) !bool {
 		}
 		else {}
 	}
+
 	return error('Cannot solve')
 }
 
@@ -283,6 +288,7 @@ pub fn (mut c Comptime) expr_stmt(mut node ast.Expr) StmtOrExpr {
 			return c.expr(mut node)
 		}
 	}
+
 	return node
 }
 
@@ -452,6 +458,9 @@ pub fn (mut c Comptime) expr(mut node ast.Expr) ast.Expr {
 				sub_struct = c.expr(mut sub_struct) as ast.SqlExpr
 			}
 		}
+		ast.SqlQueryDataExpr {
+			node.items = c.sql_query_data_items(node.items)
+		}
 		ast.StringInterLiteral {
 			node.exprs = c.exprs(mut node.exprs)
 			node.fwidth_exprs = c.exprs(mut node.fwidth_exprs)
@@ -468,5 +477,31 @@ pub fn (mut c Comptime) expr(mut node ast.Expr) ast.Expr {
 		}
 		else {}
 	}
+
 	return node
+}
+
+fn (mut c Comptime) sql_query_data_items(items []ast.SqlQueryDataItem) []ast.SqlQueryDataItem {
+	mut new_items := []ast.SqlQueryDataItem{cap: items.len}
+	for item in items {
+		mut item_copy := item
+		new_items << c.sql_query_data_item(mut item_copy)
+	}
+	return new_items
+}
+
+fn (mut c Comptime) sql_query_data_item(mut item ast.SqlQueryDataItem) ast.SqlQueryDataItem {
+	match mut item {
+		ast.SqlQueryDataLeaf {
+			item.expr = c.expr(mut item.expr)
+		}
+		ast.SqlQueryDataIf {
+			for mut branch in item.branches {
+				branch.cond = c.expr(mut branch.cond)
+				branch.items = c.sql_query_data_items(branch.items)
+			}
+		}
+	}
+
+	return item
 }

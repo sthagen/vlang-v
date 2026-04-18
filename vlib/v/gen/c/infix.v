@@ -22,6 +22,7 @@ fn (mut g Gen) gen_safe_shift_expr(node ast.InfixExpr) {
 			g.type_resolver.get_type_or_default(node.left, node.left_type)
 		}
 	}
+
 	g.write(g.safe_shift_fn_name(left_type, node.op))
 	g.write('(')
 	g.expr(node.left)
@@ -82,6 +83,7 @@ fn (mut g Gen) infix_expr(node ast.InfixExpr) {
 			}
 		}
 	}
+
 	if node.auto_locked != '' {
 		g.writeln(';')
 		g.write('sync__RwMutex_unlock(&${node.auto_locked}->mtx)')
@@ -128,7 +130,10 @@ fn (mut g Gen) infix_expr_arrow_op(node ast.InfixExpr) {
 fn (mut g Gen) infix_expr_eq_op(node ast.InfixExpr) {
 	mut left_type := g.type_resolver.get_type_or_default(node.left, node.left_type)
 	mut right_type := g.type_resolver.get_type_or_default(node.right, node.right_type)
-	if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 {
+	if (g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0)
+		|| left_type.has_flag(.generic) || right_type.has_flag(.generic)
+		|| g.type_has_unresolved_generic_parts(left_type)
+		|| g.type_has_unresolved_generic_parts(right_type) {
 		resolved_left := g.resolved_expr_type(node.left, node.left_type)
 		if resolved_left != 0 {
 			// Don't override a smartcasted concrete type (from the checker)
@@ -858,9 +863,13 @@ fn (mut g Gen) infix_expr_in_op(node ast.InfixExpr) {
 			} else {
 				node.left_type
 			})
-			g.write('ADDR(${styp}, ')
-			g.expr(node.left)
-			g.write(')')
+			if g.table.final_sym(node.left_type).kind == .array_fixed && node.left is ast.Ident {
+				g.expr(node.left)
+			} else {
+				g.write('ADDR(${styp}, ')
+				g.expr(node.left)
+				g.write(')')
+			}
 		} else {
 			g.expr(node.left)
 		}
@@ -1078,6 +1087,7 @@ fn (mut g Gen) infix_expr_in_optimization(left ast.Expr, left_type ast.Type, rig
 				g.expr(array_expr)
 			}
 		}
+
 		if i < right.exprs.len - 1 {
 			g.write(' || ')
 		}
@@ -1090,6 +1100,28 @@ fn (mut g Gen) infix_expr_is_op(node ast.InfixExpr) {
 		node.left_type)))
 	is_aggregate := node.left is ast.Ident && g.comptime.get_ct_type_var(node.left) == .aggregate
 	right_sym := g.table.sym(node.right_type)
+	mut right_type := node.right_type
+	// When the LHS is a smartcast variable whose original type is a sum type,
+	// use the original sum type so the `is` check works on the tag field.
+	// But only when the smartcast target is NOT itself a sum type — for nested
+	// sum types (e.g., Outer→Inner→MyStruct), normal smartcast unwrapping
+	// must proceed to generate the correct inner dereference.
+	mut is_orig_sumtype := false
+	if node.left is ast.Ident && node.left.obj is ast.Var {
+		v := node.left.obj as ast.Var
+		if v.smartcasts.len > 0 && v.is_mut && v.orig_type != 0 {
+			orig_sym := g.table.final_sym(v.orig_type)
+			smartcast_target_sym := g.table.final_sym(v.smartcasts.last())
+			if orig_sym.kind == .sum_type && smartcast_target_sym.kind != .sum_type {
+				left_sym = unsafe { orig_sym }
+				is_orig_sumtype = true
+			}
+		}
+	}
+	if (left_sym.kind == .sum_type || is_aggregate) && node.left_type.nr_muls() > 0
+		&& right_type.nr_muls() <= node.left_type.nr_muls() {
+		right_type = right_type.set_nr_muls(0)
+	}
 	if left_sym.kind == .interface && right_sym.kind == .interface {
 		g.gen_interface_is_op(node)
 		return
@@ -1102,6 +1134,9 @@ fn (mut g Gen) infix_expr_is_op(node ast.InfixExpr) {
 	}
 	if is_aggregate {
 		g.write('${node.left}')
+	} else if is_orig_sumtype {
+		g.prevent_sum_type_unwrapping_once = true
+		g.expr(node.left)
 	} else {
 		g.expr(node.left)
 	}
@@ -1125,6 +1160,7 @@ fn (mut g Gen) infix_expr_is_op(node ast.InfixExpr) {
 				ast.no_type
 			}
 		}
+
 		sub_sym := g.table.sym(sub_type)
 		g.write('_${left_sym.cname}_${sub_sym.cname}_index')
 		return
@@ -1136,7 +1172,14 @@ fn (mut g Gen) infix_expr_is_op(node ast.InfixExpr) {
 	} else if node.right is ast.Ident && node.right.name == g.comptime.comptime_for_variant_var {
 		variant_idx := g.type_resolver.get_ct_type_or_default('${g.comptime.comptime_for_variant_var}.typ',
 			ast.void_type)
-		g.write('${int(variant_idx)}')
+		if (left_sym.kind == .sum_type || is_aggregate) && node.left_type.nr_muls() > 0
+			&& variant_idx.nr_muls() <= node.left_type.nr_muls() {
+			g.write('${int(variant_idx.set_nr_muls(0))}')
+		} else {
+			g.write('${int(variant_idx)}')
+		}
+	} else if node.right is ast.TypeNode {
+		g.write('${int(right_type)}')
 	} else {
 		g.expr(node.right)
 	}
@@ -1198,6 +1241,7 @@ fn (mut g Gen) collect_string_concat_parts(expr ast.Expr, mut parts []ast.Expr) 
 		}
 		else {}
 	}
+
 	parts << expr
 }
 
@@ -1619,6 +1663,7 @@ fn (mut g Gen) need_tmp_var_in_array_call(node ast.Expr) bool {
 		}
 		else {}
 	}
+
 	return false
 }
 
@@ -1888,8 +1933,9 @@ fn (mut g Gen) gen_plain_infix_expr(node ast.InfixExpr) {
 	is_safe_add := checkoverflow_op && node.op == .plus
 	is_safe_sub := checkoverflow_op && node.op == .minus
 	is_safe_mul := checkoverflow_op && node.op == .mul
-	is_safe_div := node.op == .div && g.pref.div_by_zero_is_zero && typ.is_int()
-	is_safe_mod := node.op == .mod && g.pref.div_by_zero_is_zero && typ.is_int()
+	is_integer_div_mod := g.table.final_sym(g.unwrap_generic(typ)).is_int()
+	is_safe_div := node.op == .div && is_integer_div_mod
+	is_safe_mod := node.op == .mod && is_integer_div_mod
 	if resolved_left_type.is_ptr() && node.left.is_auto_deref_var()
 		&& !resolved_right_type.is_pointer() {
 		g.write('*')
@@ -1920,6 +1966,7 @@ fn (mut g Gen) gen_plain_infix_expr(node ast.InfixExpr) {
 			is_safe_mod { 'VSAFE_MOD_${typ_str}' }
 			else { '' }
 		}
+
 		g.write(vsafe_fn_name)
 		g.write('(')
 		if is_safe_div || is_safe_mod {

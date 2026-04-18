@@ -69,6 +69,7 @@ fn (g &Gen) generic_parent_method_fkey(sym ast.TypeSymbol, method_name string) s
 		}
 		else {}
 	}
+
 	return ''
 }
 
@@ -119,6 +120,50 @@ fn (g &Gen) resolve_method_decl_fkey_for_type(typ ast.Type, method_name string) 
 	return ''
 }
 
+fn free_method_calls_free_on_receiver(method ast.Fn) bool {
+	if method.source_fn == unsafe { nil } {
+		return false
+	}
+	fn_decl := unsafe { &ast.FnDecl(method.source_fn) }
+	if fn_decl.receiver.name == '' {
+		return false
+	}
+	root := ast.Node(ast.Stmt(*fn_decl))
+	return free_method_calls_free_on_receiver_walk(root, fn_decl.receiver.name)
+}
+
+fn free_method_calls_free_on_receiver_walk(node ast.Node, receiver_name string) bool {
+	if node is ast.Expr {
+		match node {
+			ast.AnonFn, ast.LambdaExpr {
+				return false
+			}
+			ast.CallExpr {
+				if node.name == 'free' && node.args.len == 1
+					&& free_method_matches_receiver_expr(node.args[0].expr, receiver_name) {
+					return true
+				}
+			}
+			else {}
+		}
+	}
+	for child in node.children() {
+		if free_method_calls_free_on_receiver_walk(child, receiver_name) {
+			return true
+		}
+	}
+	return false
+}
+
+fn free_method_matches_receiver_expr(expr ast.Expr, receiver_name string) bool {
+	return match expr {
+		ast.Ident { expr.name == receiver_name }
+		ast.CastExpr { free_method_matches_receiver_expr(expr.expr, receiver_name) }
+		ast.ParExpr { free_method_matches_receiver_expr(expr.expr, receiver_name) }
+		else { false }
+	}
+}
+
 fn (mut g Gen) node_decl_fkey(node ast.FnDecl) string {
 	if node.is_method && !node.name.contains('_T_') {
 		receiver_sym := g.table.sym(node.receiver.typ)
@@ -133,6 +178,7 @@ fn (mut g Gen) node_decl_fkey(node ast.FnDecl) string {
 				false
 			}
 		}
+
 		needs_generic_method_fkey := node.generic_names.len > 0 || node.ninstances > 0
 			|| node.receiver.typ.has_flag(.generic)
 			|| g.type_has_unresolved_generic_parts(node.receiver.typ)
@@ -552,7 +598,13 @@ fn (mut g Gen) is_used_by_main(node ast.FnDecl) bool {
 			}
 		}
 	}
+	if g.should_emit_c_fallback_decl(node) {
+		return true
+	}
 	if node.is_c_extern {
+		return true
+	}
+	if node.is_method && node.name in ['[]', '[]='] {
 		return true
 	}
 	if node.mod == 'builtin' && node.name in ['print', 'println', 'eprint', 'eprintln'] {
@@ -613,6 +665,31 @@ fn (mut g Gen) is_used_by_main(node ast.FnDecl) bool {
 	return is_used_by_main
 }
 
+fn file_has_c_includes(file &ast.File) bool {
+	if file == unsafe { nil } {
+		return false
+	}
+	for stmt in file.stmts {
+		if stmt is ast.HashStmt && stmt.kind in ['include', 'preinclude'] {
+			return true
+		}
+	}
+	return false
+}
+
+fn (g &Gen) should_emit_c_fallback_decl(node ast.FnDecl) bool {
+	if node.language != .c || node.is_c_extern || file_has_c_includes(node.source_file) {
+		return false
+	}
+	if node.source_file == unsafe { nil } {
+		return true
+	}
+	if !node.source_file.path.starts_with(g.pref.vlib) {
+		return true
+	}
+	return node.mod == 'main' || node.source_file.is_test
+}
+
 fn (mut g Gen) fn_decl(node ast.FnDecl) {
 	$if trace_cgen_fn_decl ? {
 		eprintln('>   g.tid: ${g.tid} | g.fid: ${g.fid:3} | g.file.path: ${g.file.path} | fn_decl: ${node.name}')
@@ -662,12 +739,14 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 		g.do_int_overflow_checks = prev_do_int_overflow_checks
 	}
 
-	// handle `@[c_extern] fn C.some_name() int` declarations:
+	// Emit extern prototypes for headerless `fn C.some_name() int`
+	// declarations. Header-backed C declarations keep relying on the included
+	// prototypes to avoid redeclaration conflicts.
 	old_inside_c_extern := g.inside_c_extern
 	defer {
 		g.inside_c_extern = old_inside_c_extern
 	}
-	if node.language == .c && node.is_c_extern {
+	if node.is_c_extern || g.should_emit_c_fallback_decl(node) {
 		g.inside_c_extern = true
 	}
 
@@ -747,10 +826,8 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 	// TODO: For some reason, build fails with autofree with this line
 	// as it's only informative, comment it for now
 	// g.gen_attrs(it.attrs)
-	if node.language == .c {
-		if !g.inside_c_extern {
-			return
-		}
+	if node.language == .c && !g.inside_c_extern {
+		return
 	}
 	old_is_vlines_enabled := g.is_vlines_enabled
 	g.is_vlines_enabled = true
@@ -957,20 +1034,27 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 			g.write('VV_LOC ${trace_fn_ret_type} ${c_name(trace_fn)}(')
 			g.definitions.write_string('VV_LOC ${trace_fn_ret_type} ${c_name(trace_fn)}(')
 
+			mut trace_call_args := []string{}
 			if call_fn.is_fn_var {
 				sig := g.fn_var_signature(ast.void_type, call_fn.func.return_type,
 					call_fn.func.params.map(it.typ), call_fn.name)
 				g.write(sig)
 				g.definitions.write_string(sig)
+				if call_fn.func.params.len > 0 {
+					g.write(', ')
+					g.definitions.write_string(', ')
+					trace_call_args, _, _ = g.fn_decl_params(call_fn.func.params, unsafe { nil },
+						call_fn.func.is_variadic, call_fn.func.is_c_variadic)
+				}
 			} else {
-				g.fn_decl_params(call_fn.func.params, unsafe { nil }, call_fn.func.is_variadic,
-					call_fn.func.is_c_variadic)
+				trace_call_args, _, _ = g.fn_decl_params(call_fn.func.params, unsafe { nil },
+					call_fn.func.is_variadic, call_fn.func.is_c_variadic)
 			}
 
 			g.writeln(') {')
 			g.definitions.write_string(');\n')
 
-			orig_fn_args := call_fn.func.params.map(it.name).join(', ')
+			orig_fn_args := trace_call_args.join(', ')
 			add_trace_hook := g.pref.is_trace
 				&& call_fn.name !in ['v.debug.add_after_call', 'v.debug.add_before_call', 'v.debug.remove_after_call', 'v.debug.remove_before_call']
 			if g.pref.is_callstack {
@@ -1141,7 +1225,19 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 						if info.is_volatile {
 							g.write('volatile ')
 						}
-						g.writeln('${g.styp(info.typ)}${deref} ${c_name(var.name)};')
+						decl_typ := if deref == '*' {
+							info.typ.ref()
+						} else {
+							info.typ
+						}
+						default_expr := g.type_default(decl_typ)
+						if g.type_default_vars.len > 0 {
+							for decl in g.type_default_vars.str().trim_right('\n').split_into_lines() {
+								g.writeln(decl)
+							}
+							g.type_default_vars.clear()
+						}
+						g.writeln('${g.styp(info.typ)}${deref} ${c_name(var.name)} = ${default_expr};')
 					}
 				}
 			}
@@ -1245,7 +1341,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 
 fn (mut g Gen) c_fn_name(node &ast.FnDecl) string {
 	mut name := node.name
-	if name in ['+', '-', '*', '**', '/', '%', '<', '=='] {
+	if name in ['+', '-', '*', '**', '/', '%', '<', '==', '[]', '[]='] {
 		name = util.replace_op(name)
 	}
 	if node.is_method {
@@ -1614,7 +1710,7 @@ fn (mut g Gen) fn_decl_params(params []ast.Param, scope &ast.Scope, is_variadic 
 		}
 	}
 	for i, param in params {
-		mut caname := if param.name == '_' { '_d${i + 1}' } else { c_name(param.name) }
+		mut caname := if param.name in ['', '_'] { '_d${i + 1}' } else { c_name(param.name) }
 		mut typ := g.unwrap_generic(param.typ)
 		if g.pref.translated && g.file.is_translated && param.typ.has_flag(.variadic) {
 			typ = g.table.sym(typ).array_info().elem_type.set_flag(.variadic)
@@ -1746,6 +1842,8 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 	// NOTE: everything could be done this way
 	// see my comment in parser near anon_fn
 	mut tmp_anon_fn_var := ''
+	mut tmp_fn_result_var := ''
+	mut needs_tmp_fn_result_cleanup := false
 	if node.left is ast.AnonFn {
 		if node.left.inherited_vars.len > 0 {
 			tmp_anon_fn_var = g.new_tmp_var()
@@ -1806,7 +1904,27 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 		}
 	} else if !g.inside_curry_call && node.left is ast.CallExpr && node.name == '' {
 		if node.or_block.kind == .absent {
-			g.expr(ast.Expr(node.left))
+			left_return_typ := g.recheck_concrete_type(g.unwrap_generic(node.left.return_type))
+			if g.table.used_features.anon_fn && g.table.final_sym(left_return_typ).kind == .function {
+				tmp_fn_result_var = g.new_tmp_var()
+				fn_sym := g.table.final_sym(left_return_typ).info as ast.FnType
+				fn_type := g.fn_var_signature(ast.void_type, fn_sym.func.return_type,
+					fn_sym.func.params.map(it.typ), tmp_fn_result_var)
+				line := g.go_before_last_stmt().trim_space()
+				g.empty_line = true
+				g.write('${fn_type} = ')
+				g.expr(ast.Expr(node.left))
+				g.writeln(';')
+				g.set_current_pos_as_last_stmt_pos()
+				g.write(line)
+				if g.out.last_n(1) != '\n' {
+					g.writeln('')
+				}
+				g.write(tmp_fn_result_var)
+				needs_tmp_fn_result_cleanup = true
+			} else {
+				g.expr(ast.Expr(node.left))
+			}
 		} else {
 			ret_typ := node.return_type
 
@@ -1889,6 +2007,18 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 	} else {
 		''
 	}
+	mut tmp_fn_result_call_value := ''
+	mut tmp_fn_result_call_line := ''
+	if needs_tmp_fn_result_cleanup && !gen_or && !gen_keep_alive && !g.inside_curry_call
+		&& node.return_type != 0 && node.return_type != ast.void_type {
+		tmp_fn_result_call_line = g.go_before_last_stmt()
+		if tmp_fn_result_call_line.ends_with(tmp_fn_result_var) {
+			tmp_fn_result_call_line = tmp_fn_result_call_line[..tmp_fn_result_call_line.len - tmp_fn_result_var.len]
+		}
+		g.empty_line = true
+		tmp_fn_result_call_value = g.new_tmp_var()
+		g.write('${g.styp(node.return_type)} ${tmp_fn_result_call_value} = ${tmp_fn_result_var}')
+	}
 	mut effective_return_type := node.return_type
 	if (gen_or || gen_keep_alive) && node.return_type != 0 {
 		mut ret_typ := effective_return_type
@@ -1969,6 +2099,17 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 	} else {
 		g.fn_call(node)
 	}
+	if needs_tmp_fn_result_cleanup && !gen_or && !gen_keep_alive && !g.inside_curry_call {
+		if node.return_type == ast.void_type {
+			g.writeln(';')
+			g.write('builtin__closure__closure_try_destroy((voidptr)${tmp_fn_result_var})')
+			g.set_current_pos_as_last_stmt_pos()
+		} else if tmp_fn_result_call_value != '' {
+			g.writeln(';')
+			g.writeln('builtin__closure__closure_try_destroy((voidptr)${tmp_fn_result_var});')
+			g.write2(tmp_fn_result_call_line, tmp_fn_result_call_value)
+		}
+	}
 	if gen_or && node.return_type != 0 {
 		g.or_block(tmp_opt, node.or_block, effective_return_type)
 		mut unwrapped_typ := effective_return_type.clear_option_and_result()
@@ -1996,7 +2137,12 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 					&& unwrapped_styp.starts_with('_v_') {
 					unwrapped_styp = unwrapped_styp[3..]
 				}
-				if node.is_return_used {
+				// Synthesized/transformed call nodes may lose `is_return_used`
+				// even though the enclosing C generation path is still
+				// emitting a value expression (struct fields, call args, etc).
+				// In those cases `is_gen_or_and_assign_rhs` still tells us that
+				// the unwrapped result is needed in the current expression.
+				if node.is_return_used || is_gen_or_and_assign_rhs {
 					is_fn := g.table.final_sym(unwrapped_typ).kind == .function
 					// return value is used, so we need to write the unwrapped temporary var
 					if is_fn && unwrapped_typ.nr_muls() > 0 {
@@ -2120,6 +2266,7 @@ fn (mut g Gen) gen_map_method_call(node ast.CallExpr, left_type ast.Type, left_s
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -2216,6 +2363,20 @@ fn (mut g Gen) gen_array_method_call(node ast.CallExpr, left_type ast.Type, left
 		}
 		.clone, .repeat {
 			array_info := left_sym.info as ast.Array
+			elem_sym :=
+				g.table.final_sym(g.table.unaliased_type(g.unwrap_generic(array_info.elem_type)))
+			if node.kind == .repeat && elem_sym.kind == .interface {
+				fn_name := g.register_array_interface_repeat_fn(g.resolve_return_type(node))
+				g.write('${fn_name}(')
+				if node.left_type.is_ptr() {
+					g.write('*'.repeat(node.left_type.nr_muls()))
+				}
+				g.expr(ast.Expr(node.left))
+				g.write(', ')
+				g.expr(node.args[0].expr)
+				g.write(')')
+				return true
+			}
 			array_depth := g.get_array_depth(array_info.elem_type)
 			to_depth := if array_depth >= 0 { '_to_depth' } else { '' }
 			mut is_range_slice := false
@@ -2252,6 +2413,7 @@ fn (mut g Gen) gen_array_method_call(node ast.CallExpr, left_type ast.Type, left
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -2303,6 +2465,7 @@ fn (mut g Gen) gen_fixed_array_method_call(node ast.CallExpr, left_type ast.Type
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -2775,6 +2938,7 @@ fn (mut g Gen) resolved_array_builtin_method_return_type(node ast.CallExpr, left
 					arg_type
 				}
 			}
+
 			resolved_mapped_type := g.unwrap_generic(g.recheck_concrete_type(mapped_type))
 			if resolved_mapped_type == 0 {
 				return return_type
@@ -2809,6 +2973,7 @@ fn (mut g Gen) resolved_array_builtin_method_return_type(node ast.CallExpr, left
 		}
 		else {}
 	}
+
 	return return_type
 }
 
@@ -2858,6 +3023,7 @@ fn (mut g Gen) receiver_generic_call_context(left_type ast.Type, method_name str
 		}
 		else {}
 	}
+
 	// For generic fn-type aliases (e.g. `type ParseFunction[T] = fn(string) !T`),
 	// the concrete instantiation is stored as FnType with generic_types holding
 	// the concrete types. Check generic_types on the sym and its parent.
@@ -3164,6 +3330,18 @@ fn (mut g Gen) update_generic_call_concrete_types_from_fn_types(generic_names []
 	}
 }
 
+fn (g &Gen) call_expr_depends_on_comptime_context(node ast.CallExpr) bool {
+	if g.type_resolver.info.is_comptime(node.left) {
+		return true
+	}
+	for arg in node.args {
+		if arg.ct_expr || g.type_resolver.info.is_comptime(arg.expr) {
+			return true
+		}
+	}
+	return false
+}
+
 fn (mut g Gen) generic_fn_call_concrete_types(func ast.Fn, node ast.CallExpr) []ast.Type {
 	mut concrete_types := []ast.Type{}
 	if node.raw_concrete_types.len > 0 {
@@ -3177,6 +3355,10 @@ fn (mut g Gen) generic_fn_call_concrete_types(func ast.Fn, node ast.CallExpr) []
 		&& !it.has_flag(.generic) && !g.type_has_unresolved_generic_parts(it))
 	mut trust_node_concrete_types := concrete_types.len == func.generic_names.len
 		&& concrete_types.len > 0
+	if trust_node_concrete_types && !explicit_raw_concrete_types
+		&& g.call_expr_depends_on_comptime_context(node) {
+		trust_node_concrete_types = false
+	}
 	if trust_node_concrete_types && !explicit_raw_concrete_types {
 		if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 {
 			trust_node_concrete_types = false
@@ -3222,7 +3404,12 @@ fn (mut g Gen) generic_fn_call_concrete_types(func ast.Fn, node ast.CallExpr) []
 						cmp_type = cmp_sym.info.elem_type
 					}
 				}
-				if cmp_type != g.unwrap_generic(arg_type) {
+				resolved_arg_type := g.unwrap_generic(arg_type)
+				if cmp_type != resolved_arg_type {
+					if g.table.final_sym(cmp_type).kind == .interface
+						&& g.table.does_type_implement_interface(resolved_arg_type, cmp_type) {
+						continue
+					}
 					trust_node_concrete_types = false
 					break
 				}
@@ -3335,6 +3522,28 @@ fn (g &Gen) has_active_call_generic_context() bool {
 		&& g.active_call_generic_names.len == g.active_call_concrete_types.len
 }
 
+fn (g &Gen) active_call_lambda_concrete_types(node ast.LambdaExpr) []ast.Type {
+	if node.func == unsafe { nil } || node.func.decl.generic_names.len == 0 {
+		return []ast.Type{}
+	}
+	if g.has_active_call_generic_context() {
+		mut concrete_types := []ast.Type{cap: node.func.decl.generic_names.len}
+		for generic_name in node.func.decl.generic_names {
+			idx := g.active_call_generic_names.index(generic_name)
+			if idx < 0 || idx >= g.active_call_concrete_types.len {
+				return []ast.Type{}
+			}
+			concrete_types << g.active_call_concrete_types[idx]
+		}
+		return concrete_types
+	}
+	if node.call_ctx != unsafe { nil }
+		&& node.call_ctx.concrete_types.len == node.func.decl.generic_names.len {
+		return node.call_ctx.concrete_types.clone()
+	}
+	return []ast.Type{}
+}
+
 fn (mut g Gen) resolve_active_call_concrete_type(typ ast.Type) ast.Type {
 	if typ == 0 {
 		return 0
@@ -3433,8 +3642,14 @@ fn (mut g Gen) refresh_current_generic_local_scope_vars(scope &ast.Scope) {
 						|| (var.expr is ast.StructInit && var.expr.typ_str.len > 0
 						&& g.current_fn_generic_names().index(var.expr.typ_str.all_after_last('.')) >= 0)
 					if should_resolve_expr_type && !(var.expr is ast.Ident && var.expr.name == name) {
-						resolved_type := g.resolved_expr_type(var.expr, var.typ)
+						mut resolved_type := g.resolved_expr_type(var.expr, var.typ)
 						if resolved_type != 0 {
+							// Mirror the checker's `:=` behavior for auto-deref vars.
+							// Generic cgen refreshes re-evaluate initializer expressions,
+							// so `mut x := param` must stay a value copy here as well.
+							if g.is_auto_deref_source_ident(var.expr) && resolved_type.is_ptr() {
+								resolved_type = resolved_type.deref()
+							}
 							var.typ = g.unwrap_generic(g.recheck_concrete_type(resolved_type))
 						}
 					} else if var.typ != 0 {
@@ -3540,6 +3755,7 @@ fn (mut g Gen) resolve_current_fn_generic_param_key_type(name string) ast.Type {
 			.array, .array_fixed, .string { ast.int_type }
 			else { ast.Type(0) }
 		}
+
 		if base_type == 0 {
 			return 0
 		}
@@ -3711,6 +3927,7 @@ fn (mut g Gen) is_same_generic_receiver_family(left_type ast.Type, receiver_type
 		}
 		else {}
 	}
+
 	return false
 }
 
@@ -3781,6 +3998,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		}
 		else {}
 	}
+
 	if left_type == g.unwrap_generic(node.left_type) {
 		resolved_left_type := g.type_resolver.get_type_or_default(node.left, node.left_type)
 		if resolved_left_type != 0 {
@@ -4506,6 +4724,20 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			}
 		}
 	}
+	mut free_receiver_heap_copy := ''
+	if is_free_method && has_method && node.left is ast.Ident && !left_type.is_ptr()
+		&& free_method_calls_free_on_receiver(full_method) {
+		left_ident := node.left as ast.Ident
+		if !g.resolved_ident_is_auto_heap(left_ident) {
+			stmt_line := g.go_before_last_stmt()
+			alloc_size := '(sizeof(${rec_cc_type}) == 0) ? 1 : sizeof(${rec_cc_type})'
+			g.empty_line = true
+			free_receiver_heap_copy = g.new_tmp_var()
+			g.writeln('${rec_cc_type}* ${free_receiver_heap_copy} = (${rec_cc_type}*)builtin__vcalloc(${alloc_size});')
+			g.writeln('*${free_receiver_heap_copy} = ${c_name(left_ident.name)};')
+			g.write(stmt_line)
+		}
+	}
 	receiver_needs_ref := receiver_type.is_ptr() || receiver_is_mut
 	// g.generate_tmp_autofree_arg_vars(node, name)
 	if !receiver_needs_ref && left_type.is_ptr() && node.kind == .str {
@@ -4540,8 +4772,9 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		}
 		else {}
 	}
-	if receiver_needs_ref && (!left_type.is_ptr() || node.from_embed_types.len != 0
-		|| (left_type.has_flag(.shared_f) && node.kind != .str)) {
+
+	if free_receiver_heap_copy == '' && receiver_needs_ref && (!left_type.is_ptr()
+		|| node.from_embed_types.len != 0 || (left_type.has_flag(.shared_f) && node.kind != .str)) {
 		// The receiver is a reference, but the caller provided a value
 		// Add `&` automatically.
 		// TODO: same logic in call_args()
@@ -4568,12 +4801,13 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 				cast_n++
 			}
 		}
-	} else if !receiver_needs_ref && left_type.is_ptr() && node.kind != .str
-		&& node.from_embed_types.len == 0 {
+	} else if free_receiver_heap_copy == '' && !receiver_needs_ref && left_type.is_ptr()
+		&& node.kind != .str && node.from_embed_types.len == 0 {
 		if !left_type.has_flag(.shared_f) {
 			g.write('*'.repeat(left_type.nr_muls()))
 		}
-	} else if !is_range_slice && node.from_embed_types.len == 0 && node.kind != .str {
+	} else if free_receiver_heap_copy == '' && !is_range_slice && node.from_embed_types.len == 0
+		&& node.kind != .str {
 		diff := left_type.nr_muls() - receiver_type.nr_muls()
 		if diff > 0 {
 			g.write('*'.repeat(diff))
@@ -4586,7 +4820,9 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		arg_name := '_arg_expr_${fn_name}_0_${node.pos.pos}'
 		g.write('/*af receiver arg*/' + arg_name)
 	} else {
-		if node.left is ast.MapInit {
+		if free_receiver_heap_copy != '' {
+			g.write(free_receiver_heap_copy)
+		} else if node.left is ast.MapInit {
 			g.write('(map[]){')
 			g.expr(ast.Expr(node.left))
 			g.write('}[0]')
@@ -4980,6 +5216,12 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 				if typ.has_flag(.option) && expr.or_expr.kind != .absent {
 					typ = typ.clear_flag(.option)
 				}
+				if typ.has_flag(.generic) || g.type_has_unresolved_generic_parts(typ) {
+					resolved_typ := g.resolved_expr_type(expr, typ)
+					if resolved_typ != 0 && resolved_typ != ast.void_type {
+						typ = resolved_typ
+					}
+				}
 			}
 			typ_sym := g.table.sym(typ)
 			needs_tmp_string := !typ.has_option_or_result()
@@ -5161,10 +5403,11 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 			}
 			if !is_fn_var {
 				if g.cur_fn != unsafe { nil } && g.cur_fn.trace_fns.len > 0 {
-					g.gen_trace_call(node, name)
 					if node.is_fn_var {
+						g.gen_trace_fn_var_call(node, name, call_generic_names, call_concrete_types)
 						return
 					}
+					g.gen_trace_call(node, name)
 				} else {
 					g.write(g.get_ternary_name(name))
 				}
@@ -5225,6 +5468,21 @@ fn (mut g Gen) gen_trace_call(node ast.CallExpr, name string) {
 	} else {
 		g.write(g.get_ternary_name(name))
 	}
+}
+
+// gen_trace_fn_var_call generates the full traced call for function variables.
+fn (mut g Gen) gen_trace_fn_var_call(node ast.CallExpr, name string, call_generic_names []string, call_concrete_types []ast.Type) {
+	hash_fn, _ := g.table.get_trace_fn_name(g.cur_fn, node)
+	if _ := g.cur_fn.trace_fns[hash_fn] {
+		g.write('${c_name(hash_fn)}(${g.get_ternary_name(name)}')
+		if node.args.len > 0 {
+			g.write(', ')
+		}
+	} else {
+		g.write('${g.get_ternary_name(name)}(')
+	}
+	g.call_args_with_context(node, call_generic_names, call_concrete_types)
+	g.write(')')
 }
 
 fn (mut g Gen) autofree_tmp_arg_init_stmt(prepend string, expr ast.Expr) string {
@@ -6162,13 +6420,17 @@ fn (mut g Gen) ref_or_deref_arg_ex(arg ast.CallArg, expected_type_ ast.Type, lan
 				|| (arg.expr is ast.UnsafeExpr && arg.expr.expr is ast.Nil) {
 				g.write('((void*)0)')
 			} else {
-				// sumtype conversions call memdup internally, so ADDR is sufficient.
-				// interface conversions don't, so HEAP is needed to ensure the pointer
-				// remains valid after the current scope ends.
-				wrap := if expected_ref_inner_sym.kind == .interface { 'HEAP' } else { 'ADDR' }
-				g.write('${wrap}(${expected_ref_inner_sym.cname}, ')
-				g.expr_with_cast(arg.expr, arg_typ, expected_ref_inner_type)
-				g.write(')')
+				if expected_ref_inner_sym.kind == .sum_type {
+					// `&Variant` -> `&SumType` needs a stable heap-allocated wrapper and
+					// must preserve aliasing with the original variant payload.
+					g.expr_with_cast(arg.expr, arg_typ, expected_type)
+				} else {
+					// interface conversions don't box by reference, so HEAP is needed to
+					// ensure the pointer remains valid after the current scope ends.
+					g.write('HEAP(${expected_ref_inner_sym.cname}, ')
+					g.expr_with_cast(arg.expr, arg_typ, expected_ref_inner_type)
+					g.write(')')
+				}
 			}
 			return
 		}
@@ -6440,6 +6702,7 @@ fn (mut g Gen) is_gui_app() bool {
 		.console { return false }
 		.auto {}
 	}
+
 	if g.pref.os == .windows {
 		if g.force_main_console {
 			return false

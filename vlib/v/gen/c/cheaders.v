@@ -404,7 +404,9 @@ void _vcleanup(void);
 		VV_EXP void _vcleanup_caller();
 	#endif
 #endif
+#if !defined(_WIN32)
 #define sigaction_size sizeof(sigaction);
+#endif
 #define _ARR_LEN(a) ( (sizeof(a)) / (sizeof(a[0])) )
 #if INTPTR_MAX == INT32_MAX
 	#define TARGET_IS_32BIT 1
@@ -657,9 +659,11 @@ static void _vcleanup(void);
 void _vinit(int ___argc, voidptr ___argv);
 void _vcleanup();
 #endif
+#if !defined(_WIN32)
 #define sigaction_size sizeof(sigaction);
+#endif
 #define _ARR_LEN(a) ( (sizeof(a)) / (sizeof(a[0])) )
-voidptr builtin__memdup(voidptr src, isize size);
+VV_LOC voidptr builtin__memdup(voidptr src, isize size);
 '
 
 const c_wyhash_headers = '

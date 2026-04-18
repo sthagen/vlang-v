@@ -52,8 +52,8 @@ fn generate_routes[A, X](app &A) !map[string]Route {
 			}
 
 			$if A is MiddlewareApp {
-				route.middlewares = app.Middleware.get_handlers_for_route[X](route_path)
-				route.after_middlewares = app.Middleware.get_handlers_for_route_after[X](route_path)
+				route.middlewares = app_route_handlers(app, route_path)
+				route.after_middlewares = app_route_handlers_after(app, route_path)
 			}
 
 			routes[method.name] = route
@@ -79,6 +79,7 @@ pub:
 	family                    net.AddrFamily = .ip6
 	host                      string
 	port                      int  = default_port
+	nr_workers                int  = 1
 	show_startup_message      bool = true
 	timeout_in_seconds        int  = 30
 	max_request_buffer_size   int  = 8192
@@ -292,6 +293,16 @@ fn handle_ssl_request[A, X](req http.Request, params &SslRequestParams) ?&Contex
 	}
 	$if A is StaticApp {
 		ctx.custom_mime_types = global_app.static_mime_types.clone()
+		mut user_context := X{}
+		user_context.Context = ctx
+		if serve_if_static[X](static_handler_config(global_app.static_files,
+			global_app.static_mime_types, global_app.static_hosts, global_app.enable_static_gzip,
+			global_app.enable_static_zstd, global_app.enable_static_compression,
+			global_app.static_compression_max_size, global_app.static_compression_mime_types,
+			global_app.enable_markdown_negotiation), mut user_context, url, host)
+		{
+			return &user_context.Context
+		}
 	}
 	$if A is ControllerInterface {
 		if completed_context := handle_controllers[X](params.controllers_sorted, ctx, mut url, host) {
@@ -363,78 +374,6 @@ fn should_close_ssl_connection(req http.Request, resp http.Response, client_want
 	return req.version != .v1_1
 }
 
-struct FileResponse {
-pub mut:
-	open              bool
-	file              os.File
-	total             i64
-	pos               i64
-	should_close_conn bool
-}
-
-// close the open file and reset the struct to its default values
-pub fn (mut fr FileResponse) done() {
-	fr.open = false
-	fr.file.close()
-	fr.total = 0
-	fr.pos = 0
-	fr.should_close_conn = false
-}
-
-struct StringResponse {
-pub mut:
-	open              bool
-	str               string
-	pos               i64
-	should_close_conn bool
-}
-
-// free the current string and reset the struct to its default values
-@[manualfree]
-pub fn (mut sr StringResponse) done() {
-	sr.open = false
-	sr.pos = 0
-	sr.should_close_conn = false
-	unsafe { sr.str.free() }
-}
-
-$if !new_veb ? {
-	// EV context
-	struct RequestParams {
-		global_app         voidptr
-		controllers        []&ControllerPath
-		routes             &map[string]Route
-		timeout_in_seconds int
-	mut:
-		// request body buffer
-		buf &u8 = unsafe { nil }
-		// request bodies are assembled in byte buffers to avoid repeated string reallocations
-		body_buffers [][]u8
-		// idx keeps track of how much of the request body has been read
-		// for each incomplete request, see `handle_conn`
-		idx                 []int
-		incomplete_requests []http.Request
-		file_responses      []FileResponse
-		string_responses    []StringResponse
-	}
-
-	// reset request parameters for `fd`:
-	// reset content-length index and the http request
-	@[manualfree]
-	pub fn (mut params RequestParams) request_done(fd int) {
-		mut request := &params.incomplete_requests[fd]
-		request.reset()
-		if params.body_buffers[fd].cap > 0 {
-			unsafe { params.body_buffers[fd].free() }
-			params.body_buffers[fd] = []u8{}
-		}
-		params.idx[fd] = 0
-		$if trace_handle_read ? {
-			eprintln('>>>>> fd: ${fd} | request_done.')
-		}
-	}
-}
-
 interface BeforeAcceptApp {
 mut:
 	before_accept_loop()
@@ -465,8 +404,7 @@ fn handle_route[A, X](mut app A, mut user_context X, url urllib.URL, host string
 
 				// no need to check the result of `validate_middleware`, since a response has to be sent
 				// anyhow. This function makes sure no further middleware is executed.
-				validate_middleware[X](mut user_context,
-					app.Middleware.get_global_handlers_after[X]())
+				validate_middleware[X](mut user_context, app_global_handlers_after(app))
 				// skip route-specific after-middleware if global already sent a response
 				if !user_context.Context.done {
 					validate_middleware[X](mut user_context, get_handlers_for_method(route.after_middlewares,
@@ -513,14 +451,19 @@ fn handle_route[A, X](mut app A, mut user_context X, url urllib.URL, host string
 
 	// then execute global middleware functions
 	$if A is MiddlewareApp {
-		if validate_middleware[X](mut user_context, app.Middleware.get_global_handlers[X]()) == false {
+		if validate_middleware[X](mut user_context, app_global_handlers(app)) == false {
 			middleware_has_sent_response = true
 			return
 		}
 	}
 
 	$if A is StaticApp {
-		if serve_if_static[A, X](app, mut user_context, url, host) {
+		if serve_if_static[X](static_handler_config(app.static_files, app.static_mime_types,
+			app.static_hosts, app.enable_static_gzip, app.enable_static_zstd,
+			app.enable_static_compression, app.static_compression_max_size,
+			app.static_compression_mime_types, app.enable_markdown_negotiation), mut user_context,
+			url, host)
+		{
 			// successfully served a static file
 			return
 		}
@@ -566,7 +509,7 @@ fn handle_route[A, X](mut app A, mut user_context X, url urllib.URL, host string
 							for param in method.args[1..] {
 								args << data[param.name]
 							}
-							app.$method(mut user_context, args)
+							app.$method(mut user_context, ...args)
 						} else {
 							app.$method(mut user_context)
 						}
@@ -593,7 +536,7 @@ fn handle_route[A, X](mut app A, mut user_context X, url urllib.URL, host string
 							for param in method.args[1..] {
 								args << data[param.name]
 							}
-							app.$method(mut user_context, args)
+							app.$method(mut user_context, ...args)
 						} else {
 							app.$method(mut user_context)
 						}
@@ -612,7 +555,7 @@ fn handle_route[A, X](mut app A, mut user_context X, url urllib.URL, host string
 						if method_args.len + 1 != method.args.len {
 							eprintln('[veb] warning: uneven parameters count (${method.args.len}) in `${method.name}`, compared to the veb route `${method.attrs}` (${method_args.len})')
 						}
-						app.$method(mut user_context, method_args)
+						app.$method(mut user_context, ...method_args)
 						return
 					}
 				}
@@ -669,12 +612,13 @@ fn route_matches(url_words []string, route_words []string) ?[]string {
 // check if request is for a static file and serves it
 // returns true if we served a static file, false otherwise
 @[manualfree]
-fn serve_if_static[A, X](app &A, mut user_context X, url urllib.URL, host string) bool {
+fn serve_if_static[X](app StaticHandler, mut user_context X, url urllib.URL, host string) bool {
 	// TODO: handle url parameters properly - for now, ignore them
 	mut asked_path := url.path
+	static_handler := app_static_handler(app)
 
 	// Content negotiation for markdown files (if enabled)
-	if app.enable_markdown_negotiation {
+	if static_handler.enable_markdown_negotiation {
 		accept_header := user_context.req.header.get(.accept) or { '' }
 		if accept_header.contains('text/markdown') {
 			// Try markdown variants in order of priority
@@ -685,7 +629,7 @@ fn serve_if_static[A, X](app &A, mut user_context X, url urllib.URL, host string
 			]
 
 			for variant in markdown_variants {
-				if app.static_files[variant] != '' {
+				if static_handler.static_files[variant] != '' {
 					asked_path = variant
 					break
 				}
@@ -700,29 +644,29 @@ fn serve_if_static[A, X](app &A, mut user_context X, url urllib.URL, host string
 
 	if asked_path.ends_with('/') {
 		// Check for markdown index first if Accept header requests it and feature is enabled
-		if app.enable_markdown_negotiation {
+		if static_handler.enable_markdown_negotiation {
 			accept_header := user_context.req.header.get(.accept) or { '' }
 			if accept_header.contains('text/markdown')
-				&& app.static_files[asked_path + 'index.html.md'] != '' {
+				&& static_handler.static_files[asked_path + 'index.html.md'] != '' {
 				asked_path += 'index.html.md'
-			} else if app.static_files[asked_path + 'index.html'] != '' {
+			} else if static_handler.static_files[asked_path + 'index.html'] != '' {
 				asked_path += 'index.html'
-			} else if app.static_files[asked_path + 'index.htm'] != '' {
+			} else if static_handler.static_files[asked_path + 'index.htm'] != '' {
 				asked_path += 'index.htm'
 			}
-		} else if app.static_files[asked_path + 'index.html'] != '' {
+		} else if static_handler.static_files[asked_path + 'index.html'] != '' {
 			asked_path += 'index.html'
-		} else if app.static_files[asked_path + 'index.htm'] != '' {
+		} else if static_handler.static_files[asked_path + 'index.htm'] != '' {
 			asked_path += 'index.htm'
 		}
 	}
-	static_file := app.static_files[asked_path] or { return false }
+	static_file := static_handler.static_files[asked_path] or { return false }
 
 	// StaticHandler ensures that the mime type exists on either the App or in veb
 	ext := os.file_ext(static_file).to_lower()
-	mut mime_type := app.static_mime_types[ext] or { mime_types[ext] }
+	mut mime_type := static_handler.static_mime_types[ext] or { mime_types[ext] }
 
-	static_host := app.static_hosts[asked_path] or { '' }
+	static_host := static_handler.static_hosts[asked_path] or { '' }
 	if static_file == '' || mime_type == '' {
 		return false
 	}
@@ -731,15 +675,29 @@ fn serve_if_static[A, X](app &A, mut user_context X, url urllib.URL, host string
 	}
 
 	// Configure static file compression settings
-	user_context.set_static_compression_config(app.enable_static_gzip, app.enable_static_zstd,
-		app.enable_static_compression, if app.static_compression_max_size >= 0 {
-		app.static_compression_max_size
+	user_context.set_static_compression_config(static_handler.enable_static_gzip,
+		static_handler.enable_static_zstd, static_handler.enable_static_compression, if static_handler.static_compression_max_size >= 0 {
+		static_handler.static_compression_max_size
 	} else {
 		1048576 // Default: 1MB
-	}, app.static_compression_mime_types.clone())
+	}, static_handler.static_compression_mime_types.clone())
 
 	user_context.send_file(mime_type, static_file)
 	return true
+}
+
+fn static_handler_config(static_files map[string]string, static_mime_types map[string]string, static_hosts map[string]string, enable_static_gzip bool, enable_static_zstd bool, enable_static_compression bool, static_compression_max_size int, static_compression_mime_types []string, enable_markdown_negotiation bool) StaticHandler {
+	return StaticHandler{
+		static_files:                  static_files
+		static_mime_types:             static_mime_types
+		static_hosts:                  static_hosts
+		enable_static_gzip:            enable_static_gzip
+		enable_static_zstd:            enable_static_zstd
+		enable_static_compression:     enable_static_compression
+		static_compression_max_size:   static_compression_max_size
+		static_compression_mime_types: static_compression_mime_types
+		enable_markdown_negotiation:   enable_markdown_negotiation
+	}
 }
 
 // send a string over `conn`
@@ -754,17 +712,6 @@ fn send_string(mut conn net.TcpConn, s string) ! {
 		return error('connection was closed before send_string')
 	}
 	conn.write_string(s)!
-}
-
-// send a string ptr over `conn`
-fn send_string_ptr(mut conn net.TcpConn, ptr &u8, len int) !int {
-	$if trace_send_string_conn ? {
-		eprintln('> send_string: conn: ${ptr_str(conn)}')
-	}
-	if voidptr(conn) == unsafe { nil } {
-		return error('connection was closed before send_string')
-	}
-	return conn.write_ptr(ptr, len)
 }
 
 // Set s to the form error
