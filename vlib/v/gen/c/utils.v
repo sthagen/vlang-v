@@ -121,7 +121,26 @@ fn (mut g Gen) infer_branch_expr_type(stmts []ast.Stmt) ast.Type {
 
 fn (mut g Gen) infer_if_expr_type(node ast.IfExpr) ast.Type {
 	if node.typ != 0 && node.typ != ast.void_type {
-		return g.unwrap_generic(g.recheck_concrete_type(node.typ))
+		resolved := g.unwrap_generic(g.recheck_concrete_type(node.typ))
+		// In generic functions, node.typ may have been mutated by the checker
+		// to a concrete type from the last processed instantiation. When the
+		// if-expr is used as a return value (g.inside_return), use the function's
+		// return type instead, which correctly resolves via cur_concrete_types.
+		// Only apply this override when the function's return type is actually
+		// generic — otherwise the if-expression type is concrete and correct.
+		if g.inside_return && g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0
+			&& g.cur_fn.return_type.has_flag(.generic) {
+			fn_ret := g.unwrap_generic(g.recheck_concrete_type(g.cur_fn.return_type))
+			if fn_ret != 0 && fn_ret != ast.void_type {
+				if node.typ.has_flag(.result) && !fn_ret.has_flag(.result) {
+					return fn_ret.set_flag(.result)
+				} else if node.typ.has_flag(.option) && !fn_ret.has_flag(.option) {
+					return fn_ret.set_flag(.option)
+				}
+				return fn_ret
+			}
+		}
+		return resolved
 	}
 	for branch in node.branches {
 		branch_typ := g.infer_branch_expr_type(branch.stmts)
@@ -134,7 +153,27 @@ fn (mut g Gen) infer_if_expr_type(node ast.IfExpr) ast.Type {
 
 fn (mut g Gen) infer_match_expr_type(node ast.MatchExpr) ast.Type {
 	if node.return_type != 0 && node.return_type != ast.void_type {
-		return g.unwrap_generic(g.recheck_concrete_type(node.return_type))
+		resolved := g.unwrap_generic(g.recheck_concrete_type(node.return_type))
+		// In generic functions, node.return_type may have been mutated by the checker
+		// to a concrete type from the last processed instantiation. When the match is
+		// used as a return value (g.inside_return), use the function's return type
+		// instead, which correctly resolves via cur_concrete_types.
+		// Only apply this override when the function's return type is actually
+		// generic — otherwise the match expression type is concrete and correct.
+		if g.inside_return && g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0
+			&& g.cur_fn.return_type.has_flag(.generic) {
+			fn_ret := g.unwrap_generic(g.recheck_concrete_type(g.cur_fn.return_type))
+			if fn_ret != 0 && fn_ret != ast.void_type {
+				// Preserve option/result flags from the match's return_type
+				if node.return_type.has_flag(.result) && !fn_ret.has_flag(.result) {
+					return fn_ret.set_flag(.result)
+				} else if node.return_type.has_flag(.option) && !fn_ret.has_flag(.option) {
+					return fn_ret.set_flag(.option)
+				}
+				return fn_ret
+			}
+		}
+		return resolved
 	}
 	for branch in node.branches {
 		branch_typ := g.infer_branch_expr_type(branch.stmts)
@@ -1040,7 +1079,11 @@ fn (mut g Gen) resolved_expr_type(expr ast.Expr, default_typ ast.Type) ast.Type 
 			}
 			resolved := g.resolve_return_type(expr)
 			if resolved != ast.void_type {
-				return g.unwrap_generic(g.recheck_concrete_type(resolved))
+				return if expr.or_block.kind == .absent {
+					g.unwrap_generic(g.recheck_concrete_type(resolved))
+				} else {
+					g.unwrap_generic(g.recheck_concrete_type(resolved)).clear_option_and_result()
+				}
 			}
 			// When resolve_return_type fails (e.g. fn field call where no method exists),
 			// try resolving from return_type_generic using receiver generic type names.

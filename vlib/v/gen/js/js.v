@@ -353,14 +353,14 @@ pub fn (mut g JsGen) gen_js_main_for_tests() {
 	if g.pref.is_stats {
 		g.writeln('let bt = main__start_testing(new int(${all_tfuncs.len}), new string("${g.pref.path}"))')
 	}
-	for tname in all_tfuncs {
+	for i, tname in all_tfuncs {
 		tcname := g.js_name(tname)
 
 		if g.pref.is_stats {
 			g.writeln('main__BenchedTests_testing_step_start(bt,new string("${tcname}"))')
 			g.writeln('try {')
 		}
-		g.writeln('let res = ${tcname}(); if (res instanceof Promise) { await res; }')
+		g.writeln('let res_${i} = ${tcname}(); if (res_${i} instanceof Promise) { await res_${i}; }')
 		if g.pref.is_stats {
 			g.writeln('} finally {')
 			g.writeln('main__BenchedTests_testing_step_end(bt);')
@@ -407,6 +407,30 @@ fn (g &JsGen) get_all_test_function_names() []string {
 		all_tfuncs << tsuite_end
 	}
 	return all_tfuncs
+}
+
+fn (mut g JsGen) write_js_default_value(typ ast.Type) {
+	sym := g.table.sym(g.table.unaliased_type(typ))
+	if sym.kind != .array_fixed {
+		g.write(g.to_js_typ_val(typ))
+		return
+	}
+	info := sym.info as ast.ArrayFixed
+	tmp := g.new_tmp_var()
+	idx := g.new_tmp_var()
+	g.writeln('(function() {')
+	g.inc_indent()
+	g.writeln('const ${tmp} = [];')
+	g.writeln('for (let ${idx} = 0; ${idx} < ${info.size}; ${idx}++) {')
+	g.inc_indent()
+	g.write('${tmp}.push(')
+	g.write_js_default_value(info.elem_type)
+	g.writeln(');')
+	g.dec_indent()
+	g.writeln('}')
+	g.writeln('return new array(new array_buffer({arr: ${tmp}, len: new int(${info.size}), cap: new int(${info.size})}));')
+	g.dec_indent()
+	g.write('})()')
 }
 
 pub fn (mut g JsGen) enter_namespace(name string) {
@@ -460,8 +484,20 @@ pub fn (mut g JsGen) init() {
 	if g.pref.output_es5 {
 		g.definitions.writeln('globalThis = \$global;')
 	}
+	g.definitions.writeln('let \$ref_id_gen = 0;')
 	g.definitions.writeln('function \$ref(value) { if (value instanceof \$ref) { return value; } this.val = value; } ')
 	g.definitions.writeln('\$ref.prototype.valueOf = function() { return this.val; } ')
+	g.definitions.writeln('\$ref.prototype.\$toJS = function() {')
+	g.definitions.writeln('\tconst value = this.val;')
+	g.definitions.writeln('\tif (value === null || value === undefined) { return value; }')
+	g.definitions.writeln('\tif (typeof value === "object" || typeof value === "function") {')
+	g.definitions.writeln('\t\tif (!Object.prototype.hasOwnProperty.call(value, "__v_ref_id")) {')
+	g.definitions.writeln('\t\t\tObject.defineProperty(value, "__v_ref_id", { value: ++\$ref_id_gen, enumerable: false, configurable: false, writable: false });')
+	g.definitions.writeln('\t\t}')
+	g.definitions.writeln('\t\treturn "__v_ref_" + value.__v_ref_id;')
+	g.definitions.writeln('\t}')
+	g.definitions.writeln('\treturn value;')
+	g.definitions.writeln('} ')
 	g.definitions.writeln('function \$ref_index(value, parent, index) { let ref = new \$ref(value); ref._v_array = parent; ref._v_index = index; return ref; } ')
 	if g.pref.backend != .js_node {
 		g.definitions.writeln('const \$process = {')
@@ -1379,28 +1415,35 @@ fn (mut g JsGen) gen_assign_stmt(stmt ast.AssignStmt, semicolon bool) {
 			mut array_set := false
 			mut map_set := false
 			if left is ast.IndexExpr {
-				g.expr(left.left)
-				if left.left_type.is_ptr() {
-					g.write('.valueOf()')
-				}
 				array_set = true
 
 				if left.is_map {
 					map_set = true
-					// FIXME: if you update a key already in the map, it will still
-					// increment length, which it shouldn't since length should match
-					// the actual amount of elements in the map
-					// using a getter that calls JS Object.entries().length or
-					// Object.values().length to get the real length would probably
-					// work, but I'm hesitant about the amount of overhead this will
-					// introduce since those functions return arrays and not iterables,
-					// which might consume a lot of memory and cycles to set up
+					g.write('if (!')
+					g.expr(left.left)
+					if left.left_type.is_ptr() {
+						g.write('.valueOf()')
+					}
+					g.write('.has(')
+					g.expr(left.index)
+					g.write('.\$toJS())) ')
+					g.expr(left.left)
+					if left.left_type.is_ptr() {
+						g.write('.valueOf()')
+					}
 					g.writeln('.length++;')
 					g.expr(left.left)
+					if left.left_type.is_ptr() {
+						g.write('.valueOf()')
+					}
 					g.write('.map[')
 					g.expr(left.index)
 					g.write('.\$toJS()] = { val: ')
 				} else {
+					g.expr(left.left)
+					if left.left_type.is_ptr() {
+						g.write('.valueOf()')
+					}
 					g.write('.arr.set(')
 					g.write('new int(')
 					g.cast_stack << ast.int_type_idx
@@ -1568,7 +1611,7 @@ fn (mut g JsGen) gen_assign_stmt(stmt ast.AssignStmt, semicolon bool) {
 			}
 			if left is ast.IndexExpr && left.is_map {
 				g.write(', key: ')
-				g.expr(left.index)
+				g.write_map_stored_key(left.index, left.index_type)
 				g.write(' }')
 			}
 			if semicolon {
@@ -1746,7 +1789,7 @@ fn (mut g JsGen) gen_for_in_stmt(it ast.ForInStmt) {
 		g.expr(it.cond)
 		g.write('; ${i} < ')
 		g.expr(it.high)
-		g.writeln('; ${i} = new int(${i} + 1)) {')
+		g.writeln('; ${i}.val++) {')
 		g.inside_loop = false
 		g.inc_indent()
 		g.writeln('try { ')
@@ -2070,7 +2113,7 @@ fn (mut g JsGen) gen_struct_decl(node ast.StructDecl) {
 				if field.has_default_expr {
 					g.expr(field.default_expr)
 				} else {
-					g.write('${g.to_js_typ_val(field.typ)}')
+					g.write_js_default_value(field.typ)
 				}
 				g.writeln('\n}')
 			}
@@ -2096,7 +2139,7 @@ fn (mut g JsGen) gen_struct_decl(node ast.StructDecl) {
 				} else if field.typ.has_flag(.option) {
 					g.write('none__')
 				} else {
-					g.write('${g.to_js_typ_val(field.typ)}')
+					g.write_js_default_value(field.typ)
 				}
 			}
 			if i < node.fields.len - 1 {
@@ -2208,8 +2251,7 @@ fn (mut g JsGen) gen_array_init_expr(it ast.ArrayInit) {
 			g.expr(it.init_expr)
 		} else {
 			// Fill the array with the default values for its type
-			t := g.to_js_typ_val(it.elem_type)
-			g.write(t)
+			g.write_js_default_value(it.elem_type)
 		}
 		g.writeln(');')
 		g.dec_indent()
@@ -2240,8 +2282,7 @@ fn (mut g JsGen) gen_array_init_expr(it ast.ArrayInit) {
 			g.expr(it.init_expr)
 		} else {
 			// Fill the array with the default values for its type
-			t := g.to_js_typ_val(it.elem_type)
-			g.write(t)
+			g.write_js_default_value(it.elem_type)
 		}
 		g.writeln(');')
 		g.dec_indent()
@@ -3091,17 +3132,15 @@ fn (mut g JsGen) gen_index_expr(expr ast.IndexExpr) {
 		}
 		g.write(')')
 	} else if left_sym.kind == .map {
-		g.expr(expr.left)
-
 		if expr.is_setter && !g.inside_left_shift {
+			g.expr(expr.left)
+			if expr.left_type.is_ptr() {
+				g.write('.valueOf()')
+			}
 			g.inside_map_set = true
 			g.write('.getOrSet(')
-		} else {
-			g.write('.get(')
-		}
-		g.expr(expr.index)
-		g.write('.\$toJS()')
-		if expr.is_setter {
+			g.expr(expr.index)
+			g.write('.\$toJS()')
 			// g.write(', ${g.to_js_typ_val(left_typ.)')
 			match left_sym.info {
 				ast.Map {
@@ -3111,8 +3150,28 @@ fn (mut g JsGen) gen_index_expr(expr ast.IndexExpr) {
 					verror('unreachable')
 				}
 			}
+
+			g.write(')')
+		} else {
+			match left_sym.info {
+				ast.Map {
+					tmp := g.new_tmp_var()
+					g.write('(function() { let ${tmp} = ')
+					g.expr(expr.left)
+					if expr.left_type.is_ptr() {
+						g.write('.valueOf()')
+					}
+					g.write('.get(')
+					g.expr(expr.index)
+					g.write('.\$toJS()); return js_is_undefined(${tmp}).valueOf() ? ')
+					g.write(g.to_js_typ_val(left_sym.info.value_type))
+					g.write(' : ${tmp}; })()')
+				}
+				else {
+					verror('unreachable')
+				}
+			}
 		}
-		g.write(')')
 	} else if left_sym.kind == .string {
 		if expr.is_setter {
 			// TODO: What's the best way to do this?
@@ -3156,6 +3215,19 @@ fn (mut g JsGen) expr_string(expr ast.Expr) string {
 	pos := g.out.len
 	g.expr(expr)
 	return g.out.cut_to(pos).trim_space()
+}
+
+fn (mut g JsGen) write_map_stored_key(expr ast.Expr, typ ast.Type) {
+	if typ == 0 || typ == ast.invalid_type {
+		g.write('v_clone_value(')
+		g.expr(expr)
+		g.write(')')
+		return
+	}
+	copy_fn := g.get_copy_fn(typ)
+	g.write('${copy_fn}(')
+	g.expr(expr)
+	g.write(')')
 }
 
 fn (mut g JsGen) should_wrap_js_selector_rvalue(expr ast.Expr, expected_type ast.Type) bool {
@@ -3467,7 +3539,7 @@ fn (mut g JsGen) gen_map_init_expr(it ast.MapInit) {
 			g.write(': { val: ')
 			g.expr(val)
 			g.write(', key: ')
-			g.expr(key)
+			g.write_map_stored_key(key, it.key_type)
 			g.write(' }')
 			if i < it.keys.len - 1 {
 				g.write(',')
@@ -3858,10 +3930,18 @@ fn (mut g JsGen) gen_integer_literal_expr(it ast.IntegerLiteral) {
 
 	// Skip cast if type is the same as the parent caster
 	if g.cast_stack.len > 0 {
-		if g.cast_stack.last() in ast.integer_type_idxs {
+		cast_type := g.cast_stack.last()
+		if cast_type in ast.integer_type_idxs {
+			cast_sym := g.table.final_sym(cast_type)
 			g.write('new ')
-
-			g.write('int(${it.val})')
+			g.write(g.styp(cast_type))
+			g.write('(')
+			if cast_sym.kind in [.i64, .u64] {
+				g.write('"${it.val}"')
+			} else {
+				g.write(it.val)
+			}
+			g.write(')')
 			return
 		}
 	}
@@ -4034,36 +4114,48 @@ fn (mut g JsGen) gen_postfix_index_expr(expr ast.IndexExpr, op token.Kind) {
 		}
 		g.write(')')
 	} else if left_sym_kind == .map {
-		g.expr(expr.left)
+		lsym := g.table.sym(expr.left_type)
+		value_typ := match lsym.info {
+			ast.Map {
+				lsym.info.value_type
+			}
+			else {
+				verror('unreachable')
+				ast.void_type
+			}
+		}
 
 		if expr.is_setter {
-			g.inside_map_set = true
-			g.write('.map.set(')
-		} else {
-			g.write('.map.get(')
-		}
-		g.expr(expr.index)
-		g.write('.\$toJS()')
-		if !expr.is_setter {
-			g.write(')')
-		} else {
-			g.write(',')
-			lsym := g.table.sym(expr.left_type)
-			key_typ := match lsym.info {
-				ast.Map {
-					lsym.info.value_type
-				}
-				else {
-					verror('unreachable')
-				}
-			}
-
-			g.write('new ${g.styp(key_typ)}(')
-
+			g.write('if (!')
 			g.expr(expr.left)
-			g.write('.map.get(')
+			if expr.left_type.is_ptr() {
+				g.write('.valueOf()')
+			}
+			g.write('.has(')
 			g.expr(expr.index)
-			g.write('.\$toJS())')
+			g.write('.\$toJS())) ')
+			g.expr(expr.left)
+			if expr.left_type.is_ptr() {
+				g.write('.valueOf()')
+			}
+			g.writeln('.length++;')
+			g.expr(expr.left)
+			if expr.left_type.is_ptr() {
+				g.write('.valueOf()')
+			}
+			g.write('.map[')
+			g.expr(expr.index)
+			g.write('.\$toJS()] = { val: ')
+			g.write('new ${g.styp(value_typ)}(')
+			g.expr(expr.left)
+			if expr.left_type.is_ptr() {
+				g.write('.valueOf()')
+			}
+			g.write('.getOrSet(')
+			g.expr(expr.index)
+			g.write('.\$toJS(), ')
+			g.write(g.to_js_typ_val(value_typ))
+			g.write(')')
 			match op {
 				.inc {
 					g.write('.val + 1)')
@@ -4076,7 +4168,21 @@ fn (mut g JsGen) gen_postfix_index_expr(expr ast.IndexExpr, op token.Kind) {
 				}
 			}
 
-			g.write(')')
+			g.write(', key: ')
+			g.write_map_stored_key(expr.index, expr.index_type)
+			g.write(' }')
+		} else {
+			tmp := g.new_tmp_var()
+			g.write('(function() { let ${tmp} = ')
+			g.expr(expr.left)
+			if expr.left_type.is_ptr() {
+				g.write('.valueOf()')
+			}
+			g.write('.get(')
+			g.expr(expr.index)
+			g.write('.\$toJS()); return js_is_undefined(${tmp}).valueOf() ? ')
+			g.write(g.to_js_typ_val(value_typ))
+			g.write(' : ${tmp}; })()')
 		}
 	} else if left_sym_kind == .string {
 		if expr.is_setter {

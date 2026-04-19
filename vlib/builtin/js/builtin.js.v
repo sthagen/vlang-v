@@ -105,7 +105,11 @@ fn js_stacktrace() string {
 #return new map(cloned);
 #}
 #if (typeof value !== 'object') return value;
-#if (typeof value.$toJS === 'function') return value;
+#if (typeof value.$toJS === 'function') {
+#let cloned = Object.create(Object.getPrototypeOf(value) || Object.prototype);
+#for (const key of Object.keys(value)) cloned[key] = v_clone_value(value[key]);
+#return cloned;
+#}
 #let cloned;
 #try {
 #cloned = typeof value.constructor === 'function' ? new value.constructor({}) : Object.create(Object.getPrototypeOf(value));
@@ -122,7 +126,8 @@ pub fn print_backtrace() {
 
 pub fn (a array) clone() array {
 	mut res := empty_array()
-	#const cloned = a.arr.arr.slice(a.arr.index_start.valueOf(), a.arr.index_start.valueOf() + a.len.valueOf()).map(v_clone_value)
+	#const source = a instanceof $ref ? a.val : a
+	#const cloned = source.arr.arr.slice(source.arr.index_start.valueOf(), source.arr.index_start.valueOf() + source.len.valueOf()).map(v_clone_value)
 	#res = new array(new array_buffer({arr: cloned, len: new int(cloned.length), cap: new int(cloned.length), index_start: new int(0), has_slice: new bool(false)}))
 
 	return res

@@ -3042,7 +3042,15 @@ fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) bool {
 							g.expr(stmt.expr)
 							g.writeln(';')
 						} else {
-							ret_typ := g.fn_decl.return_type.clear_flag(.result)
+							// on assignment or struct field initialization
+							inside_assign_context := g.inside_struct_init
+								|| g.inside_assign
+								|| (!g.inside_return && g.inside_match_result)
+							ret_typ := if inside_assign_context {
+								stmt.typ
+							} else {
+								g.fn_decl.return_type.clear_flag(.result)
+							}
 							styp = g.base_type(ret_typ)
 							if stmt.expr is ast.CallExpr && stmt.expr.is_noreturn {
 								g.expr(ast.Expr(stmt.expr))
@@ -3990,6 +3998,25 @@ fn (mut g Gen) expr_needs_heap_promotion_for_interface_cast(expr ast.Expr) bool 
 	}
 }
 
+fn (g &Gen) interface_cast_requires_field_aliasing(expected_type ast.Type, expr ast.Expr) bool {
+	if !expr.is_lvalue() {
+		return false
+	}
+	interface_type := if expected_type.is_ptr() {
+		expected_type.deref()
+	} else {
+		expected_type
+	}
+	interface_sym := g.table.final_sym(interface_type)
+	if interface_sym.kind != .interface {
+		return false
+	}
+	return match interface_sym.info {
+		ast.Interface { interface_sym.info.fields.any(it.is_mut) }
+		else { false }
+	}
+}
+
 fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp ast.Type, got ast.Type, exp_styp string,
 	got_is_ptr bool, got_is_fn bool, got_styp string) {
 	mut rparen_n := 1
@@ -4019,18 +4046,23 @@ fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp ast.Ty
 
 		is_primitive_to_interface := is_interface_cast && expr is ast.Ident
 			&& g.table.sym(got).kind in [.i8, .i16, .i32, .int, .i64, .isize, .u8, .u16, .u32, .u64, .usize, .f32, .f64, .bool, .rune, .string]
+		preserve_interface_field_aliasing := is_interface_cast
+			&& g.interface_cast_requires_field_aliasing(exp, expr)
 
 		// Interface casts must not store pointers into stack-rooted lvalues such as
 		// local variables or fields on by-value fn args (`p.email`).
-		is_stack_rooted_interface_expr = is_interface_cast && g.interface_expr_needs_heap(expr)
+		is_stack_rooted_interface_expr = is_interface_cast && !preserve_interface_field_aliasing
+			&& g.interface_expr_needs_heap(expr)
 		// Interface casts must not store pointers into expressions without a
 		// stable address, including stack-rooted lvalues and slice results.
-		needs_interface_cast_promotion := is_interface_cast
+		needs_interface_cast_promotion := is_interface_cast && !preserve_interface_field_aliasing
 			&& g.expr_needs_heap_promotion_for_interface_cast(expr)
 		// Value-to-interface conversions should preserve value semantics by storing a detached copy.
 		// The only exception is an explicit mutable borrow, which must keep aliasing the original.
-		needs_interface_value_copy := is_interface_cast && !g.expected_arg_mut && !got_is_ptr
-			&& expr.is_lvalue()
+		// Interfaces with mutable fields also need to alias the original lvalue so field reads/writes
+		// stay connected to the concrete value instead of a detached clone.
+		needs_interface_value_copy := is_interface_cast && !preserve_interface_field_aliasing
+			&& !g.expected_arg_mut && !got_is_ptr && expr.is_lvalue()
 
 		if !is_cast_fixed_array_init && (is_comptime_variant || !expr.is_lvalue()
 			|| (expr is ast.Ident && (expr.obj.is_simple_define_const()
@@ -4422,14 +4454,12 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 					return
 				}
 			}
-			// For auto-heap variables in generic contexts, the variable is
-			// already a pointer in C. Treat got_is_ptr as true to prevent
-			// adding a spurious `&`, and suppress the auto-heap deref in
-			// g.expr() so it emits `t` (the pointer) instead of `(*t)`.
+			// Auto-heap variables are already pointers in C. Treat them as
+			// pointer-backed here to avoid wrapping the raw pointer in an
+			// extra HEAP(...) and to suppress the usual auto-deref in g.expr().
 			mut effective_got_is_ptr := got_is_ptr
 			mut suppress_auto_heap_deref := false
-			if !got_is_ptr && g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0
-				&& expr is ast.Ident && g.resolved_ident_is_auto_heap(expr) {
+			if !got_is_ptr && expr is ast.Ident && g.resolved_ident_is_auto_heap(expr) {
 				effective_got_is_ptr = true
 				suppress_auto_heap_deref = true
 			}
@@ -6180,12 +6210,23 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 	}
 	mut selector_expr_expr := node.expr
 	mut is_sumtype_smartcast_expr_ptr := false
+	// Track if the ident's original type is a sumtype/interface and it has
+	// smartcasts; the ident codegen dereferences the variant pointer with `*`,
+	// so the result is a value even if the original type is a pointer.
+	mut smartcast_ident_already_dereferenced := false
 	if mut selector_expr_expr is ast.Ident && selector_scope != unsafe { nil } {
 		selector_expr_expr.scope = selector_scope
 		if scope_var := selector_scope.find_var(selector_expr_expr.name) {
 			if scope_var.smartcasts.len > 0 {
 				selector_expr_expr.obj = *scope_var
 				is_sumtype_smartcast_expr_ptr = g.table.final_sym(g.unwrap_generic(scope_var.typ)).kind == .sum_type
+				orig_sym := g.table.final_sym(g.unwrap_generic(scope_var.orig_type))
+				// For sum types: ident codegen emits `*name->_variant` which
+				// dereferences the variant pointer, producing a value.
+				// For interfaces: ident codegen emits `*(type*)name._variant`
+				// which also dereferences the interface field pointer.
+				// In both cases the expression result is a value, not a ptr.
+				smartcast_ident_already_dereferenced = orig_sym.kind in [.sum_type, .interface]
 			}
 		}
 	}
@@ -6683,19 +6724,27 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 	}
 	interface_smartcast_expr_is_dereferenced := is_interface_smartcast_expr
 		&& smartcast_expr_var.smartcasts.last().nr_muls() == exposed_interface_smartcast_type.nr_muls() + 1
+	// An interface smartcast to a non-interface type normally produces a pointer
+	// (the interface stores fields as pointers). But the ident codegen may
+	// already dereference the pointer, depending on the exposed smartcast type.
+	// If exposed_interface_smartcast_type has the same nr_muls as the raw
+	// smartcast type, the pointer is NOT exposed (ident adds `*` dereference).
 	interface_smartcast_selector_emits_ptr := is_interface_smartcast_selector
 		|| (is_interface_smartcast_expr
-		&& g.table.final_sym(g.unwrap_generic(smartcast_expr_var.smartcasts.last())).kind != .interface)
+		&& g.table.final_sym(g.unwrap_generic(smartcast_expr_var.smartcasts.last())).kind != .interface
+		&& exposed_interface_smartcast_type.is_ptr())
 	left_is_ptr := if expr_is_unwrapped_autoheap_option {
 		false
 	} else {
 		field_is_opt || expr_is_auto_heap || interface_smartcast_selector_emits_ptr
-			|| (is_interface_smartcast_lhs && !interface_smartcast_expr_is_dereferenced)
-			|| (((!is_dereferenced && !is_interface_smartcast_lhs && unwrapped_expr_type.is_ptr())
-			|| sym.kind == .chan || alias_to_ptr) && node.from_embed_types.len == 0)
+			|| (is_interface_smartcast_lhs && !interface_smartcast_expr_is_dereferenced
+			&& !smartcast_ident_already_dereferenced) || (((!is_dereferenced
+			&& !is_interface_smartcast_lhs && !smartcast_ident_already_dereferenced
+			&& unwrapped_expr_type.is_ptr()) || sym.kind == .chan || alias_to_ptr)
+			&& node.from_embed_types.len == 0)
 			|| (node.expr.is_as_cast() && g.inside_smartcast)
 			|| (!opt_ptr_already_deref && unwrapped_expr_type.is_ptr()
-			&& !is_interface_smartcast_lhs)
+			&& !is_interface_smartcast_lhs && !smartcast_ident_already_dereferenced)
 	}
 	if !has_embed && left_is_ptr {
 		g.write('->')
@@ -10228,6 +10277,11 @@ fn (mut g Gen) gen_or_block_stmts(cvar_name string, cast_typ string, stmts []ast
 									&& call_expr.or_block.kind == .absent {
 									g.write('${cvar_name} = ')
 									return_wrapped = true
+								} else if call_expr.or_block.kind != .absent {
+									// Call with ? or ! - the call codegen will
+									// unwrap the option/result, so assign the
+									// unwrapped value to the or-block's data slot.
+									g.write('*(${cast_typ}*) ${cvar_name}${tmp_op}data = ')
 								}
 							} else if expr_stmt.expr is ast.CallExpr {
 								call_expr := expr_stmt.expr as ast.CallExpr

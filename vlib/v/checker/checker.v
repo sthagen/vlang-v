@@ -3680,16 +3680,18 @@ fn (mut c Checker) enum_decl(mut node ast.EnumDecl) {
 											replacement_expr = comptime_lit
 										}
 									}
-									folded_expr :=
-										c.checker_transformer.expr(mut field.expr.obj.expr)
+									if !has_replacement {
+										folded_expr :=
+											c.checker_transformer.expr(mut field.expr.obj.expr)
 
-									if folded_expr is ast.IntegerLiteral {
-										c.check_enum_field_integer_literal(folded_expr, signed,
-											node.is_multi_allowed, senum_type, field.expr.pos, mut
-											useen, enum_umin, enum_umax, mut iseen, enum_imin,
-											enum_imax)
-										has_replacement = true
-										replacement_expr = folded_expr
+										if folded_expr is ast.IntegerLiteral {
+											c.check_enum_field_integer_literal(folded_expr, signed,
+												node.is_multi_allowed, senum_type, field.expr.pos, mut
+												useen, enum_umin, enum_umax, mut iseen, enum_imin,
+												enum_imax)
+											has_replacement = true
+											replacement_expr = folded_expr
+										}
 									}
 								}
 							}
@@ -7761,7 +7763,7 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 			c.error('type `?${typ_sym.name}` is an Option, it must be unwrapped with `func()?`, or use `func() or {default}`',
 				left_pos)
 		} else if node.left is ast.SelectorExpr && node.left.or_block.kind == .absent {
-			c.error('type `?${typ_sym.name}` is an Option, it must be unwrapped first; use `${node.left}?` to do it',
+			c.error('type `?${typ_sym.name}` is an Option, it must be unwrapped first; use `${ast.Expr(node.left)}?` to do it',
 				left_pos)
 		}
 	} else if typ.has_flag(.result) {
