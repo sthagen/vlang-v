@@ -35,7 +35,16 @@ fn (g &Gen) is_smartcast_assign_lhs(expr ast.Expr) bool {
 			}
 			scope_field := expr.scope.find_struct_field(smartcast_selector_expr_str(expr),
 				expr.expr_type, expr.field_name)
-			return scope_field != unsafe { nil } && scope_field.smartcasts.len > 0
+			if scope_field == unsafe { nil } || scope_field.smartcasts.len == 0 {
+				return false
+			}
+			// Option field smartcast on LHS: the assignment replaces the option
+			// as a whole (e.g. `s.x = 10` or `s.x = none` inside `if s.x != none`),
+			// so skip unwrap treatment that's only meant for sumtype reassignments.
+			if scope_field.orig_type.has_flag(.option) {
+				return false
+			}
+			return true
 		}
 		else {
 			return false
@@ -156,16 +165,16 @@ fn assign_expr_unwraps_option_or_result(expr ast.Expr) bool {
 }
 
 fn (mut g Gen) decl_assign_struct_init_needs_tmp(expr ast.Expr) bool {
-	node := match expr {
+	mut node := ast.StructInit{}
+	match expr {
 		ast.StructInit {
-			expr
+			node = expr
 		}
 		ast.ParExpr {
-			if expr.expr is ast.StructInit {
-				expr.expr
-			} else {
+			if expr.expr !is ast.StructInit {
 				return false
 			}
+			node = expr.expr as ast.StructInit
 		}
 		else {
 			return false
@@ -1367,8 +1376,8 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 				}
 				g.writeln(';}')
 			}
-		} else if node.op == .assign && (is_fixed_array_init
-			|| (unaliased_right_sym.kind == .array_fixed && val in [ast.Ident, ast.CastExpr])) {
+		} else if node.op == .assign && (is_fixed_array_init || is_fixed_array_var
+			|| (unaliased_right_sym.kind == .array_fixed && val is ast.CastExpr)) {
 			// Fixed arrays
 			if unaliased_left_sym.kind != .array_fixed && unaliased_right_sym.kind == .array_fixed
 				&& (g.pref.translated || g.file.is_translated) {
@@ -1399,37 +1408,39 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 					g.writeln(', sizeof(${g.styp(var_type)}));')
 				}
 			} else {
-				mut v_var := ''
 				arr_typ := styp.trim('*')
-				if is_fixed_array_init {
-					right := val as ast.ArrayInit
-					v_var = g.new_tmp_var()
-					g.write('${arr_typ} ${v_var} = ')
-					g.expr(right)
-					g.writeln(';')
+				old_is_assign_lhs := g.is_assign_lhs
+				// For map IndexExpr LHS, keep is_assign_lhs = true so the index
+				// generator emits `map_get_and_set` (which inserts missing keys)
+				// instead of `map_get` (which returns a zero-default buffer).
+				left_is_map_index := left is ast.IndexExpr
+					&& g.table.final_sym(left.left_type).kind == .map
+				g.is_assign_lhs = left_is_map_index
+				left_expr := g.expr_string(left)
+				if !is_fixed_array_init && assign_expr_unwraps_option_or_result(val) {
+					// val has an or-block — its code generator emits unwrap
+					// statements via go_before_last_stmt(), so we must emit
+					// memcpy() inline. Capturing val with expr_string() would
+					// slurp those statements into the memcpy() argument list.
+					g.write('memcpy(${left_expr}, ')
+					g.expr(val)
+					g.writeln(', sizeof(${arr_typ}));')
 				} else {
-					v_var = g.expr_string(val)
-				}
-				pos := g.out.len
-				g.expr(left)
-
-				if g.is_arraymap_set && g.arraymap_set_pos >= 0 {
-					if g.arraymap_set_pos > 0 {
-						g.go_back_to(g.arraymap_set_pos)
+					mut fixed_right_expr := ''
+					if is_fixed_array_init {
+						right := val as ast.ArrayInit
+						right_var := g.new_tmp_var()
+						g.write('${arr_typ} ${right_var} = ')
+						g.expr(right)
+						g.writeln(';')
+						fixed_right_expr = right_var
+					} else {
+						fixed_right_expr = g.expr_string(val)
 					}
-					g.write(', &${v_var})')
-					g.is_arraymap_set = false
-					g.arraymap_set_pos = 0
-				} else {
-					g.go_back_to(pos)
-					is_var_mut := !is_decl && left.is_auto_deref_var()
-					addr_left := if is_var_mut { '' } else { '&' }
 					g.writeln('')
-					g.write('memcpy(${addr_left}')
-					g.expr(left)
-					addr_val := if is_fixed_array_var { '' } else { '&' }
-					g.writeln(', ${addr_val}${v_var}, sizeof(${arr_typ}));')
+					g.writeln('memcpy(${left_expr}, ${fixed_right_expr}, sizeof(${arr_typ}));')
 				}
+				g.is_assign_lhs = old_is_assign_lhs
 				g.is_assign_lhs = false
 			}
 		} else {
@@ -2069,9 +2080,9 @@ fn (mut g Gen) assign_stmt(node_ ast.AssignStmt) {
 										&& right_type_for_compare == exp_type_for_compare
 									right_is_auto_heap := right_ident.is_auto_heap()
 										|| g.resolved_ident_is_auto_heap(right_ident)
-									use_raw_auto_heap_ident = right_is_auto_heap
-										&& !use_heap_pointed_ident && resolved_right_type != 0
-										&& !resolved_right_type.is_ptr()
+									use_raw_auto_heap_ident = exp_type.is_ptr()
+										&& right_is_auto_heap && !use_heap_pointed_ident
+										&& resolved_right_type != 0 && !resolved_right_type.is_ptr()
 								}
 							}
 							if use_heap_pointed_ident {

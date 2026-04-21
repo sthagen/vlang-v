@@ -145,7 +145,7 @@ mut:
 	inside_if_result                     bool
 	inside_match_option                  bool
 	inside_match_result                  bool
-	inside_vweb_tmpl                     bool
+	inside_veb_tmpl                      bool
 	inside_return                        bool
 	inside_return_tmpl                   bool
 	inside_struct_init                   bool
@@ -294,7 +294,7 @@ mut:
 	has_debugger         bool   // $dbg has been used in the code
 	reflection_strings   &map[string]int
 	defer_return_tmp_var string
-	vweb_filter_fn_name  string   // vweb__filter or x__vweb__filter, used by $vweb.html() for escaping strings in the templates, depending on which `vweb` import is used
+	veb_filter_fn_name   string   // veb__filter, used by $veb.html() for escaping strings in templates
 	export_funcs         []string // for .dll export function names
 	//
 	type_default_impl_level int
@@ -3131,7 +3131,7 @@ fn (mut g Gen) stmts_with_tmp_var(stmts []ast.Stmt, tmp_var string) bool {
 	if g.inside_ternary > 0 {
 		g.write2('', ')')
 	}
-	if g.needs_scope_cleanup() && !g.inside_vweb_tmpl && stmts.len > 0 && !last_stmt_was_return {
+	if g.needs_scope_cleanup() && !g.inside_veb_tmpl && stmts.len > 0 && !last_stmt_was_return {
 		// use the first stmt to get the scope
 		stmt := stmts[0]
 		if stmt !is ast.FnDecl && g.inside_ternary == 0 {
@@ -4017,14 +4017,30 @@ fn (g &Gen) interface_cast_requires_field_aliasing(expected_type ast.Type, expr 
 	}
 }
 
+fn (mut g Gen) fn_ptr_cast_typ(func ast.FnType) string {
+	ptr_name := '__v_fn_ptr'
+	return g.fn_ptr_decl_str(func, ptr_name).replace_once(ptr_name, '')
+}
+
 fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp ast.Type, got ast.Type, exp_styp string,
 	got_is_ptr bool, got_is_fn bool, got_styp string) {
 	mut rparen_n := 1
 	mut mutable_is_mut_arg_pos := 0
+	mut force_auto_heap_value_deref := false
 
 	is_not_ptr_and_fn := !got_is_ptr && !got_is_fn
 	is_sumtype_cast := !got_is_fn && fname.contains('_to_sumtype_')
 	is_interface_cast := !got_is_fn && fname.contains('_to_Interface_')
+	interface_cast_source_expr := if is_interface_cast && expr is ast.CastExpr {
+		expr.expr
+	} else {
+		expr
+	}
+	expr_is_lvalue := if is_interface_cast {
+		interface_cast_source_expr.is_lvalue()
+	} else {
+		expr.is_lvalue()
+	}
 	is_comptime_variant := is_not_ptr_and_fn && expr is ast.Ident
 		&& g.comptime.is_comptime_variant_var(expr)
 	mut is_stack_rooted_interface_expr := false
@@ -4047,24 +4063,26 @@ fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp ast.Ty
 		is_primitive_to_interface := is_interface_cast && expr is ast.Ident
 			&& g.table.sym(got).kind in [.i8, .i16, .i32, .int, .i64, .isize, .u8, .u16, .u32, .u64, .usize, .f32, .f64, .bool, .rune, .string]
 		preserve_interface_field_aliasing := is_interface_cast
-			&& g.interface_cast_requires_field_aliasing(exp, expr)
+			&& g.interface_cast_requires_field_aliasing(exp, interface_cast_source_expr)
 
 		// Interface casts must not store pointers into stack-rooted lvalues such as
 		// local variables or fields on by-value fn args (`p.email`).
 		is_stack_rooted_interface_expr = is_interface_cast && !preserve_interface_field_aliasing
-			&& g.interface_expr_needs_heap(expr)
+			&& g.interface_expr_needs_heap(interface_cast_source_expr)
 		// Interface casts must not store pointers into expressions without a
 		// stable address, including stack-rooted lvalues and slice results.
 		needs_interface_cast_promotion := is_interface_cast && !preserve_interface_field_aliasing
-			&& g.expr_needs_heap_promotion_for_interface_cast(expr)
+			&& g.expr_needs_heap_promotion_for_interface_cast(interface_cast_source_expr)
 		// Value-to-interface conversions should preserve value semantics by storing a detached copy.
 		// The only exception is an explicit mutable borrow, which must keep aliasing the original.
 		// Interfaces with mutable fields also need to alias the original lvalue so field reads/writes
 		// stay connected to the concrete value instead of a detached clone.
 		needs_interface_value_copy := is_interface_cast && !preserve_interface_field_aliasing
-			&& !g.expected_arg_mut && !got_is_ptr && expr.is_lvalue()
+			&& !g.expected_arg_mut && !got_is_ptr && expr_is_lvalue
+		force_auto_heap_value_deref = needs_interface_value_copy && expr is ast.Ident
+			&& g.scope_ident_is_auto_heap(expr)
 
-		if !is_cast_fixed_array_init && (is_comptime_variant || !expr.is_lvalue()
+		if !is_cast_fixed_array_init && (is_comptime_variant || !expr_is_lvalue
 			|| (expr is ast.Ident && (expr.obj.is_simple_define_const()
 			|| (expr.obj is ast.Var && expr.obj.is_index_var)))
 			|| is_primitive_to_interface || needs_interface_cast_promotion
@@ -4102,7 +4120,9 @@ fn (mut g Gen) call_cfn_for_casting_expr(fname string, expr ast.Expr, exp ast.Ty
 		old_left_is_opt := g.left_is_opt
 		g.left_is_opt = !exp.has_flag(.option)
 		old_inside_assign_fn_var := g.inside_assign_fn_var
-		if is_stack_rooted_interface_expr && g.expr_root_ident_unwraps_option_or_result(expr) {
+		if force_auto_heap_value_deref {
+			g.inside_assign_fn_var = false
+		} else if is_stack_rooted_interface_expr && g.expr_root_ident_unwraps_option_or_result(expr) {
 			g.inside_assign_fn_var = true
 		}
 		g.expr(expr)
@@ -4374,13 +4394,6 @@ fn (mut g Gen) widen_small_int_infix_for_cast(expr ast.InfixExpr, got_type ast.T
 // use instead of expr() when you need to cast to a different type
 fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_type ast.Type) {
 	got_type := ast.mktyp(got_type_raw)
-	$if trace_ci_fixes ? {
-		if g.file.path.contains('binary_search_tree.v') && expr is ast.SelectorExpr {
-			if expr.expr is ast.Ident && expr.expr.name == 'tree' {
-				eprintln('expr_with_cast expr=${expr.expr.name}.${expr.field_name} got=${g.table.type_to_str(got_type)} expected=${g.table.type_to_str(expected_type)} got_ptr=${got_type.is_ptr()}')
-			}
-		}
-	}
 	exp_sym := g.table.final_sym(expected_type)
 	got_sym := g.table.sym(got_type)
 	expected_is_ptr := expected_type.is_ptr()
@@ -4455,11 +4468,14 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 				}
 			}
 			// Auto-heap variables are already pointers in C. Treat them as
-			// pointer-backed here to avoid wrapping the raw pointer in an
-			// extra HEAP(...) and to suppress the usual auto-deref in g.expr().
+			// pointer-backed only when interface semantics require aliasing the
+			// original storage. Plain value-to-interface conversions still need
+			// a detached copy, even when the value itself lives in auto-heap storage.
 			mut effective_got_is_ptr := got_is_ptr
 			mut suppress_auto_heap_deref := false
-			if !got_is_ptr && expr is ast.Ident && g.resolved_ident_is_auto_heap(expr) {
+			if !got_is_ptr && expr is ast.Ident && g.resolved_ident_is_auto_heap(expr)
+				&& (g.expected_arg_mut
+				|| g.interface_cast_requires_field_aliasing(expected_type, expr)) {
 				effective_got_is_ptr = true
 				suppress_auto_heap_deref = true
 			}
@@ -4542,13 +4558,15 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 					}
 				}
 			}
-			if is_already_sum_type && !g.inside_return {
+			if is_already_sum_type {
 				// Don't create a new sum type wrapper if there is already one
 				g.prevent_sum_type_unwrapping_once = true
 				g.expr(expr)
 			} else {
-				if mut sumtype_got_sym.info is ast.Aggregate {
-					sumtype_got_type = sumtype_got_sym.info.types[g.aggregate_type_idx]
+				sumtype_got_sym_val := *sumtype_got_sym
+				variant_typ := sumtype_got_sym_val.aggregate_variant_type(g.aggregate_type_idx)
+				if variant_typ != 0 {
+					sumtype_got_type = variant_typ
 					sumtype_got_sym = g.table.sym(sumtype_got_type)
 					sumtype_got_styp = g.styp(sumtype_got_type)
 					sumtype_got_is_fn = sumtype_got_sym.kind == .function
@@ -5903,9 +5921,10 @@ fn (mut g Gen) resolve_typeof_expr_type(expr ast.Expr, default_type ast.Type) as
 			if expr.obj is ast.Var {
 				if expr.obj.smartcasts.len > 0 {
 					mut typ := g.unwrap_generic(expr.obj.smartcasts.last())
-					cast_sym := g.table.sym(typ)
-					if cast_sym.info is ast.Aggregate {
-						typ = cast_sym.info.types[g.aggregate_type_idx]
+					cast_sym := *g.table.sym(typ)
+					variant_typ := cast_sym.aggregate_variant_type(g.aggregate_type_idx)
+					if variant_typ != 0 {
+						typ = variant_typ
 					} else if expr.obj.ct_type_var == .smartcast {
 						typ = g.unwrap_generic(g.type_resolver.get_type(expr))
 					}
@@ -6209,24 +6228,17 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 		selector_scope = g.file.scope.innermost(node.pos.pos)
 	}
 	mut selector_expr_expr := node.expr
-	mut is_sumtype_smartcast_expr_ptr := false
-	// Track if the ident's original type is a sumtype/interface and it has
-	// smartcasts; the ident codegen dereferences the variant pointer with `*`,
-	// so the result is a value even if the original type is a pointer.
+	// Sumtype smartcast idents dereference the variant pointer eagerly, so the
+	// selector receiver is already a value. Interface smartcasts are more
+	// context-sensitive and may still emit a pointer while inside selector codegen.
 	mut smartcast_ident_already_dereferenced := false
 	if mut selector_expr_expr is ast.Ident && selector_scope != unsafe { nil } {
 		selector_expr_expr.scope = selector_scope
 		if scope_var := selector_scope.find_var(selector_expr_expr.name) {
 			if scope_var.smartcasts.len > 0 {
 				selector_expr_expr.obj = *scope_var
-				is_sumtype_smartcast_expr_ptr = g.table.final_sym(g.unwrap_generic(scope_var.typ)).kind == .sum_type
 				orig_sym := g.table.final_sym(g.unwrap_generic(scope_var.orig_type))
-				// For sum types: ident codegen emits `*name->_variant` which
-				// dereferences the variant pointer, producing a value.
-				// For interfaces: ident codegen emits `*(type*)name._variant`
-				// which also dereferences the interface field pointer.
-				// In both cases the expression result is a value, not a ptr.
-				smartcast_ident_already_dereferenced = orig_sym.kind in [.sum_type, .interface]
+				smartcast_ident_already_dereferenced = orig_sym.kind == .sum_type
 			}
 		}
 	}
@@ -6444,7 +6456,7 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 						if field_sym.kind == .sum_type && !is_option {
 							g.write('*')
 						}
-						cast_sym := g.table.sym(g.unwrap_generic(typ))
+						cast_sym := *g.table.sym(g.unwrap_generic(typ))
 						if field_sym.kind == .interface && cast_sym.kind == .interface
 							&& !is_option_unwrap {
 							ptr := '*'.repeat(field.typ.nr_muls())
@@ -6456,8 +6468,9 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 								dot := if field.typ.is_ptr() { '->' } else { '.' }
 								sum_type_deref_field += ')${dot}'
 							}
-							if cast_sym.info is ast.Aggregate {
-								agg_sym := g.table.sym(cast_sym.info.types[g.aggregate_type_idx])
+							variant_typ := cast_sym.aggregate_variant_type(g.aggregate_type_idx)
+							if variant_typ != 0 {
+								agg_sym := g.table.sym(variant_typ)
 								sum_type_deref_field += '_${agg_sym.cname}'
 							} else {
 								if i == 0 && nested_unwrap {
@@ -6544,9 +6557,11 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 	g.inside_selector_lhs = true
 	mut smartcast_expr_var := ast.Var{}
 	mut is_interface_smartcast_expr := false
-	if node.expr is ast.Ident {
-		if node.expr.obj is ast.Var && g.table.is_interface_smartcast(node.expr.obj) {
-			smartcast_expr_var = node.expr.obj
+	if selector_expr_expr is ast.Ident {
+		if selector_expr_expr.obj is ast.Var && selector_expr_expr.obj.smartcasts.len > 0
+			&& selector_expr_expr.obj.orig_type != 0
+			&& g.table.final_sym(g.unwrap_generic(selector_expr_expr.obj.orig_type)).kind == .interface {
+			smartcast_expr_var = selector_expr_expr.obj
 			is_interface_smartcast_expr = true
 		}
 	}
@@ -6615,12 +6630,6 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 		0
 	} else {
 		resolved_selector_expr_type.nr_muls() - 1
-	}
-	$if trace_ci_fixes ? {
-		if g.file.path.contains('binary_search_tree.v') && node.expr is ast.Ident
-			&& node.expr.name == 'tree' {
-			eprintln('selector emit tree.${node.field_name} lhs=${g.table.type_to_str(lhs_expr_type)} resolved=${g.table.type_to_str(resolved_selector_expr_type)} n_ptr=${n_ptr} sum_ptr=${is_sumtype_smartcast_expr_ptr}')
-		}
 	}
 	if expr_is_unwrapped_autoheap_option {
 		expr_ident := node.expr as ast.Ident
@@ -6722,8 +6731,25 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 	} else {
 		ast.void_type
 	}
-	interface_smartcast_expr_is_dereferenced := is_interface_smartcast_expr
-		&& smartcast_expr_var.smartcasts.last().nr_muls() == exposed_interface_smartcast_type.nr_muls() + 1
+	// Selector receivers for interface smartcasts still need pointer-style field
+	// access even when the exposed smartcast type is a value type like `string`.
+	// EXCEPT: when inside string interpolation (`inside_interface_deref`), the
+	// ident codegen already emits `*` to dereference the pointer to a scalar
+	// builtin (e.g. `(*v._string)`), so the selector must use `.` not `->`.
+	mut interface_smartcast_expr_is_dereferenced := false
+	if is_interface_smartcast_expr && g.inside_interface_deref {
+		last_sc := smartcast_expr_var.smartcasts.last()
+		last_sc_sym := g.table.final_sym(g.unwrap_generic(last_sc))
+		raw_sc_kind := if last_sc.is_ptr() {
+			g.table.final_sym(g.unwrap_generic(last_sc.deref())).kind
+		} else {
+			last_sc_sym.kind
+		}
+		if raw_sc_kind !in [.struct, .aggregate, .array, .array_fixed, .map, .interface, .sum_type,
+			.function] {
+			interface_smartcast_expr_is_dereferenced = true
+		}
+	}
 	// An interface smartcast to a non-interface type normally produces a pointer
 	// (the interface stores fields as pointers). But the ident codegen may
 	// already dereference the pointer, depending on the exposed smartcast type.
@@ -7077,7 +7103,7 @@ fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 				}
 				values.write_string('{.typ=_S("${g.table.type_to_str(g.unwrap_generic(var_typ))}"),.value=')
 				obj_sym := g.table.sym(obj.typ)
-				cast_sym := g.table.sym(var_typ)
+				cast_sym := *g.table.sym(var_typ)
 
 				mut param_var := strings.new_builder(50)
 				is_option := obj.orig_type.has_flag(.option)
@@ -7118,23 +7144,26 @@ fn (mut g Gen) debugger_stmt(node ast.DebuggerStmt) {
 						cur_variant_sym := g.table.sym(g.unwrap_generic(g.type_resolver.get_ct_type_or_default('${g.comptime.comptime_for_variant_var}.typ',
 							ast.void_type)))
 						param_var.write_string('${cobj_name}${dot}_${cur_variant_sym.cname}')
-					} else if cast_sym.info is ast.Aggregate {
-						sym := g.table.sym(cast_sym.info.types[g.aggregate_type_idx])
-						func = g.get_str_fn(cast_sym.info.types[g.aggregate_type_idx])
-						param_var.write_string('${cobj_name}${dot}_${sym.cname}')
-					} else if obj_sym.kind == .interface && cast_sym.kind == .interface {
-						ptr := '*'.repeat(obj.typ.nr_muls())
-						param_var.write_string('I_${obj_sym.cname}_as_I_${cast_sym.cname}(${ptr}${cobj_name})')
-					} else if obj_sym.kind in [.sum_type, .interface] {
-						param_var.write_string('${cobj_name}')
-						if opt_cast {
-							param_var.write_string('.data)')
-						}
-						param_var.write_string('${dot}_${cast_sym.cname}')
-					} else if is_option && !var_typ_is_option {
-						param_var.write_string('${cobj_name}.data')
 					} else {
-						param_var.write_string('${cobj_name}')
+						variant_typ := cast_sym.aggregate_variant_type(g.aggregate_type_idx)
+						if variant_typ != 0 {
+							sym := g.table.sym(variant_typ)
+							func = g.get_str_fn(variant_typ)
+							param_var.write_string('${cobj_name}${dot}_${sym.cname}')
+						} else if obj_sym.kind == .interface && cast_sym.kind == .interface {
+							ptr := '*'.repeat(obj.typ.nr_muls())
+							param_var.write_string('I_${obj_sym.cname}_as_I_${cast_sym.cname}(${ptr}${cobj_name})')
+						} else if obj_sym.kind in [.sum_type, .interface] {
+							param_var.write_string('${cobj_name}')
+							if opt_cast {
+								param_var.write_string('.data)')
+							}
+							param_var.write_string('${dot}_${cast_sym.cname}')
+						} else if is_option && !var_typ_is_option {
+							param_var.write_string('${cobj_name}.data')
+						} else {
+							param_var.write_string('${cobj_name}')
+						}
 					}
 					param_var.write_string(')')
 
@@ -7801,35 +7830,6 @@ fn (mut g Gen) ident(node ast.Ident) {
 		}
 	}
 	if node.info is ast.IdentVar {
-		$if trace_ci_fixes ? {
-			if g.file.path.contains('binary_search_tree.v') && node.name == 'tree'
-				&& g.cur_fn != unsafe { nil } {
-				safe_typ := if has_resolved_var && resolved_var.typ != 0 {
-					g.table.type_to_str(resolved_var.typ)
-				} else {
-					'<none>'
-				}
-				safe_orig := if has_resolved_var && resolved_var.orig_type != 0 {
-					g.table.type_to_str(resolved_var.orig_type)
-				} else {
-					'<none>'
-				}
-				safe_smart := if has_resolved_var {
-					resolved_var.smartcasts.filter(it != 0).map(g.table.type_to_str(it)).str()
-				} else {
-					'[]'
-				}
-				eprintln('cgen ident fn=${g.cur_fn.name} name=${node.name} has=${has_resolved_var} typ=${safe_typ} orig=${safe_orig} smart=${safe_smart} ct=${if has_resolved_var {
-					resolved_var.ct_type_var.str()
-				} else {
-					'<none>'
-				}} inherited=${if has_resolved_var {
-					resolved_var.is_inherited.str()
-				} else {
-					'false'
-				}}')
-			}
-		}
 		node_info_is_option = node.info.is_option
 		if node.or_expr.kind == .absent {
 			resolved_scope_type := g.resolved_scope_var_type(node)
@@ -7932,7 +7932,11 @@ fn (mut g Gen) ident(node ast.Ident) {
 		// `x = 10` => `x.data = 10` (g.right_is_opt == false)
 		// `x = new_opt()` => `x = new_opt()` (g.right_is_opt == true)
 		// `println(x)` => `println(*(int*)x.data)`
-		if node_info_is_option && !(g.is_assign_lhs && g.right_is_opt) {
+		sumtype_option_variant_smartcast := node_info_is_option && has_resolved_var
+			&& resolved_var.smartcasts.len > 0 && resolved_var.orig_type.has_flag(.option)
+			&& g.table.final_sym(g.unwrap_generic(resolved_var.orig_type.clear_option_and_result())).kind == .sum_type
+		if node_info_is_option && !sumtype_option_variant_smartcast && !(g.is_assign_lhs
+			&& g.right_is_opt) {
 			selector_uses_unwrapped_option_smartcast := has_resolved_var
 				&& resolved_var.smartcasts.len > 0 && resolved_var.ct_type_var == .no_comptime
 				&& resolved_var.is_unwrapped && g.inside_selector_lhs
@@ -7983,15 +7987,19 @@ fn (mut g Gen) ident(node ast.Ident) {
 				stmt_str := g.go_before_last_stmt().trim_space()
 				g.empty_line = true
 				var_name := if !g.is_assign_lhs && is_auto_heap { '(*${name})' } else { name }
-				or_return_type := if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 {
-					or_value_type := g.resolved_or_block_value_type(node.or_expr)
-					if or_value_type != 0 {
-						or_value_type.set_flag(.option)
-					} else {
-						node.info.typ
-					}
+				mut or_return_type := if has_resolved_var
+					&& resolved_var.orig_type.has_flag(.option) {
+					resolved_var.orig_type
+				} else if has_resolved_var && resolved_var.typ.has_flag(.option) {
+					resolved_var.typ
 				} else {
 					node.info.typ
+				}
+				if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 {
+					or_value_type := g.resolved_or_block_value_type(node.or_expr)
+					if or_value_type != 0 {
+						or_return_type = or_value_type.set_flag(.option)
+					}
 				}
 				g.or_block(var_name, node.or_expr, g.or_type_with_auto_deref(node, or_return_type))
 				g.write(stmt_str)
@@ -8063,8 +8071,14 @@ fn (mut g Gen) ident(node ast.Ident) {
 			if emit_auto_heap_deref {
 				g.write('(*(')
 			}
-			// Skip smartcasts for comptime_for variables to avoid using stale types
+			// Skip smartcasts for comptime_for variables to avoid using stale types.
+			// Direct assignment to an option variable (e.g. `if x != none { x = ... }`)
+			// targets the option struct itself, not the smartcast value, so smartcasts
+			// must be skipped. But selector LHS (`opt_var.field = ...`) still needs the
+			// smartcast unwrap to access the inner struct.
 			skip_smartcasts := g.is_comptime_for_var(node)
+				|| (g.is_assign_lhs && resolved_var.orig_type.has_flag(.option)
+				&& !g.inside_selector_lhs)
 			if has_resolved_var && resolved_var.smartcasts.len > 0 && !skip_smartcasts {
 				mut smartcast_types := resolved_var.smartcasts.clone()
 				if resolved_var.orig_type.has_flag(.option) {
@@ -8121,6 +8135,24 @@ fn (mut g Gen) ident(node ast.Ident) {
 					&& !g.inside_selector_lhs
 					&& raw_smartcast_target_kind !in [.struct, .aggregate, .array, .array_fixed, .map, .interface, .sum_type, .function]
 				if !prevent_sum_type_unwrapping_once {
+					// Special-case: sumtype variant is an Option type and we are
+					// past `if x != none` — emit the simple correct expression
+					// `*(INNER*)(name.__option_VARIANT->data)`. The general loop
+					// below produces malformed C for this case.
+					if obj_sym.kind == .sum_type && is_option && resolved_var.is_unwrapped
+						&& !is_auto_heap && !resolved_var.orig_type.has_flag(.option) {
+						variant_typ := if resolved_var.ct_type_var == .smartcast {
+							g.unwrap_generic(g.type_resolver.get_type(node)).set_flag(.option)
+						} else {
+							smartcast_types[0]
+						}
+						variant_sym := g.table.sym(variant_typ)
+						variant_field := g.get_sumtype_variant_name(variant_typ, variant_sym)
+						inner_typ := variant_typ.clear_flag(.option)
+						inner_styp := g.styp(g.unwrap_generic(inner_typ))
+						g.write('*(${inner_styp}*)(${name}._${variant_field}->data)')
+						return
+					}
 					nested_unwrap := smartcast_types.len > 1
 					unwrap_sumtype := is_option && nested_unwrap && obj_sym.kind == .sum_type
 					if unwrap_sumtype {
@@ -8135,8 +8167,20 @@ fn (mut g Gen) ident(node ast.Ident) {
 						g.write('(')
 						if i == 0 && resolved_var.is_unwrapped
 							&& resolved_var.ct_type_var == .smartcast {
-							ctyp := g.unwrap_generic(g.type_resolver.get_type(node))
-							g.write('*(${g.base_type(ctyp)}*)(')
+							ctyp := if is_option && resolved_var.is_unwrapped {
+								resolved_var.typ
+							} else if is_option && typ.has_flag(.option) {
+								typ
+							} else {
+								g.unwrap_generic(g.type_resolver.get_type(node))
+							}
+							ctyp_styp := if ctyp.has_flag(.option) {
+								opt_styp, _ := g.option_type_name(ctyp)
+								opt_styp
+							} else {
+								g.styp(ctyp)
+							}
+							g.write('*(${ctyp_styp}*)(')
 						}
 						if obj_sym.kind == .sum_type && !is_auto_heap {
 							if is_option {
@@ -8144,7 +8188,19 @@ fn (mut g Gen) ident(node ast.Ident) {
 									if !is_option_unwrap {
 										g.write('*(')
 									}
-									styp := g.base_type(resolved_var.typ)
+									cast_typ := if is_option
+										&& resolved_var.ct_type_var == .smartcast
+										&& resolved_var.is_unwrapped && !typ.has_flag(.option) {
+										resolved_var.typ
+									} else {
+										typ
+									}
+									styp := if cast_typ.has_flag(.option) {
+										opt_styp, _ := g.option_type_name(cast_typ)
+										opt_styp
+									} else {
+										g.styp(cast_typ)
+									}
 									g.write('*(${styp}*)')
 								}
 							} else if !g.arg_no_auto_deref && !sumtype_fn_value_smartcast {
@@ -8165,7 +8221,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 					}
 					for i, typ in smartcast_types {
 						is_option_unwrap := is_option && typ == resolved_var.typ.clear_flag(.option)
-						cast_sym := g.table.sym(g.unwrap_generic(typ))
+						cast_sym := *g.table.sym(g.unwrap_generic(typ))
 						final_cast_sym := g.table.final_sym(g.unwrap_generic(typ))
 						sumtype_fn_value_smartcast := obj_sym.kind == .sum_type && !is_auto_heap
 							&& final_cast_sym.info is ast.FnType && !is_option_unwrap
@@ -8201,8 +8257,9 @@ fn (mut g Gen) ident(node ast.Ident) {
 								}
 							}
 							dot := if is_ptr || is_auto_heap { '->' } else { '.' }
-							if cast_sym.info is ast.Aggregate {
-								sym := g.table.sym(cast_sym.info.types[g.aggregate_type_idx])
+							variant_typ := cast_sym.aggregate_variant_type(g.aggregate_type_idx)
+							if variant_typ != 0 {
+								sym := g.table.sym(variant_typ)
 								g.write('${dot}_${sym.cname}')
 							} else {
 								if is_option && !resolved_var.is_unwrapped {
@@ -8678,7 +8735,15 @@ fn include_path_for_generated_c(node ast.HashStmt) string {
 	return node.main
 }
 
+fn is_manual_stdarg_include(raw_target string) bool {
+	target := raw_target.trim_space()
+	return target in ['<stdarg.h>', '"stdarg.h"']
+}
+
 fn (mut g Gen) hash_stmt_guarded_include(node ast.HashStmt) string {
+	if is_manual_stdarg_include(node.main) {
+		return '// stdarg declarations are provided by c_headers'
+	}
 	mut missing_message := 'Header file ${node.main}, needed for module `${node.mod}` was not found.'
 	missing_message += ' ${missing_shader_header_message(node)}'
 	mut guarded_include := get_guarded_include_text(include_path_for_generated_c(node),
@@ -8998,6 +9063,18 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 		inferred_type := g.type_resolver.get_type_or_default(expr0, ast.void_type)
 		if inferred_type != ast.void_type && inferred_type != 0 {
 			type0 = g.unwrap_generic(g.recheck_concrete_type(inferred_type))
+		} else {
+			match expr0 {
+				ast.CallExpr {
+					if expr0.name == 'error' {
+						type0 = ast.error_type
+					}
+				}
+				ast.None {
+					type0 = ast.none_type
+				}
+				else {}
+			}
 		}
 	}
 	// When the expression uses `?` or `!` propagation, the evaluated type is
@@ -9015,11 +9092,18 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 			type0 = type0.clear_flag(.result)
 		}
 	}
+	if exprs_len > 0 && expr0 is ast.Ident && expr0.obj is ast.Var && expr0.obj.typ != 0 {
+		resolved_obj_type := g.unwrap_generic(g.recheck_concrete_type(expr0.obj.typ))
+		if resolved_obj_type != 0 && !resolved_obj_type.has_option_or_result()
+			&& type0.has_option_or_result() && type0.clear_option_and_result() == resolved_obj_type {
+			type0 = resolved_obj_type
+		}
+	}
 
 	if exprs_len > 0 {
-		// `$vweb.html()` / `$veb.html()` expand to statements, so the Result return
+		// `$veb.html()` expands to statements, so the Result return
 		// needs to be emitted explicitly here.
-		if expr0 is ast.ComptimeCall && expr0.is_vweb {
+		if expr0 is ast.ComptimeCall && expr0.is_template {
 			g.inside_return_tmpl = true
 			g.expr(expr0)
 			g.inside_return_tmpl = false
@@ -10217,10 +10301,26 @@ fn (mut g Gen) gen_or_block_stmts(cvar_name string, cast_typ string, stmts []ast
 		if i == stmts.len - 1 {
 			expr_stmt := stmt as ast.ExprStmt
 			g.set_current_pos_as_last_stmt_pos()
-			is_custom_error := g.is_error_type(expr_stmt.typ)
-			if g.inside_return && (expr_stmt.typ.idx() == ast.error_type_idx
-				|| expr_stmt.typ in [ast.none_type, ast.error_type]
-				|| is_custom_error) {
+			mut expr_typ := expr_stmt.typ
+			if expr_typ == ast.void_type || expr_typ == 0 {
+				expr_typ = g.type_resolver.get_type_or_default(expr_stmt.expr,
+					return_type.clear_option_and_result())
+				if expr_typ == ast.void_type || expr_typ == 0 {
+					match expr_stmt.expr {
+						ast.CallExpr {
+							if expr_stmt.expr.return_type != 0 {
+								expr_typ = expr_stmt.expr.return_type
+							} else if func := g.table.find_fn(expr_stmt.expr.name) {
+								expr_typ = func.return_type
+							}
+						}
+						else {}
+					}
+				}
+			}
+			is_custom_error := g.is_error_type(expr_typ)
+			if g.inside_return && (expr_typ.idx() == ast.error_type_idx
+				|| expr_typ in [ast.none_type, ast.error_type] || is_custom_error) {
 				// `return foo() or { error('failed') }` or `return foo() or { CustomError{} }`
 				if g.cur_fn != unsafe { nil } {
 					g.write_defer_stmts(scope, true, pos)
@@ -10232,7 +10332,7 @@ fn (mut g Gen) gen_or_block_stmts(cvar_name string, cast_typ string, stmts []ast
 							expr:      expr_stmt.expr
 							typname:   'IError'
 							typ:       ast.error_type
-							expr_type: expr_stmt.typ
+							expr_type: expr_typ
 							pos:       pos
 						}
 					}
@@ -10247,7 +10347,7 @@ fn (mut g Gen) gen_or_block_stmts(cvar_name string, cast_typ string, stmts []ast
 					}
 				}
 			} else {
-				if expr_stmt.typ == ast.none_type_idx {
+				if expr_typ == ast.none_type_idx {
 					g.write('${cvar_name} = ')
 					g.gen_option_error(return_type, expr_stmt.expr)
 					g.writeln(';')
@@ -10282,15 +10382,14 @@ fn (mut g Gen) gen_or_block_stmts(cvar_name string, cast_typ string, stmts []ast
 									// unwrap the option/result, so assign the
 									// unwrapped value to the or-block's data slot.
 									g.write('*(${cast_typ}*) ${cvar_name}${tmp_op}data = ')
-								}
-							} else if expr_stmt.expr is ast.CallExpr {
-								call_expr := expr_stmt.expr as ast.CallExpr
-								if call_expr.is_return_used {
+								} else {
 									g.write('*(${cast_typ}*) ${cvar_name}${tmp_op}data = ')
 								}
+							} else if return_type.clear_option_and_result() != ast.void_type {
+								g.write('*(${cast_typ}*) ${cvar_name}${tmp_op}data = ')
 							} else if g.inside_opt_or_res && return_is_option && g.inside_assign {
 								g.write('builtin___option_ok(&(${cast_typ}[]) { ')
-								g.expr_with_cast(expr_stmt.expr, expr_stmt.typ,
+								g.expr_with_cast(expr_stmt.expr, expr_typ,
 									return_type.clear_option_and_result())
 								g.writeln(' }, (${option_name}*)&${cvar_name}, sizeof(${cast_typ}));')
 								g.indent--
@@ -10322,16 +10421,16 @@ fn (mut g Gen) gen_or_block_stmts(cvar_name string, cast_typ string, stmts []ast
 					// return expr or { fn_returns_option() }
 					if is_option && g.inside_return && expr_stmt.expr is ast.CallExpr
 						&& return_is_option {
-						g.expr_with_cast(ast.Expr(expr_stmt.expr), expr_stmt.typ, return_type)
+						g.expr_with_cast(ast.Expr(expr_stmt.expr), expr_typ, return_type)
 					} else if direct_option_value {
 						old_inside_opt_data := g.inside_opt_data
 						g.inside_opt_data = true
-						g.expr_with_opt(expr_stmt.expr, expr_stmt.typ, return_type)
+						g.expr_with_opt(expr_stmt.expr, expr_typ, return_type)
 						g.inside_opt_data = old_inside_opt_data
 					} else {
 						old_inside_opt_data := g.inside_opt_data
 						g.inside_opt_data = true
-						g.expr_with_cast(expr_stmt.expr, expr_stmt.typ,
+						g.expr_with_cast(expr_stmt.expr, expr_typ,
 							return_type.clear_option_and_result())
 						g.inside_opt_data = old_inside_opt_data
 					}
@@ -10386,7 +10485,29 @@ fn (mut g Gen) or_block_on_value(var_name string, or_block ast.OrExpr, return_ty
 		g.inside_or_block = false
 	}
 	stmts := or_block.stmts
-	if stmts.len > 0 && stmts.last() is ast.ExprStmt && stmts.last().typ != ast.void_type {
+	mut last_expr_produces_value := false
+	if stmts.len > 0 && stmts.last() is ast.ExprStmt {
+		last_expr_stmt := stmts.last() as ast.ExprStmt
+		mut last_expr_typ := if last_expr_stmt.typ != ast.void_type {
+			last_expr_stmt.typ
+		} else {
+			g.type_resolver.get_type_or_default(last_expr_stmt.expr, ast.void_type)
+		}
+		if last_expr_typ == ast.void_type || last_expr_typ == 0 {
+			match last_expr_stmt.expr {
+				ast.CallExpr {
+					if last_expr_stmt.expr.return_type != 0 {
+						last_expr_typ = last_expr_stmt.expr.return_type
+					} else if func := g.table.find_fn(last_expr_stmt.expr.name) {
+						last_expr_typ = func.return_type
+					}
+				}
+				else {}
+			}
+		}
+		last_expr_produces_value = last_expr_typ != ast.void_type
+	}
+	if last_expr_produces_value {
 		g.gen_or_block_stmts(cvar_name, g.base_type(return_type), stmts, return_type, false,
 			or_block.scope, or_block.pos)
 	} else {
@@ -10461,7 +10582,29 @@ fn (mut g Gen) or_block(var_name string, or_block ast.OrExpr, return_type ast.Ty
 			g.inside_or_block = false
 		}
 		stmts := or_block.stmts
-		if stmts.len > 0 && stmts.last() is ast.ExprStmt && stmts.last().typ != ast.void_type {
+		mut last_expr_produces_value := false
+		if stmts.len > 0 && stmts.last() is ast.ExprStmt {
+			last_expr_stmt := stmts.last() as ast.ExprStmt
+			mut last_expr_typ := if last_expr_stmt.typ != ast.void_type {
+				last_expr_stmt.typ
+			} else {
+				g.type_resolver.get_type_or_default(last_expr_stmt.expr, ast.void_type)
+			}
+			if last_expr_typ == ast.void_type || last_expr_typ == 0 {
+				match last_expr_stmt.expr {
+					ast.CallExpr {
+						if last_expr_stmt.expr.return_type != 0 {
+							last_expr_typ = last_expr_stmt.expr.return_type
+						} else if func := g.table.find_fn(last_expr_stmt.expr.name) {
+							last_expr_typ = func.return_type
+						}
+					}
+					else {}
+				}
+			}
+			last_expr_produces_value = last_expr_typ != ast.void_type
+		}
+		if last_expr_produces_value {
 			g.gen_or_block_stmts(cvar_name, mr_styp, stmts, return_type, true, or_block.scope,
 				or_block.pos)
 		} else {
@@ -11382,18 +11525,22 @@ return ${cast_struct_str};
 					cast_fn_name = g.generic_fn_name(inter_info.concrete_types, cast_fn_name)
 				}
 				mut clone_expr := '${cast_fn_name}((${cctype}*)builtin__memdup(x, sizeof(${cctype})))'
-				match st_sym.kind {
-					.array {
-						depth := g.get_array_depth((st_sym.info as ast.Array).elem_type)
-						clone_expr = '${cast_fn_name}(HEAP(${cctype}, builtin__array_clone_static_to_depth(*(${cctype}*)x, ${depth})))'
+				if is_fn_variant {
+					clone_expr = '${cast_fn_name}((${g.fn_ptr_cast_typ(st_sym_info.info as ast.FnType)})x)'
+				} else {
+					match st_sym.kind {
+						.array {
+							depth := g.get_array_depth((st_sym.info as ast.Array).elem_type)
+							clone_expr = '${cast_fn_name}(HEAP(${cctype}, builtin__array_clone_static_to_depth(*(${cctype}*)x, ${depth})))'
+						}
+						.map {
+							clone_expr = '${cast_fn_name}(HEAP(${cctype}, builtin__map_clone((${cctype}*)x)))'
+						}
+						.string {
+							clone_expr = '${cast_fn_name}(HEAP(${cctype}, builtin__string_clone(*(${cctype}*)x)))'
+						}
+						else {}
 					}
-					.map {
-						clone_expr = '${cast_fn_name}(HEAP(${cctype}, builtin__map_clone((${cctype}*)x)))'
-					}
-					.string {
-						clone_expr = '${cast_fn_name}(HEAP(${cctype}, builtin__string_clone(*(${cctype}*)x)))'
-					}
-					else {}
 				}
 
 				clone_functions.writeln('
@@ -11521,6 +11668,7 @@ return ${cast_shared_struct_str};
 				name = g.specialized_method_name_from_receiver(method, st, name)
 				styp := g.cc_type(method.params[0].typ, true)
 				mut method_call := '${styp}_${name}'
+				mut adapter_receiver_typ := g.styp(method.params[0].typ)
 				_, embed_types := g.table.find_method_from_embeds(st_sym, method.name) or {
 					ast.Fn{}, []ast.Type{}
 				}
@@ -11597,10 +11745,43 @@ return ${cast_shared_struct_str};
 					methods_wrapper.writeln('}')
 					// .speak = Cat_speak_Interface_Animal_method_wrapper
 					method_call = wrapper_method_name
+					adapter_receiver_typ = '${cctype}*'
 				}
 				if g.pref.build_mode != .build_module && st != ast.voidptr_type
 					&& st != ast.nil_type {
-					methods_struct.writeln('\t\t._method_${c_fn_name(method.name)} = (void*) ${method_call},')
+					if cctype == cctype2 {
+						mut adapter_name := '${cctype}_${name}_Interface_${interface_name}_method_adapter'
+						method_sym := g.table.sym(method.params[0].typ)
+						if method_sym.is_builtin() {
+							adapter_name = 'builtin__${adapter_name}'
+						}
+						mut adapter_args := []string{cap: method.params.len - 1}
+						mut adapter_params := ['void* _x']
+						for i in 1 .. method.params.len {
+							arg := method.params[i]
+							arg_name := if arg.name.len > 0 && arg.name != '_' {
+								c_name(arg.name)
+							} else {
+								'arg${i}'
+							}
+							adapter_params << '${g.styp(arg.typ)} ${arg_name}'
+							adapter_args << arg_name
+						}
+						methods_wrapper.writeln('static inline ${g.ret_styp(method.return_type)} ${adapter_name}(${adapter_params.join(', ')}) {')
+						methods_wrapper.write_string('\t')
+						if method.return_type != ast.void_type {
+							methods_wrapper.write_string('return ')
+						}
+						methods_wrapper.write_string('${method_call}((${adapter_receiver_typ})_x')
+						if adapter_args.len > 0 {
+							methods_wrapper.write_string(', ${adapter_args.join(', ')}')
+						}
+						methods_wrapper.writeln(');')
+						methods_wrapper.writeln('}')
+						methods_struct.writeln('\t\t._method_${c_fn_name(method.name)} = ${adapter_name},')
+					} else {
+						methods_struct.writeln('\t\t._method_${c_fn_name(method.name)} = (void*) ${method_call},')
+					}
 				}
 			}
 			// For interface methods not found in the type's explicit methods,
@@ -11621,7 +11802,15 @@ return ${cast_shared_struct_str};
 						methods_wrapper.writeln('static inline string ${wrapper_name}(${cctype}* x) {')
 						methods_wrapper.writeln('\treturn ${str_fn_name}(*x);')
 						methods_wrapper.writeln('}')
-						methods_struct.writeln('\t\t._method_str = (void*) ${wrapper_name},')
+						if cctype == cctype2 {
+							adapter_name := '${cctype}_str_Interface_${interface_name}_method_adapter'
+							methods_wrapper.writeln('static inline string ${adapter_name}(void* _x) {')
+							methods_wrapper.writeln('\treturn ${wrapper_name}((${cctype}*)_x);')
+							methods_wrapper.writeln('}')
+							methods_struct.writeln('\t\t._method_str = ${adapter_name},')
+						} else {
+							methods_struct.writeln('\t\t._method_str = (void*) ${wrapper_name},')
+						}
 					}
 				}
 			}

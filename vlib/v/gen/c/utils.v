@@ -120,6 +120,14 @@ fn (mut g Gen) infer_branch_expr_type(stmts []ast.Stmt) ast.Type {
 }
 
 fn (mut g Gen) infer_if_expr_type(node ast.IfExpr) ast.Type {
+	if g.inside_return && g.inside_struct_init {
+		for branch in node.branches {
+			branch_typ := g.infer_branch_expr_type(branch.stmts)
+			if branch_typ != 0 && branch_typ != ast.void_type {
+				return branch_typ
+			}
+		}
+	}
 	if node.typ != 0 && node.typ != ast.void_type {
 		resolved := g.unwrap_generic(g.recheck_concrete_type(node.typ))
 		// In generic functions, node.typ may have been mutated by the checker
@@ -128,8 +136,8 @@ fn (mut g Gen) infer_if_expr_type(node ast.IfExpr) ast.Type {
 		// return type instead, which correctly resolves via cur_concrete_types.
 		// Only apply this override when the function's return type is actually
 		// generic — otherwise the if-expression type is concrete and correct.
-		if g.inside_return && g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0
-			&& g.cur_fn.return_type.has_flag(.generic) {
+		if g.inside_return && !g.inside_struct_init && g.cur_fn != unsafe { nil }
+			&& g.cur_concrete_types.len > 0 && g.cur_fn.return_type.has_flag(.generic) {
 			fn_ret := g.unwrap_generic(g.recheck_concrete_type(g.cur_fn.return_type))
 			if fn_ret != 0 && fn_ret != ast.void_type {
 				if node.typ.has_flag(.result) && !fn_ret.has_flag(.result) {
@@ -152,6 +160,14 @@ fn (mut g Gen) infer_if_expr_type(node ast.IfExpr) ast.Type {
 }
 
 fn (mut g Gen) infer_match_expr_type(node ast.MatchExpr) ast.Type {
+	if g.inside_return && g.inside_struct_init {
+		for branch in node.branches {
+			branch_typ := g.infer_branch_expr_type(branch.stmts)
+			if branch_typ != 0 && branch_typ != ast.void_type {
+				return branch_typ
+			}
+		}
+	}
 	if node.return_type != 0 && node.return_type != ast.void_type {
 		resolved := g.unwrap_generic(g.recheck_concrete_type(node.return_type))
 		// In generic functions, node.return_type may have been mutated by the checker
@@ -160,8 +176,8 @@ fn (mut g Gen) infer_match_expr_type(node ast.MatchExpr) ast.Type {
 		// instead, which correctly resolves via cur_concrete_types.
 		// Only apply this override when the function's return type is actually
 		// generic — otherwise the match expression type is concrete and correct.
-		if g.inside_return && g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0
-			&& g.cur_fn.return_type.has_flag(.generic) {
+		if g.inside_return && !g.inside_struct_init && g.cur_fn != unsafe { nil }
+			&& g.cur_concrete_types.len > 0 && g.cur_fn.return_type.has_flag(.generic) {
 			fn_ret := g.unwrap_generic(g.recheck_concrete_type(g.cur_fn.return_type))
 			if fn_ret != 0 && fn_ret != ast.void_type {
 				// Preserve option/result flags from the match's return_type
@@ -521,6 +537,21 @@ fn (mut g Gen) resolved_ident_is_auto_heap(expr ast.Ident) bool {
 	return false
 }
 
+// scope_ident_is_auto_heap reports whether `expr`'s scope variable has
+// is_auto_heap set. Unlike `resolved_ident_is_auto_heap`, this ignores
+// `expr.obj.is_auto_heap` because a use-site Ident's obj copy may have been
+// toggled by `mark_as_referenced` even when the declaration was emitted as
+// a value (e.g. vars declared inside nested scopes where fn_scope.find_var
+// misses them).
+fn (mut g Gen) scope_ident_is_auto_heap(expr ast.Ident) bool {
+	if expr.scope != unsafe { nil } {
+		if v := expr.scope.find_var(expr.name) {
+			return v.is_auto_heap
+		}
+	}
+	return false
+}
+
 fn (mut g Gen) resolved_ident_array_elem_type(expr ast.Ident) ast.Type {
 	scope_type := g.resolved_scope_var_type(expr)
 	if scope_type != 0 {
@@ -835,6 +866,16 @@ fn (mut g Gen) resolved_expr_type(expr ast.Expr, default_typ ast.Type) ast.Type 
 						mut resolved := g.resolved_expr_type(expr.obj.expr, expr.obj.typ)
 						if resolved != 0 {
 							resolved = g.unwrap_generic(g.recheck_concrete_type(resolved))
+							if expr.obj.typ != 0 {
+								resolved_obj_type :=
+									g.unwrap_generic(g.recheck_concrete_type(expr.obj.typ))
+								if resolved_obj_type != 0
+									&& !g.type_has_unresolved_generic_parts(resolved_obj_type)
+									&& resolved.has_option_or_result()
+									&& resolved.clear_option_and_result() == resolved_obj_type {
+									return resolved_obj_type
+								}
+							}
 							if g.type_has_unresolved_generic_parts(resolved) {
 								call_like_type := g.resolved_call_like_expr_type(expr.obj.expr)
 								if call_like_type != 0 && !call_like_type.has_flag(.generic)

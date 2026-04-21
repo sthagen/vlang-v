@@ -1,7 +1,7 @@
 # dtm - Dynamic Template Manager
 
 A simple template manager integrated into the V project, designed to combine the power of V
-templates with Vweb, without the need to recompile the application with every change.
+templates with Veb, without the need to recompile the application with every change.
 
 ## Quick Start
 
@@ -59,7 +59,7 @@ Value in the text: @non_string_type
 HTML tags are always escaped in text file: @html_section
 ```
 
-### 2. Minimal Vweb example:
+### 2. Minimal Veb example:
 
 ```v
 import veb
@@ -123,7 +123,7 @@ pub fn (mut app App) index(mut ctx Context) veb.Result {
 ```
 
 You have a ready-to-view demonstration available
-[here](https://github.com/vlang/v/tree/master/vlib/vweb/tests/dynamic_template_manager_test_server).
+[here](https://github.com/vlang/v/tree/master/vlib/veb/tests/dynamic_template_manager_test_server).
 
 ## Available Options
 

@@ -13,6 +13,18 @@ const break_points = [0, 35, 60, 85, 93, 100]! // when to break a line depending
 const max_len = break_points[break_points.len - 1]
 const bs = '\\'
 
+fn call_arg_spread_str(arg ast.CallArg) string {
+	return match arg.expr {
+		ast.ArrayDecompose {
+			decompose := arg.expr as ast.ArrayDecompose
+			'...${decompose.expr.str()}'
+		}
+		else {
+			arg.str()
+		}
+	}
+}
+
 @[minify]
 pub struct Fmt {
 pub:
@@ -113,9 +125,6 @@ pub fn (f &Fmt) type_to_str_using_aliases(typ ast.Type, import_aliases map[strin
 	mut s := f.type_to_str_using_aliases(typ, import_aliases)
 	if s.contains('Result') {
 		println('${s}')
-	}
-	if s.starts_with('x.vweb') {
-		s = s.replace_once('x.vweb.', 'veb.')
 	}
 	return s
 }
@@ -2316,22 +2325,14 @@ pub fn (mut f Fmt) chan_init(mut node ast.ChanInit) {
 }
 
 pub fn (mut f Fmt) comptime_call(node ast.ComptimeCall) {
-	if node.is_vweb {
+	if node.is_template {
 		if node.kind == .html {
 			if node.args.len == 1 && node.args[0].expr is ast.StringLiteral {
-				if node.is_veb {
-					f.write('\$veb.html(')
-				} else {
-					f.write('\$vweb.html(')
-				}
+				f.write('\$veb.html(')
 				f.expr(node.args[0].expr)
 				f.write(')')
 			} else {
-				if node.is_veb {
-					f.write('\$veb.html()')
-				} else {
-					f.write('\$vweb.html()')
-				}
+				f.write('\$veb.html()')
 			}
 		} else {
 			f.write('\$tmpl(')
@@ -2383,11 +2384,7 @@ pub fn (mut f Fmt) comptime_call(node ast.ComptimeCall) {
 				inner_args := if node.args_var != '' {
 					node.args_var
 				} else {
-					node.args.map(if it.expr is ast.ArrayDecompose {
-						'...${it.expr.expr.str()}'
-					} else {
-						it.str()
-					}).join(', ')
+					node.args.map(call_arg_spread_str).join(', ')
 				}
 				method_expr := if node.has_parens {
 					'(${node.method_name}(${inner_args}))'

@@ -12,6 +12,77 @@ import v.util
 // has[int, string]() => has_T_int_string()
 const c_fn_name_escape_seq = ['[', '_T_', ', ', '_', ']', '']
 
+// c_manual_prelude_decl_names matches the C stdlib declarations emitted by `c_headers`.
+// When one of these symbols is declared in V as `fn C.name(...)`, cgen must not emit an
+// extra fallback prototype, or it can conflict with the prelude declaration.
+const c_manual_prelude_decl_names = [
+	'vfprintf',
+	'vsnprintf',
+	'fprintf',
+	'printf',
+	'snprintf',
+	'sprintf',
+	'sscanf',
+	'scanf',
+	'puts',
+	'perror',
+	'fputs',
+	'getchar',
+	'putchar',
+	'getc',
+	'fgetc',
+	'ungetc',
+	'fflush',
+	'feof',
+	'ferror',
+	'clearerr',
+	'setvbuf',
+	'ftell',
+	'rewind',
+	'fopen',
+	'fdopen',
+	'freopen',
+	'fileno',
+	'fread',
+	'fwrite',
+	'fgets',
+	'fclose',
+	'popen',
+	'pclose',
+	'malloc',
+	'calloc',
+	'realloc',
+	'aligned_alloc',
+	'free',
+	'rand',
+	'srand',
+	'atexit',
+	'exit',
+	'atoi',
+	'atof',
+	'getenv',
+	'setenv',
+	'unsetenv',
+	'system',
+	'remove',
+	'rename',
+	'realpath',
+	'mkstemp',
+	'qsort',
+	'strcmp',
+	'strlen',
+	'strerror',
+	'memcpy',
+	'memmove',
+	'memset',
+	'memcmp',
+	'memchr',
+	'strchr',
+	'strrchr',
+	'fseek',
+	'getline',
+]
+
 fn collect_function_defer_stmts(node &ast.FnDecl) []ast.DeferStmt {
 	mut defer_stmts := []ast.DeferStmt{}
 	mut seen_idxs := []int{}
@@ -163,6 +234,10 @@ fn free_method_matches_receiver_expr(expr ast.Expr, receiver_name string) bool {
 		ast.ParExpr { free_method_matches_receiver_expr(expr.expr, receiver_name) }
 		else { false }
 	}
+}
+
+fn (g &Gen) prefers_msvc_compatible_code() bool {
+	return g.is_cc_msvc || g.pref.os == .windows
 }
 
 fn (mut g Gen) node_decl_fkey(node ast.FnDecl) string {
@@ -653,6 +728,32 @@ fn (mut g Gen) is_used_by_main(node ast.FnDecl) bool {
 		$if trace_skip_unused_fns ? {
 			println('> is_used_by_main: ${is_used_by_main} | node.name: ${node.name} | fkey: ${fkey} | node.is_method: ${node.is_method}')
 		}
+		if !is_used_by_main && node.is_method {
+			receiver_type := g.table.final_type(node.receiver.typ.set_nr_muls(0))
+			for isym in g.table.type_symbols {
+				if isym.kind != .interface || isym.info !is ast.Interface {
+					continue
+				}
+				if isym.idx !in g.table.used_features.used_syms {
+					continue
+				}
+				inter_info := isym.info as ast.Interface
+				impl_types := inter_info.implementor_types(true)
+				if receiver_type !in impl_types {
+					continue
+				}
+				mut interface_requires_method := false
+				if interface_method := isym.find_method(node.name) {
+					interface_requires_method = interface_method.no_body
+				} else if interface_method := isym.find_method_with_generic_parent(node.name) {
+					interface_requires_method = interface_method.no_body
+				}
+				if interface_requires_method {
+					is_used_by_main = true
+					break
+				}
+			}
+		}
 		if !is_used_by_main {
 			$if trace_skip_unused_fns_in_c_code ? {
 				g.writeln('// trace_skip_unused_fns_in_c_code, ${node.name}, fkey: ${fkey}')
@@ -706,9 +807,14 @@ fn (g &Gen) module_has_c_header_module(file &ast.File) bool {
 	return false
 }
 
+fn (g &Gen) c_prelude_provides_decl(c_sym_name string) bool {
+	return !g.pref.no_preludes && !g.pref.is_bare && c_sym_name in c_manual_prelude_decl_names
+}
+
 fn (g &Gen) should_emit_c_fallback_decl(node ast.FnDecl) bool {
+	c_sym_name := node.name.all_after_first('C__').all_after_first('C.')
 	if node.language != .c || node.is_c_extern || file_has_c_includes(node.source_file)
-		|| g.module_has_c_header_module(node.source_file) {
+		|| g.module_has_c_header_module(node.source_file) || g.c_prelude_provides_decl(c_sym_name) {
 		return false
 	}
 	if node.source_file == unsafe { nil } {
@@ -857,6 +963,10 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 	// as it's only informative, comment it for now
 	// g.gen_attrs(it.attrs)
 	if node.language == .c && !g.inside_c_extern {
+		return
+	}
+	c_sym_name := node.name.all_after_first('C__').all_after_first('C.')
+	if node.language == .c && c_sym_name in ['va_start', 'va_arg', 'va_end', 'va_copy'] {
 		return
 	}
 	old_is_vlines_enabled := g.is_vlines_enabled

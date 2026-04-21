@@ -56,7 +56,6 @@ pub enum Subsystem {
 
 pub enum Backend {
 	c               // The (default) C backend
-	golang          // Go backend
 	interpret       // Interpret the ast
 	js_node         // The JavaScript NodeJS backend
 	js_browser      // The JavaScript browser backend
@@ -122,7 +121,7 @@ pub mut:
 	is_fmt             bool
 	is_vdoc            bool
 	is_vet             bool
-	is_vweb            bool // skip _ var warning in templates
+	is_template        bool // skip _ var warning in templates
 	is_ios_simulator   bool
 	is_apk             bool     // build as Android .apk format
 	is_help            bool     // -h, -help or --help was passed
@@ -756,6 +755,7 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 			}
 			'-no-retry-compilation' {
 				res.retry_compilation = false
+				res.build_options << arg
 			}
 			'-musl' {
 				res.is_musl = true
@@ -1087,7 +1087,7 @@ pub fn parse_args_and_show_errors(known_external_commands []string, args []strin
 					continue
 				}
 				b := backend_from_string(sbackend) or {
-					eprintln_exit('Unknown V backend: ${sbackend}\nValid -backend choices are: c, go, interpret, js, js_node, js_browser, js_freestanding, wasm')
+					eprintln_exit('Unknown V backend: ${sbackend}\nValid -backend choices are: c, interpret, js, js_node, js_browser, js_freestanding, wasm')
 				}
 				if b == .wasm {
 					res.compile_defines << 'wasm'
@@ -1409,7 +1409,7 @@ pub fn backend_from_string(s string) !Backend {
 		'js_freestanding' { .js_freestanding }
 		'wasm' { .wasm }
 		'native' { eprintln_exit('The native backend has been removed. Use `v -v2 -b arm64` or `v -v2 -b x64` instead.') }
-		'go' { .golang }
+		'go', 'golang' { eprintln_exit('The Go backend has been removed. Use `v -v2 -b golang` instead.') }
 		else { error('Unknown backend type ${s}') }
 	}
 }

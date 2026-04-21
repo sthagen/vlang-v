@@ -43,7 +43,11 @@ fn (mut g Gen) comptime_call_expands_string_args(m &ast.Fn, node ast.ComptimeCal
 		return false
 	}
 	array_decompose := node.args.last().expr as ast.ArrayDecompose
-	if !g.is_string_array_type(array_decompose.expr_type) || m.params.len - 1 < node.args.len {
+	mut array_type := g.resolved_expr_type(array_decompose.expr, array_decompose.expr_type)
+	if array_type == ast.void_type {
+		array_type = array_decompose.expr_type
+	}
+	if !g.is_string_array_type(array_type) || m.params.len - 1 < node.args.len {
 		return false
 	}
 	return !g.is_string_array_type(m.params[node.args.len].typ)
@@ -167,7 +171,7 @@ fn (mut g Gen) comptime_call(mut node ast.ComptimeCall) {
 		g.write('${g.defer_return_tmp_var}')
 		return
 	}
-	if node.is_vweb {
+	if node.is_template {
 		is_html := node.kind == .html
 		mut cur_line := ''
 
@@ -175,45 +179,27 @@ fn (mut g Gen) comptime_call(mut node ast.ComptimeCall) {
 			cur_line = g.go_before_last_stmt()
 		}
 
-		ret_sym := g.table.sym(g.fn_decl.return_type)
 		fn_name := g.fn_decl.name.replace('.', '__').to_lower() + node.pos.pos.str()
-		is_x_vweb := ret_sym.cname == 'x__vweb__Result'
-		is_veb := ret_sym.cname == 'veb__Result'
 
 		for stmt in node.veb_tmpl.stmts {
 			if stmt is ast.FnDecl {
 				if stmt.name.starts_with('main.veb_tmpl') {
 					if is_html {
-						g.inside_vweb_tmpl = true
-						if is_veb {
-							g.vweb_filter_fn_name = 'veb__filter'
-						} else if is_x_vweb {
-							g.vweb_filter_fn_name = 'x__vweb__filter'
-						} else {
-							g.vweb_filter_fn_name = 'vweb__filter'
-						}
+						g.inside_veb_tmpl = true
+						g.veb_filter_fn_name = 'veb__filter'
 					}
-					// insert stmts from vweb_tmpl fn
+					// insert stmts from veb_tmpl fn
 					g.stmts(stmt.stmts.filter(it !is ast.Return))
 					//
-					g.inside_vweb_tmpl = false
-					g.vweb_filter_fn_name = ''
+					g.inside_veb_tmpl = false
+					g.veb_filter_fn_name = ''
 					break
 				}
 			}
 		}
 
 		if is_html {
-			// return a vweb or x.vweb html template
-			if is_veb {
-				g.writeln('veb__Context_html(${g.veb_context_html_arg()}, _tmpl_res_${fn_name});')
-			} else if is_x_vweb {
-				g.writeln('x__vweb__Context_html(${g.veb_context_html_arg()}, _tmpl_res_${fn_name});')
-			} else {
-				// old vweb:
-				app_name := g.fn_decl.params[0].name
-				g.writeln('vweb__Context_html(&${app_name}->Context, _tmpl_res_${fn_name});')
-			}
+			g.writeln('veb__Context_html(${g.veb_context_html_arg()}, _tmpl_res_${fn_name});')
 			g.writeln('strings__Builder_free(&sb_${fn_name});')
 			g.writeln('builtin__string_free(&_tmpl_res_${fn_name});')
 		} else {
@@ -306,7 +292,7 @@ fn (mut g Gen) comptime_call(mut node ast.ComptimeCall) {
 				&& node.args[i - 1].expr is ast.ArrayDecompose {
 				mut d_count := 0
 				for d_i in i .. m.params.len {
-					g.write('*(${g.styp(m.params[i].typ)}*)builtin__array_get(')
+					g.write('*(${g.styp(m.params[d_i].typ)}*)builtin__array_get(')
 					g.expr(ast.Expr(node.args[i - 1].expr))
 					g.write(', ${d_count})')
 
@@ -371,7 +357,7 @@ fn (mut g Gen) comptime_call(mut node ast.ComptimeCall) {
 		// p.error('`${p.expr_var.name}` needs to be a reference')
 		// }
 		amp := '' // if receiver.is_mut && !p.expr_var.ptr { '&' } else { '' }
-		if node.is_vweb {
+		if node.is_template {
 			if j > 0 {
 				g.write(' else ')
 			}
@@ -943,13 +929,13 @@ fn (mut g Gen) comptime_for(node ast.ComptimeFor) {
 		if methods.len > 0 {
 			g.writeln('FunctionData ${node.val_var} = {0};')
 		}
-		typ_vweb_result := g.table.find_type('vweb.Result')
+		typ_veb_result := g.table.find_type('veb.Result')
 		for method in methods {
 			g.defer_stmts = old_defer_stmts
 			g.push_new_comptime_info()
 			g.comptime.inside_comptime_for = true
-			// filter vweb route methods (non-generic method)
-			if method.receiver_type != 0 && method.return_type == typ_vweb_result {
+			// filter veb route methods (non-generic method)
+			if method.receiver_type != 0 && method.return_type == typ_veb_result {
 				rec_sym := g.table.sym(method.receiver_type)
 				if rec_sym.kind == .struct {
 					if _ := g.table.find_field_with_embeds(rec_sym, 'Context') {
@@ -1053,7 +1039,8 @@ fn (mut g Gen) comptime_for(node ast.ComptimeFor) {
 				g.comptime.inside_comptime_for = true
 				g.comptime.comptime_for_field_var = node.val_var
 				g.comptime.comptime_for_field_value = field
-				g.comptime.comptime_for_field_type = field.typ
+				resolved_field_typ := g.unwrap_generic(field.typ)
+				g.comptime.comptime_for_field_type = resolved_field_typ
 				g.writeln('/* field ${i} : ${field.name} */ {')
 				g.writeln('\t${node.val_var}.name = _S("${field.name}");')
 				if field.attrs.len == 0 {
@@ -1064,8 +1051,8 @@ fn (mut g Gen) comptime_for(node ast.ComptimeFor) {
 						'\t${node.val_var}.attrs = builtin__new_array_from_c_array(${attrs.len}, ${attrs.len}, sizeof(string), _MOV((string[${attrs.len}]){' +
 						attrs.join(', ') + '}));\n')
 				}
-				field_sym := g.table.sym(field.typ)
-				styp := field.typ
+				field_sym := g.table.sym(resolved_field_typ)
+				styp := resolved_field_typ
 				unaliased_styp := g.table.unaliased_type(styp)
 
 				g.writeln('\t${node.val_var}.typ = ${int(styp.idx())};\t// ${g.table.type_to_str(styp)}')
@@ -1074,9 +1061,9 @@ fn (mut g Gen) comptime_for(node ast.ComptimeFor) {
 				g.writeln('\t${node.val_var}.is_mut = ${field.is_mut};')
 				g.writeln('\t${node.val_var}.is_embed = ${field.is_embed};')
 
-				g.writeln('\t${node.val_var}.is_shared = ${field.typ.has_flag(.shared_f)};')
-				g.writeln('\t${node.val_var}.is_atomic = ${field.typ.has_flag(.atomic_f)};')
-				g.writeln('\t${node.val_var}.is_option = ${field.typ.has_flag(.option)};')
+				g.writeln('\t${node.val_var}.is_shared = ${resolved_field_typ.has_flag(.shared_f)};')
+				g.writeln('\t${node.val_var}.is_atomic = ${resolved_field_typ.has_flag(.atomic_f)};')
+				g.writeln('\t${node.val_var}.is_option = ${resolved_field_typ.has_flag(.option)};')
 
 				g.writeln('\t${node.val_var}.is_array = ${field_sym.kind in [.array, .array_fixed]};')
 				g.writeln('\t${node.val_var}.is_map = ${field_sym.kind == .map};')
@@ -1085,9 +1072,9 @@ fn (mut g Gen) comptime_for(node ast.ComptimeFor) {
 				g.writeln('\t${node.val_var}.is_alias = ${field_sym.kind == .alias};')
 				g.writeln('\t${node.val_var}.is_enum = ${field_sym.kind == .enum};')
 
-				g.writeln('\t${node.val_var}.indirections = ${field.typ.nr_muls()};')
+				g.writeln('\t${node.val_var}.indirections = ${resolved_field_typ.nr_muls()};')
 
-				g.type_resolver.update_ct_type('${node.val_var}.typ', field.typ)
+				g.type_resolver.update_ct_type('${node.val_var}.typ', resolved_field_typ)
 				g.type_resolver.update_ct_type('${node.val_var}.unaliased_typ', unaliased_styp)
 				g.stmts(node.stmts)
 				g.write_defer_stmts(node.scope, false, node.pos)
