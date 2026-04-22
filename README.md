@@ -75,7 +75,8 @@ language, very similar to the way it is right now.
 Usually, installing V is quite simple if you have an environment that already has a
 functional `git` installation.
 
-Note: On Windows, run `make.bat` instead of `make` in CMD, or `./make.bat` in PowerShell.
+Note: On Windows, run `makev.bat` instead of `make` in CMD, or `./makev.bat` in
+PowerShell.
 Note: On Ubuntu/Debian, you may need to run `sudo apt install git build-essential make` first.
 
 To get started, execute the following in your terminal/shell:
@@ -88,7 +89,7 @@ make
 That should be it, and you should find your V executable at `[path to V repo]/v`.
 `[path to V repo]` can be anywhere.
 
-(Like the note above says, on Windows, use `make.bat`, instead of `make`.)
+(Like the note above says, on Windows, use `makev.bat`, instead of `make`.)
 
 Now try running `./v run examples/hello_world.v` (or `v run examples/hello_world.v` in cmd shell).
 
@@ -426,6 +427,8 @@ Note the TCC website is old; the current TCC repository can be found
 [here](https://repo.or.cz/w/tinycc.git).
 V utilizes pre-built TCC binaries located at
 [https://github.com/vlang/tccbin/](https://github.com/vlang/tccbin/).
+On Linux, `make` retries the portable `thirdparty-linuxmusl-*` TCC bundle when
+the host-specific bundle does not run on the current system.
 To rebuild the bundled `thirdparty/tcc` in place from upstream TinyCC on the
 platforms that have an in-tree build script, run `make latest_tcc_source`.
 Pass `TCC_COMMIT=<hash-or-branch>` to pin a specific upstream revision.

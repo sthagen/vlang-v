@@ -152,6 +152,27 @@ fn test_cross_compile_defaults_windows_to_the_cross_compiler_arch() {
 	assert prefs.ccompiler == 'x86_64-w64-mingw32-gcc'
 }
 
+fn test_cross_compile_windows_m32_uses_i386_arch_and_compiler() {
+	if pref.get_host_os() == .windows {
+		return
+	}
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	prefs, _ := pref.parse_args_and_show_errors([], ['', '-os', 'windows', '-m32', target], false)
+	assert !prefs.m64
+	assert prefs.arch == .i386
+	assert prefs.ccompiler == 'i686-w64-mingw32-gcc'
+	assert prefs.build_options.contains('-m32')
+}
+
+fn test_cross_compile_defaults_linux_to_amd64() {
+	if pref.get_host_os() == .linux {
+		return
+	}
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	prefs, _ := pref.parse_args_and_show_errors([], ['', '-os', 'linux', target], false)
+	assert prefs.arch == .amd64
+}
+
 fn test_cross_compile_infers_android_arch_from_vcross_compiler_name() {
 	target := os.join_path(vroot, 'examples', 'hello_world.v')
 	old_cross_compiler := os.getenv('VCROSS_COMPILER_NAME')
@@ -183,6 +204,57 @@ fn test_musl_keeps_explicit_gc_selection() {
 	prefs, _ := pref.parse_args_and_show_errors([], ['', '-musl', '-gc', 'boehm', target], false)
 	assert prefs.is_musl
 	assert prefs.gc_mode == .boehm_full_opt
+}
+
+fn stale_windows_gc_prefs(gc_set_by_flag bool) pref.Preferences {
+	mut prefs := pref.Preferences{
+		os:                  .windows
+		ccompiler_type:      .msvc
+		gc_mode:             .boehm_full_opt
+		gc_set_by_flag:      gc_set_by_flag
+		compile_defines:     ['gcboehm', 'gcboehm_full', 'gcboehm_opt', 'custom']
+		compile_defines_all: ['gcboehm', 'gcboehm_full', 'gcboehm_opt', 'custom']
+		compile_values:      map[string]string{}
+		build_options:       ['-prod', '-d gcboehm', '-d gcboehm_full', '-d gcboehm_opt']
+	}
+	prefs.compile_values['gcboehm'] = 'true'
+	prefs.compile_values['gcboehm_full'] = 'true'
+	prefs.compile_values['gcboehm_opt'] = 'true'
+	prefs.compile_values['custom'] = 'true'
+	return prefs
+}
+
+fn test_windows_msvc_gc_defaults_are_cleared_after_compiler_resolution() {
+	mut prefs := stale_windows_gc_prefs(false)
+
+	prefs.normalize_gc_defaults_for_resolved_ccompiler()
+
+	assert prefs.gc_mode == .no_gc
+	assert prefs.build_options == ['-prod', '-gc', 'none']
+	assert prefs.compile_defines == ['custom']
+	assert prefs.compile_defines_all == ['custom']
+	assert prefs.compile_values == {
+		'custom': 'true'
+	}
+}
+
+fn test_windows_msvc_gc_defaults_keep_explicit_gc_selection() {
+	mut prefs := stale_windows_gc_prefs(true)
+	prefs.build_options = ['-prod', '-gc', 'boehm', '-d gcboehm', '-d gcboehm_full', '-d gcboehm_opt']
+
+	prefs.normalize_gc_defaults_for_resolved_ccompiler()
+
+	assert prefs.gc_mode == .boehm_full_opt
+	assert prefs.build_options == ['-prod', '-gc', 'boehm', '-d gcboehm', '-d gcboehm_full',
+		'-d gcboehm_opt']
+	assert prefs.compile_defines == ['gcboehm', 'gcboehm_full', 'gcboehm_opt', 'custom']
+	assert prefs.compile_defines_all == ['gcboehm', 'gcboehm_full', 'gcboehm_opt', 'custom']
+	assert prefs.compile_values == {
+		'custom':       'true'
+		'gcboehm':      'true'
+		'gcboehm_full': 'true'
+		'gcboehm_opt':  'true'
+	}
 }
 
 fn test_m32_sets_i386_arch_when_not_explicitly_set() {

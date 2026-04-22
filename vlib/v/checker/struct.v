@@ -6,6 +6,10 @@ import v.ast
 import v.util
 import v.token
 
+fn (c &Checker) can_be_embedded_in_struct(typ ast.Type) bool {
+	return c.table.final_sym(typ).kind in [.struct, .function]
+}
+
 fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 	util.timing_start(@METHOD)
 	defer {
@@ -43,15 +47,17 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 				}
 			}
 			embed_sym := c.table.sym(embed.typ)
+			embed_final_sym := c.table.final_sym(embed.typ)
 			if embed_sym.info is ast.Alias {
-				parent_sym := c.table.sym(embed_sym.info.parent_type)
-				if parent_sym.kind != .struct {
+				parent_sym := c.table.final_sym(embed_sym.info.parent_type)
+				if parent_sym.kind !in [.struct, .function] {
 					c.error('`${embed_sym.name}` (alias of `${parent_sym.name}`) is not a struct',
 						embed.pos)
 				}
-			} else if embed_sym.kind != .struct {
+			} else if embed_sym.kind !in [.struct, .function] {
 				c.error('`${embed_sym.name}` is not a struct', embed.pos)
-			} else if (embed_sym.info as ast.Struct).is_heap && !embed.typ.is_ptr() {
+			} else if embed_final_sym.kind == .struct
+				&& (embed_final_sym.info as ast.Struct).is_heap && !embed.typ.is_ptr() {
 				struct_sym.info.is_heap = true
 			}
 			embed_is_generic := embed.typ.has_flag(.generic)
@@ -136,7 +142,9 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 						val_desc := if field.default_expr_typ.is_ptr() { 'is' } else { 'is not' }
 						c.error('field ${err_desc} reference but default value ${val_desc} reference',
 							default_pos)
-					} else if field.default_expr is ast.StructInit {
+					} else if field.default_expr is ast.StructInit
+						|| (field.typ.is_ptr() && (field.default_expr is ast.Ident
+						|| field.default_expr is ast.SelectorExpr)) {
 						c.error('reference field must be initialized with reference', default_pos)
 					}
 				}
@@ -497,6 +505,31 @@ fn minify_sort_fn(a &ast.StructField, b &ast.StructField) int {
 	}
 }
 
+fn (mut c Checker) struct_init_selector_type_expr(expr ast.SelectorExpr) ast.Type {
+	if expr.expr is ast.TypeOf {
+		return c.type_resolver.typeof_field_type(c.type_resolver.typeof_type(expr.expr.expr,
+			expr.name_type), expr.field_name)
+	}
+	return ast.void_type
+}
+
+fn (mut c Checker) struct_init_type_expr(expr ast.Expr) ast.Type {
+	return match expr {
+		ast.TypeNode {
+			expr.typ
+		}
+		ast.ParExpr {
+			c.struct_init_type_expr(expr.expr)
+		}
+		ast.SelectorExpr {
+			c.struct_init_selector_type_expr(expr)
+		}
+		else {
+			ast.void_type
+		}
+	}
+}
+
 fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_init bool, mut inited_fields []string) ast.Type {
 	util.timing_start(@METHOD)
 	old_expected_type := c.expected_type
@@ -509,6 +542,15 @@ fn (mut c Checker) struct_init(mut node ast.StructInit, is_field_zero_struct_ini
 		&& c.expected_type != ast.void_type && c.expected_type.has_flag(.generic)
 		&& short_syntax_expected_type_sym.kind == .any
 		&& !short_syntax_expected_type_sym.is_builtin()
+	if node.typ == ast.void_type && !node.is_short_syntax && node.typ_expr !is ast.EmptyExpr {
+		c.expr(mut node.typ_expr)
+		node.typ = c.struct_init_type_expr(node.typ_expr)
+		if node.typ == ast.void_type {
+			c.error('cannot use `${node.typ_expr}` as a struct init type', node.typ_expr.pos())
+			return ast.void_type
+		}
+		node.unresolved = node.typ.has_flag(.generic)
+	}
 	source_typ := if node.is_short_syntax && c.expected_type != ast.void_type
 		&& !short_syntax_infers_anon_from_generic_param {
 		c.expected_type
@@ -1388,7 +1430,10 @@ fn (mut c Checker) check_uninitialized_struct_fields_and_embeds(node ast.StructI
 	}
 
 	for embed in info.embeds {
-		embed_sym := c.table.sym(embed)
+		embed_sym := c.table.final_sym(embed)
+		if embed_sym.kind != .struct {
+			continue
+		}
 		if embed_sym.info is ast.Struct {
 			if embed_sym.info.is_union {
 				mut embed_union_fields := c.table.struct_fields(embed_sym)

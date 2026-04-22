@@ -28,6 +28,20 @@ fn assign_expr_is_auto_deref(expr ast.Expr) bool {
 	return expr.is_auto_deref_var()
 }
 
+fn (c &Checker) auto_deref_source_type_is_pointer(expr ast.Expr) bool {
+	if expr !is ast.Ident || c.table.cur_fn == unsafe { nil } || !expr.is_auto_deref_var() {
+		return false
+	}
+	ident := expr as ast.Ident
+	for param in c.table.cur_fn.params {
+		if param.name == ident.name {
+			source_typ := if param.orig_typ != 0 { param.orig_typ } else { param.typ }
+			return source_typ.is_any_kind_of_pointer()
+		}
+	}
+	return false
+}
+
 fn (mut c Checker) smartcasted_assign_lhs_type(expr ast.Expr, fallback_type ast.Type) ast.Type {
 	match expr {
 		ast.Ident {
@@ -62,6 +76,58 @@ fn (mut c Checker) smartcasted_assign_lhs_type(expr ast.Expr, fallback_type ast.
 	}
 
 	return fallback_type
+}
+
+fn (mut c Checker) reset_option_assignment_smartcast(mut expr ast.Ident, left_type ast.Type) {
+	if expr.scope == unsafe { nil } {
+		return
+	}
+	if var := expr.scope.find_var(expr.name) {
+		expr.scope.objects[expr.name] = ast.Var{
+			...var
+			typ:                     left_type
+			pos:                     var.pos
+			orig_type:               ast.no_type
+			smartcasts:              []ast.Type{}
+			is_assignment_smartcast: false
+			is_unwrapped:            false
+		}
+	}
+}
+
+fn (mut c Checker) update_option_assignment_smartcast(mut expr ast.Expr, left_type ast.Type, right ast.Expr, right_type ast.Type) {
+	if !left_type.has_flag(.option) {
+		return
+	}
+	match mut expr {
+		ast.Ident {
+			mut original_pos := expr.pos
+			if var := expr.scope.find_var(expr.name) {
+				original_pos = var.pos
+			}
+			if right_type == ast.none_type || right_type == ast.nil_type
+				|| right_type.has_flag(.option) || right.is_nil()
+				|| (right is ast.UnsafeExpr && right.expr.is_nil()) {
+				c.reset_option_assignment_smartcast(mut expr, left_type)
+				return
+			}
+			c.smartcast(mut expr, left_type, left_type.clear_flag(.option), mut expr.scope, false,
+				true, false, true)
+			if mut scope_var := expr.scope.find_var(expr.name) {
+				scope_var.is_assignment_smartcast = true
+				scope_var.pos = original_pos
+			}
+		}
+		else {}
+	}
+}
+
+@[inline]
+fn (c &Checker) disallow_implicit_int_to_f32_assign(got ast.Type, expected ast.Type) bool {
+	got_type := c.table.unalias_num_type(got).clear_flags()
+	expected_type := c.table.unalias_num_type(expected).clear_flags()
+	return expected_type == ast.f32_type
+		&& got_type in [ast.i32_type, ast.int_type, ast.i64_type, ast.isize_type, ast.u32_type, ast.u64_type, ast.usize_type]
 }
 
 // TODO: 980 line function
@@ -394,7 +460,8 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 					c.expr(mut right)
 				}
 			}
-			if assign_expr_is_auto_deref(right) && right_type.is_ptr() {
+			if assign_expr_is_auto_deref(right) && right_type.is_ptr()
+				&& !c.auto_deref_source_type_is_pointer(right) {
 				left_type = ast.mktyp(right_type.deref())
 			} else {
 				left_type = ast.mktyp(right_type)
@@ -1075,6 +1142,11 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 			} else {
 				right_type_unwrapped
 			}
+			if original_op == .assign
+				&& c.disallow_implicit_int_to_f32_assign(assign_right_type, left_type_unwrapped) {
+				c.error('cannot assign to `${left}`: ${c.expected_msg(assign_right_type,
+					left_type_unwrapped)}', right_pos)
+			}
 			c.check_expected(assign_right_type, left_type_unwrapped) or {
 				if left.is_auto_deref_arg() && left_type.is_ptr() {
 					left_deref := left_type.deref()
@@ -1158,6 +1230,9 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 		}
 		if right_sym.kind == .alias && right_sym.name == 'byte' {
 			c.error('byte is deprecated, use u8 instead', right.pos())
+		}
+		if original_op == .assign {
+			c.update_option_assignment_smartcast(mut left, left_type, right, right_type)
 		}
 	}
 	// this needs to run after the assign stmt left exprs have been run through checker

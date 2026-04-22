@@ -941,12 +941,13 @@ pub fn (mut f Fmt) branch_stmt(node ast.BranchStmt) {
 }
 
 pub fn (mut f Fmt) comptime_for(node ast.ComptimeFor) {
-	typ := if node.typ != ast.void_type {
-		f.no_cur_mod(f.type_to_str_using_aliases(node.typ, f.mod2alias))
+	f.write('\$for ${node.val_var} in ')
+	if node.typ != ast.void_type {
+		f.write(f.no_cur_mod(f.type_to_str_using_aliases(node.typ, f.mod2alias)))
 	} else {
-		(node.expr as ast.Ident).name
+		f.expr(node.expr)
 	}
-	f.write('\$for ${node.val_var} in ${typ}.${node.kind.str()} {')
+	f.write('.${node.kind.str()} {')
 	if node.stmts.len > 0 || node.pos.line_nr < node.pos.last_line {
 		f.writeln('')
 		f.stmts(node.stmts)
@@ -1847,6 +1848,28 @@ struct Variant {
 	id   int
 }
 
+fn (mut f Fmt) sum_type_variant_comments(variant ast.TypeNode) {
+	if variant.end_comments.len == 0 {
+		return
+	}
+	mut same_line_comments := []ast.Comment{}
+	mut follow_up_comments := []ast.Comment{}
+	for comment in variant.end_comments {
+		if comment.pos.line_nr == variant.pos.last_line {
+			same_line_comments << comment
+		} else {
+			follow_up_comments << comment
+		}
+	}
+	if same_line_comments.len > 0 {
+		f.comments(same_line_comments, has_nl: false)
+	}
+	if follow_up_comments.len > 0 {
+		f.writeln('')
+		f.comments(follow_up_comments, has_nl: false, level: .indent)
+	}
+}
+
 pub fn (mut f Fmt) sum_type_decl(node ast.SumTypeDecl) {
 	f.attrs(node.attrs)
 	start_pos := f.out.len
@@ -1886,7 +1909,7 @@ pub fn (mut f Fmt) sum_type_decl(node ast.SumTypeDecl) {
 		}
 		f.write(variant.name)
 		if node.variants[variant.id].end_comments.len > 0 && is_multiline {
-			f.comments(node.variants[variant.id].end_comments, has_nl: false)
+			f.sum_type_variant_comments(node.variants[variant.id])
 		}
 	}
 	if !is_multiline {
@@ -1909,10 +1932,14 @@ pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
 	if node.is_fixed && node.is_option {
 		f.write('?')
 	}
-	if node.exprs.len == 0 && node.typ != 0 && node.typ != ast.void_type {
+	if node.exprs.len == 0 && ((node.typ != 0 && node.typ != ast.void_type)
+		|| node.elem_type_expr !is ast.EmptyExpr) {
 		// `x := []string{}`
 		if node.alias_type != ast.void_type {
 			f.write(f.type_to_str_using_aliases(node.alias_type, f.mod2alias))
+		} else if node.elem_type_expr !is ast.EmptyExpr {
+			f.write('[]')
+			f.expr(node.elem_type_expr)
 		} else {
 			f.write(f.type_to_str_using_aliases(node.typ, f.mod2alias))
 		}
@@ -2186,6 +2213,8 @@ pub fn (mut f Fmt) call_expr(node ast.CallExpr) {
 			name := f.short_module(node.name)
 			if node.is_static_method {
 				f.write_static_method(node.name, name)
+			} else if node.is_paren_wrapped_call {
+				f.write('(${name})')
 			} else {
 				f.write(name)
 			}

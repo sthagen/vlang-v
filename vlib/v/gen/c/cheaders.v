@@ -136,19 +136,30 @@ const c_common_macros = '
 	#define E_STRUCT_DECL unsigned char _dummy_pad
 	#define E_STRUCT 0
 #endif
-#ifndef _WIN32
-	#if defined(__has_include) && !defined(__TINYC__)
-		#if __has_include(<execinfo.h>)
-			#include <execinfo.h>
-		#else
-			// On linux: int backtrace(void **__array, int __size);
-			// On BSD: size_t backtrace(void **, size_t);
-		#endif
-	#elif (defined(__linux__) && (defined(__GLIBC__) || defined(__GNU_LIBRARY__))) || defined(__APPLE__) || defined(__NetBSD__) || defined(__FreeBSD__) || defined(__DragonFly__)
+#if defined(__has_include) && !defined(__TINYC__)
+	#if __has_include(<execinfo.h>) && !defined(_WIN32)
+		#define __V_HAVE_EXECINFO_H 1
 		#include <execinfo.h>
 	#else
 		// On linux: int backtrace(void **__array, int __size);
 		// On BSD: size_t backtrace(void **, size_t);
+	#endif
+#elif (defined(__linux__) && (defined(__GLIBC__) || defined(__GNU_LIBRARY__))) || defined(__APPLE__) || defined(__NetBSD__) || defined(__FreeBSD__) || defined(__DragonFly__)
+	#define __V_HAVE_EXECINFO_H 1
+	#include <execinfo.h>
+#else
+	// On linux: int backtrace(void **__array, int __size);
+	// On BSD: size_t backtrace(void **, size_t);
+#endif
+#ifndef __V_HAVE_EXECINFO_H
+	#ifdef __cplusplus
+	extern "C" {
+	#endif
+	int backtrace(void **__array, int __size);
+	char **backtrace_symbols(void *const *__array, int __size);
+	void backtrace_symbols_fd(void *const *__array, int __size, int __fd);
+	#ifdef __cplusplus
+	}
 	#endif
 #endif
 #ifdef __TINYC__
@@ -179,7 +190,11 @@ const c_common_macros = '
 #endif
 #if defined(_WIN32) || defined(__CYGWIN__)
 	#define VV_EXP extern __declspec(dllexport)
-	#define VV_LOC static
+	#ifdef _VPARALLELCC
+		#define VV_LOC
+	#else
+		#define VV_LOC static
+	#endif
 #else
 	// 4 < gcc < 5 is used by some older Ubuntu LTS and Centos versions,
 	// and does not support __has_attribute(visibility) ...
@@ -375,6 +390,42 @@ FILE* __cdecl __acrt_iob_func(unsigned index);
 #define stdin (__acrt_iob_func(0))
 #define stdout (__acrt_iob_func(1))
 #define stderr (__acrt_iob_func(2))
+#elif defined(__MINGW32__) || defined(__MINGW64__)
+typedef struct _iobuf FILE;
+__attribute__ ((__dllimport__)) FILE* __attribute__((__cdecl__)) __acrt_iob_func(unsigned index);
+#define stdin  (__acrt_iob_func(0))
+#define stdout (__acrt_iob_func(1))
+#define stderr (__acrt_iob_func(2))
+#elif defined(__TINYC__) && (defined(_WIN32) || defined(_WIN64))
+#ifndef _FILE_DEFINED
+struct _iobuf {
+	char *_ptr;
+	int _cnt;
+	char *_base;
+	int _flag;
+	int _file;
+	int _charbuf;
+	int _bufsiz;
+	char *_tmpfname;
+};
+typedef struct _iobuf FILE;
+#define _FILE_DEFINED
+#endif
+	#if defined(_WIN64)
+FILE* __cdecl __iob_func(void);
+	#else
+		#ifdef _MSVCRT_
+extern FILE _iob[];
+			#define __iob_func() (_iob)
+		#else
+extern FILE (*_imp___iob)[];
+			#define __iob_func() (*_imp___iob)
+			#define _iob __iob_func()
+		#endif
+	#endif
+#define stdin (&__iob_func()[0])
+#define stdout (&__iob_func()[1])
+#define stderr (&__iob_func()[2])
 #else
 	#if defined(__APPLE__) || defined(__FreeBSD__)
 typedef struct __sFILE FILE;
@@ -400,12 +451,6 @@ extern FILE* __stderr;
 #define stdin __stdin
 #define stdout __stdout
 #define stderr __stderr
-	#elif defined(__MINGW32__) || defined(__MINGW64__) || defined(__TINYC__) || defined(_WIN32) || defined(_WIN64)
-typedef struct _iobuf FILE;
-FILE* __cdecl __acrt_iob_func(unsigned index);
-#define stdin  (__acrt_iob_func(0))
-#define stdout (__acrt_iob_func(1))
-#define stderr (__acrt_iob_func(2))
 	#else
 typedef struct _IO_FILE FILE;
 extern FILE* stdin;

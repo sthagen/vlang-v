@@ -538,8 +538,9 @@ pub mut:
 	pre_comments         []Comment
 	typ_str              string // 'Foo'
 	typ                  Type   // the type of this struct
-	generic_typ          Type   // original generic struct type; reused for later concrete instantiations
-	update_expr          Expr   // `a` in `...a`
+	typ_expr             Expr = EmptyExpr{} // `typeof(x).idx` in `typeof(x).idx{}`
+	generic_typ          Type // original generic struct type; reused for later concrete instantiations
+	update_expr          Expr // `a` in `...a`
 	update_expr_type     Type
 	update_expr_pos      token.Pos
 	update_expr_comments []Comment
@@ -912,6 +913,7 @@ pub mut:
 	is_static_method       bool // it is a static method call
 	is_variadic            bool
 	is_c_variadic          bool // it is a C variadic
+	is_c_type_cast         bool // unresolved `C.Type(x)` reclassified by checker after imports are parsed
 	args                   []CallArg
 	expected_arg_types     []Type
 	comptime_ret_val       bool
@@ -938,6 +940,7 @@ pub mut:
 	//
 	is_expand_simple_interpolation bool // true, when the function/method is marked as @[expand_simple_interpolation]
 	is_unwrapped_fn_selector       bool // true, when the call is from an unwrapped selector (e.g. if t.foo != none { t.foo() })
+	is_paren_wrapped_call          bool // true, when the callee was wrapped in parentheses: `(f)(x)` — used by vfmt to preserve the parens
 	// Calls to it with an interpolation argument like `b.f('x ${y}')`, will be converted to `b.f('x ')` followed by `b.f(y)`.
 	// The same type, has to support also a .write_decimal(n i64) method.
 }
@@ -1000,15 +1003,16 @@ pub:
 	is_inherited    bool
 	has_inherited   bool
 pub mut:
-	is_arg        bool // fn args should not be autofreed
-	is_auto_deref bool
-	is_unwrapped  bool // ct type smartcast unwrapped
-	is_index_var  bool // index loop var
-	expr          Expr
-	typ           Type
-	generic_typ   Type   // original generic declaration type; reused for later concrete instantiations
-	orig_type     Type   // original sumtype type; 0 if it's not a sumtype
-	smartcasts    []Type // nested sum types require nested smart casting, for that a list of types is needed
+	is_arg                  bool // fn args should not be autofreed
+	is_auto_deref           bool
+	is_unwrapped            bool // ct type smartcast unwrapped
+	is_assignment_smartcast bool // smartcast introduced by assigning a non-option value to an option variable
+	is_index_var            bool // index loop var
+	expr                    Expr
+	typ                     Type
+	generic_typ             Type   // original generic declaration type; reused for later concrete instantiations
+	orig_type               Type   // original sumtype type; 0 if it's not a sumtype
+	smartcasts              []Type // nested sum types require nested smart casting, for that a list of types is needed
 	// TODO: move this to a real docs site later
 	// 10 <- original type (orig_type)
 	//   [11, 12, 13] <- cast order (smartcasts)
@@ -1736,6 +1740,7 @@ pub mut:
 	len_expr          Expr   // len: expr
 	cap_expr          Expr   // cap: expr
 	init_expr         Expr   // init: expr
+	elem_type_expr    Expr = empty_expr // `typeof(expr).idx` in `[]typeof(expr).idx{}`
 	expr_types        []Type // [Dog, Cat] // also used for interface_types
 	elem_type         Type   // element type
 	generic_elem_type Type   // original generic element type; reused for later concrete instantiations
@@ -2583,6 +2588,7 @@ pub fn (expr Expr) is_lvalue() bool {
 	return match expr {
 		Ident, CTempVar { true }
 		IndexExpr { !expr.is_index_operator && expr.left.is_lvalue() }
+		PostfixExpr { expr.op == .question && expr.expr is ComptimeSelector }
 		SelectorExpr { expr.expr.is_lvalue() }
 		ParExpr { expr.expr.is_lvalue() } // for var := &{...(*pointer_var)}
 		PrefixExpr { expr.right.is_lvalue() }
@@ -3243,16 +3249,10 @@ pub fn (expr Expr) is_reference() bool {
 }
 
 // remove_par removes all parenthesis and gets the innermost Expr
-pub fn (mut expr Expr) remove_par() Expr {
+pub fn (expr Expr) remove_par() Expr {
 	mut e := expr
-	for {
-		mut next_expr := Expr(EmptyExpr{})
-		if mut e is ParExpr {
-			next_expr = e.expr
-		} else {
-			break
-		}
-		e = next_expr
+	for e is ParExpr {
+		e = (e as ParExpr).expr
 	}
 	return e
 }

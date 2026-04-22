@@ -215,13 +215,17 @@ fn (mut g Gen) array_init(node ast.ArrayInit, var_name string) {
 	}
 }
 
+fn (mut g Gen) normalized_array_interface_cast_type(typ ast.Type) ast.Type {
+	return g.table.unaliased_type(g.unwrap_generic(typ)).clear_flags(.generic, .variadic)
+}
+
 fn (mut g Gen) can_convert_array_to_interface_array(got_type ast.Type, expected_type ast.Type) bool {
 	if got_type.is_ptr() || expected_type.is_ptr() || got_type.has_option_or_result()
 		|| expected_type.has_option_or_result() {
 		return false
 	}
-	got := g.table.unaliased_type(g.unwrap_generic(got_type))
-	expected := g.table.unaliased_type(g.unwrap_generic(expected_type))
+	got := g.normalized_array_interface_cast_type(got_type)
+	expected := g.normalized_array_interface_cast_type(expected_type)
 	if got == expected {
 		return false
 	}
@@ -232,8 +236,8 @@ fn (mut g Gen) can_convert_array_to_interface_array(got_type ast.Type, expected_
 }
 
 fn (mut g Gen) can_convert_array_elem_to_interface_array(got ast.Type, expected ast.Type) bool {
-	got_type := g.table.unaliased_type(g.unwrap_generic(got))
-	expected_type := g.table.unaliased_type(g.unwrap_generic(expected))
+	got_type := g.normalized_array_interface_cast_type(got)
+	expected_type := g.normalized_array_interface_cast_type(expected)
 	got_sym := g.table.final_sym(got_type)
 	expected_sym := g.table.final_sym(expected_type)
 	if got_sym.kind == .array && expected_sym.kind == .array {
@@ -245,8 +249,8 @@ fn (mut g Gen) can_convert_array_elem_to_interface_array(got ast.Type, expected 
 }
 
 fn (mut g Gen) register_array_interface_cast_fn(got_type ast.Type, expected_type ast.Type) string {
-	got := g.table.unaliased_type(g.unwrap_generic(got_type))
-	expected := g.table.unaliased_type(g.unwrap_generic(expected_type))
+	got := g.normalized_array_interface_cast_type(got_type)
+	expected := g.normalized_array_interface_cast_type(expected_type)
 	fn_name := '__v_array_to_interface_array__${g.styp(got)}__to__${g.styp(expected)}'
 	mut already_generated := false
 	lock g.generated_array_interface_cast_fns {
@@ -280,8 +284,8 @@ fn (mut g Gen) register_array_interface_cast_fn(got_type ast.Type, expected_type
 }
 
 fn (mut g Gen) array_interface_cast_expr(src_elem_expr string, got_type ast.Type, expected_type ast.Type) string {
-	got := g.table.unaliased_type(g.unwrap_generic(got_type))
-	expected := g.table.unaliased_type(g.unwrap_generic(expected_type))
+	got := g.normalized_array_interface_cast_type(got_type)
+	expected := g.normalized_array_interface_cast_type(expected_type)
 	if got == expected {
 		return src_elem_expr
 	}
@@ -1209,31 +1213,40 @@ fn (mut g Gen) gen_array_sort(node ast.CallExpr) {
 	// so they need internal linkage to avoid duplicate symbols at link time.
 	sort_fn_visibility := if g.static_modifier != '' { g.static_modifier } else { 'VV_LOC ' }
 	g.sort_fn_definitions.writeln('${sort_fn_visibility}int ${compare_fn}(${stype_arg}* a, ${stype_arg}* b) {')
-	c_condition := if comparison_type.sym.has_method('<') {
+	c_condition := g.array_sort_lt_condition(comparison_type, use_lambda, lambda_fn_name,
+		left_expr, right_expr, 'a', 'b')
+	reverse_condition := g.array_sort_lt_condition(comparison_type, use_lambda, lambda_fn_name,
+		right_expr, left_expr, 'b', 'a')
+	g.sort_fn_definitions.writeln('\tif (${c_condition}) return -1;')
+	g.sort_fn_definitions.writeln('\tif (${reverse_condition}) return 1;')
+	g.sort_fn_definitions.writeln('\treturn 0;')
+	g.sort_fn_definitions.writeln('}\n')
+
+	// write call to the generated function
+	g.gen_array_sort_call(node, compare_fn, left_is_array)
+}
+
+fn (mut g Gen) array_sort_lt_condition(comparison_type Type, use_lambda bool, lambda_fn_name string, left_expr string, right_expr string, left_arg string, right_arg string) string {
+	if use_lambda {
+		return '${lambda_fn_name}(${left_arg}, ${right_arg})'
+	}
+	if comparison_type.sym.has_method('<') {
 		method_name := if comparison_type.sym.is_builtin() {
 			'builtin__${g.styp(comparison_type.typ)}__lt'
 		} else {
 			'${g.styp(comparison_type.typ)}__lt'
 		}
-		'${method_name}(${left_expr}, ${right_expr})'
-	} else if comparison_type.unaliased_sym.has_method('<') {
+		return '${method_name}(${left_expr}, ${right_expr})'
+	}
+	if comparison_type.unaliased_sym.has_method('<') {
 		method_name := if comparison_type.unaliased_sym.is_builtin() {
 			'builtin__${g.styp(comparison_type.unaliased)}__lt'
 		} else {
 			'${g.styp(comparison_type.unaliased)}__lt'
 		}
-		'${method_name}(${left_expr}, ${right_expr})'
-	} else if use_lambda {
-		'${lambda_fn_name}(a, b)'
-	} else {
-		'${left_expr} < ${right_expr}'
+		return '${method_name}(${left_expr}, ${right_expr})'
 	}
-	g.sort_fn_definitions.writeln('\tif (${c_condition}) return -1;')
-	g.sort_fn_definitions.writeln('\telse return 1;')
-	g.sort_fn_definitions.writeln('}\n')
-
-	// write call to the generated function
-	g.gen_array_sort_call(node, compare_fn, left_is_array)
+	return '${left_expr} < ${right_expr}'
 }
 
 fn (mut g Gen) gen_array_sort_call(node ast.CallExpr, compare_fn string, is_array bool) {

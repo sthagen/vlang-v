@@ -98,6 +98,11 @@ fn test_cc_from_string_detects_cl_as_msvc() {
 	assert pref.cc_from_string('C:/Program Files/Microsoft Visual Studio/cl.exe') == .msvc
 }
 
+fn test_cc_from_string_detects_tiny_gcc_as_tinyc() {
+	assert pref.cc_from_string('tiny_gcc') == .tinyc
+	assert pref.cc_from_string('/usr/local/bin/tiny_gcc') == .tinyc
+}
+
 fn test_ccompiler_type_from_version_output_detects_openbsd_clang() {
 	detected := ccompiler_type_from_version_output('OpenBSD clang version 16.0.6') or { panic(err) }
 	assert detected == .clang
@@ -108,6 +113,20 @@ fn test_ccompiler_type_from_version_output_detects_tcc() {
 		panic(err)
 	}
 	assert detected == .tinyc
+}
+
+fn test_ccompiler_type_from_name_detects_tiny_gcc() {
+	detected := ccompiler_type_from_name('/opt/tiny_gcc') or { panic(err) }
+	assert detected == .tinyc
+}
+
+fn test_ccompiler_type_from_version_output_detects_tiny_gcc() {
+	detected := ccompiler_type_from_version_output('tiny_gcc version 0.9.27') or { panic(err) }
+	assert detected == .tinyc
+}
+
+fn test_is_tcc_compilation_failure_detects_tiny_gcc_compiler_name() {
+	assert is_tcc_compilation_failure('/opt/bin/tiny_gcc', .unknown, '')
 }
 
 fn test_resolve_ccompiler_type_detects_cc_alias_path_as_clang() {
@@ -158,6 +177,68 @@ fn test_msvc_thirdparty_obj_path_keeps_debug_objects_separate() {
 	assert release_obj != debug_obj
 }
 
+fn test_sqlite_thirdparty_validation_error_for_missing_amalgamation() {
+	obj_path := os.join_path(@VEXEROOT, 'thirdparty', 'sqlite', 'sqlite3.o')
+	msg := sqlite_thirdparty_validation_error('db.sqlite', obj_path, '', .unknown)
+	assert msg.contains('sqlite3.c')
+	assert msg.contains('sqlite3.h')
+	assert msg.contains('install_thirdparty_sqlite.vsh')
+}
+
+fn test_sqlite_thirdparty_validation_error_for_sqlite3_cpp() {
+	obj_path := os.join_path(@VEXEROOT, 'thirdparty', 'sqlite', 'sqlite3.o')
+	source_path := obj_path.all_before_last('.o') + '.cpp'
+	msg := sqlite_thirdparty_validation_error('db.sqlite', obj_path, source_path, .cpp)
+	assert msg.contains('Do not rename `sqlite3.c` to `sqlite3.cpp`')
+	assert msg.contains('SQLite amalgamation package')
+}
+
+fn test_sqlite_thirdparty_validation_error_ignores_sqlite3_c() {
+	obj_path := os.join_path(@VEXEROOT, 'thirdparty', 'sqlite', 'sqlite3.o')
+	source_path := obj_path.all_before_last('.o') + '.c'
+	assert sqlite_thirdparty_validation_error('db.sqlite', obj_path, source_path, .c) == ''
+}
+
+fn test_sqlite_thirdparty_validation_error_ignores_other_modules() {
+	obj_path := os.join_path(@VEXEROOT, 'thirdparty', 'sqlite', 'sqlite3.o')
+	source_path := obj_path.all_before_last('.o') + '.cpp'
+	assert sqlite_thirdparty_validation_error('json.cjson', obj_path, source_path, .cpp) == ''
+}
+
+fn test_linux_cross_target_for_amd64() {
+	target := linux_cross_target_for_arch(.amd64) or { panic(err) }
+	assert target.triple == 'x86_64-linux-gnu'
+	assert target.lib_dir == 'x86_64-linux-gnu'
+	assert target.dynamic_linker == '/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2'
+	assert target.linker_emulation == 'elf_x86_64'
+}
+
+fn test_linux_cross_target_for_arm64_errors() {
+	if target := linux_cross_target_for_arch(.arm64) {
+		assert false, 'unexpected target: ${target}'
+	} else {
+		assert err.msg().contains('only `-arch amd64`')
+		assert err.msg().contains('linuxroot')
+	}
+}
+
+fn test_msvc_should_use_rsp_for_ascii_args() {
+	builder := new_builder_for_args(['-cc', 'msvc', hello_world_example()])
+	assert builder.msvc_should_use_rsp(['/OUT:"C:\\Users\\russo\\Desktop\\main.exe"'])
+}
+
+fn test_msvc_should_not_use_rsp_for_non_ascii_args() {
+	builder := new_builder_for_args(['-cc', 'msvc', hello_world_example()])
+	assert !builder.msvc_should_use_rsp([
+		'/OUT:"C:\\Users\\russo\\OneDrive\\Рабочий стол\\main.exe"',
+	])
+}
+
+fn test_msvc_should_not_use_rsp_when_no_rsp_is_requested() {
+	builder := new_builder_for_args(['-cc', 'msvc', '-no-rsp', hello_world_example()])
+	assert !builder.msvc_should_use_rsp(['/OUT:"C:\\Users\\russo\\Desktop\\main.exe"'])
+}
+
 fn test_live_termux_linker_args_include_rdynamic_without_debug() {
 	linker_args := builder_linker_args([
 		'-os',
@@ -168,6 +249,78 @@ fn test_live_termux_linker_args_include_rdynamic_without_debug() {
 		hello_world_example(),
 	])
 	assert linker_args.contains('-rdynamic')
+}
+
+fn test_thirdparty_cross_compile_config_for_linux_matches_target() {
+	builder := new_builder_for_args(['-os', 'linux', hello_world_example()])
+	cfg := builder.thirdparty_cross_compile_config()
+	if current_os == 'linux' {
+		assert cfg.sysroot == ''
+		assert cfg.target_args == []string{}
+		assert cfg.trailing_include_args == []string{}
+		return
+	}
+	assert cfg.target_args == ['-target x86_64-linux-gnu']
+	assert cfg.sysroot.ends_with('/linuxroot')
+	assert cfg.trailing_include_args == [
+		'-I',
+		os.quoted_path('${cfg.sysroot}/include'),
+	]
+}
+
+fn test_thirdparty_cross_compile_config_for_freebsd_matches_target() {
+	builder := new_builder_for_args(['-os', 'freebsd', hello_world_example()])
+	cfg := builder.thirdparty_cross_compile_config()
+	if current_os == 'freebsd' {
+		assert cfg.sysroot == ''
+		assert cfg.target_args == []string{}
+		assert cfg.trailing_include_args == []string{}
+		return
+	}
+	assert cfg.target_args == ['-target x86_64-unknown-freebsd14.0']
+	assert cfg.sysroot.ends_with('/freebsdroot')
+	assert cfg.trailing_include_args == [
+		'-I',
+		os.quoted_path('${cfg.sysroot}/include'),
+		'-I',
+		os.quoted_path('${cfg.sysroot}/usr/include'),
+	]
+}
+
+fn test_live_windows_main_linker_args_export_host_symbols() {
+	linker_args := builder_linker_args([
+		'-os',
+		'windows',
+		'-cc',
+		'gcc',
+		'-live',
+		hot_reload_graph_example(),
+	])
+	assert linker_args.contains('-Wl,--export-all-symbols')
+	assert linker_args.contains('-Wl,--out-implib,')
+	assert linker_args.contains(live_windows_import_lib_path(hot_reload_graph_example()))
+}
+
+fn test_live_windows_shared_linker_args_include_host_import_lib() {
+	linker_args := builder_linker_args([
+		'-os',
+		'windows',
+		'-cc',
+		'gcc',
+		'-sharedlive',
+		'-shared',
+		hot_reload_graph_example(),
+	])
+	assert linker_args.contains(live_windows_import_lib_path(hot_reload_graph_example()))
+}
+
+fn test_shared_windows_builds_do_not_add_subsystem_flags() {
+	mut builder := new_test_builder(['-os', 'windows', '-shared', hello_world_example()])
+	assert builder.get_subsystem_flag() == ''
+	compile_args := builder.get_compile_args().join(' ')
+	assert !compile_args.contains('-municode')
+	assert !compile_args.contains('-mwindows')
+	assert !compile_args.contains('-mconsole')
 }
 
 fn test_should_use_rsp_for_linux_by_default() {
@@ -246,6 +399,10 @@ fn hello_world_example() string {
 	return os.join_path(@VEXEROOT, 'examples', 'hello_world.v')
 }
 
+fn hot_reload_graph_example() string {
+	return os.join_path(@VEXEROOT, 'examples', 'hot_reload', 'graph.v')
+}
+
 fn test_c_output_suggests_missing_typedef_for_c_struct_with_issue_19050_output() {
 	c_output := [
 		"/tmp/v_501/c_struct.6580681062929530137.tmp.c:12966:17: error: incomplete result type 'struct string_c' in function definition",
@@ -271,6 +428,36 @@ fn test_c_output_suggests_missing_typedef_for_c_struct_requires_matching_redecla
 	assert c_output_suggests_missing_typedef_for_c_struct(c_output, {
 		'other_c_struct': true
 	}) == ''
+}
+
+fn test_extract_quoted_identifier_supports_double_quotes() {
+	assert extract_quoted_identifier('error: \';\' expected (got "glfw__GLFWwindow")') == 'glfw__GLFWwindow'
+}
+
+fn test_c_output_suggests_missing_header_for_typedef_c_struct_with_issue_25384_tcc_output() {
+	c_output := 'C:/Users/si_z_/AppData/Local/Temp/v_0/TestV.tmp.c:904: error: \';\' expected (got "glfw__GLFWwindow")'
+	assert c_output_suggests_missing_header_for_typedef_c_struct(c_output, {
+		'GLFWwindow': true
+	}, {
+		'glfw__GLFWwindow': 'GLFWwindow'
+	}) == 'GLFWwindow'
+}
+
+fn test_c_output_suggests_missing_header_for_typedef_c_struct_with_issue_25384_gcc_output() {
+	c_output := [
+		"/tmp/v_502/issue25384_windows.exe.tmp.c:1198:9: error: unknown type name 'GLFWwindow'",
+		' 1198 | typedef GLFWwindow glfw__GLFWwindow;',
+	].join('\n')
+	assert c_output_suggests_missing_header_for_typedef_c_struct(c_output, {
+		'GLFWwindow': true
+	}, {
+		'glfw__GLFWwindow': 'GLFWwindow'
+	}) == 'GLFWwindow'
+}
+
+fn test_c_output_suggests_missing_header_for_typedef_c_struct_requires_known_type() {
+	c_output := 'C:/Users/si_z_/AppData/Local/Temp/v_0/TestV.tmp.c:904: error: \';\' expected (got "glfw__GLFWwindow")'
+	assert c_output_suggests_missing_header_for_typedef_c_struct(c_output, {}, {}) == ''
 }
 
 fn test_c_error_missing_library_name_detects_tcc_output() {

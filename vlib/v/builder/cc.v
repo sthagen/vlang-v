@@ -3,6 +3,7 @@
 // that can be found in the LICENSE file.
 module builder
 
+import hash.fnv1a
 import os
 import v.ast
 import v.cflag
@@ -27,6 +28,13 @@ const missing_libatomic_markers = [
 	'cannot find libatomic',
 ]!
 
+fn live_windows_import_lib_path(source_path string) string {
+	cache_dir := os.join_path(os.cache_dir(), 'v', 'live')
+	os.mkdir_all(cache_dir) or {}
+	key := fnv1a.sum64_string(os.real_path(source_path)).str()
+	return os.join_path(cache_dir, 'host_symbols_${key}.a')
+}
+
 fn extract_c_struct_name(line string) string {
 	start := line.index('struct ') or { return '' } + 'struct '.len
 	mut end := start
@@ -41,7 +49,7 @@ fn extract_c_struct_name(line string) string {
 }
 
 fn extract_quoted_identifier(line string) string {
-	for quote in [u8(`'`), u8(96)] {
+	for quote in [u8(`"`), u8(`'`), u8(96)] {
 		start := line.index_u8(quote)
 		if start == -1 {
 			continue
@@ -51,6 +59,28 @@ fn extract_quoted_identifier(line string) string {
 			continue
 		}
 		return line[start + 1..start + 1 + end]
+	}
+	return ''
+}
+
+fn c_output_suggests_missing_header_for_typedef_c_struct(c_output string, known_typedef_c_structs map[string]bool, known_typedef_c_struct_aliases map[string]string) string {
+	if known_typedef_c_structs.len == 0 && known_typedef_c_struct_aliases.len == 0 {
+		return ''
+	}
+	for line in c_output.split_into_lines() {
+		lower_line := line.to_lower()
+		name := extract_quoted_identifier(line)
+		if name != '' {
+			if lower_line.contains('unknown type name') && name in known_typedef_c_structs {
+				return name
+			}
+			if name in known_typedef_c_struct_aliases
+				&& (lower_line.contains('expected (got') || lower_line.contains('unknown type name')
+				|| lower_line.contains('undeclared identifier')
+				|| lower_line.contains('does not name a type')) {
+				return known_typedef_c_struct_aliases[name]
+			}
+		}
 	}
 	return ''
 }
@@ -114,6 +144,42 @@ fn (v &Builder) known_non_typedef_c_structs() map[string]bool {
 		names[sym.cname[3..]] = true
 	}
 	return names
+}
+
+fn (v &Builder) known_typedef_c_structs() map[string]bool {
+	mut names := map[string]bool{}
+	for sym in v.table.type_symbols {
+		if sym.language != .c || sym.kind != .struct || !sym.cname.starts_with('C__') {
+			continue
+		}
+		info := sym.info as ast.Struct
+		if !info.is_typedef {
+			continue
+		}
+		names[sym.cname[3..]] = true
+	}
+	return names
+}
+
+fn (v &Builder) known_typedef_c_struct_aliases() map[string]string {
+	mut aliases := map[string]string{}
+	for sym in v.table.type_symbols {
+		if sym.kind != .alias {
+			continue
+		}
+		alias_info := sym.info as ast.Alias
+		parent_sym := v.table.final_sym(alias_info.parent_type)
+		if parent_sym.language != .c || parent_sym.kind != .struct
+			|| !parent_sym.cname.starts_with('C__') {
+			continue
+		}
+		parent_info := parent_sym.info as ast.Struct
+		if !parent_info.is_typedef {
+			continue
+		}
+		aliases[sym.cname] = parent_sym.cname[3..]
+	}
+	return aliases
 }
 
 fn c_error_looks_like_cpp_header(c_output string) bool {
@@ -286,6 +352,11 @@ fn (mut v Builder) post_process_c_compiler_output(ccompiler string, res os.Resul
 		|| res.output.contains('.o: file not recognized') {
 		more_suggestions += '\n${highlight_word('Suggestion')}: try `v wipe-cache`, then repeat your compilation.'
 	}
+	missing_typedef_header_name := c_output_suggests_missing_header_for_typedef_c_struct(res.output,
+		v.known_typedef_c_structs(), v.known_typedef_c_struct_aliases())
+	if missing_typedef_header_name != '' {
+		more_suggestions += '\n${highlight_word('Suggestion')}: the C typedef `${missing_typedef_header_name}` backing `@[typedef] struct C.${missing_typedef_header_name} {}` was not found by the C compiler. Make sure the header that defines it is included on this platform and that its `#flag -I` path is correct. If the C API actually declares `struct ${missing_typedef_header_name}` without a typedef, remove `@[typedef]` from the V redeclaration.'
+	}
 	missing_typedef_name := c_output_suggests_missing_typedef_for_c_struct(res.output,
 		v.known_non_typedef_c_structs())
 	if missing_typedef_name != '' {
@@ -328,7 +399,7 @@ You can also use #help on Discord: https://discord.gg/vlang .${more_suggestions}
 fn (mut v Builder) show_cc(cmd string, response_file string, response_file_content string) {
 	if v.pref.is_verbose || v.pref.show_cc {
 		println('> C compiler cmd: ${cmd}')
-		if v.pref.show_cc && !v.pref.no_rsp {
+		if v.pref.show_cc && !v.pref.no_rsp && response_file != '' {
 			println('> C compiler response file "${response_file}":')
 			println(response_file_content)
 		}
@@ -366,9 +437,11 @@ pub mut:
 	ldflags      []string // `-labcd' from `v -ldflags "-labcd"`
 }
 
+type WindowsPathResolver = fn (string) string
+
 fn ccompiler_type_from_name_with_ok(ccompiler string) (pref.CompilerType, bool) {
 	cc_file_name := os.file_name(ccompiler).to_lower_ascii()
-	if cc_file_name.contains('tcc') || cc_file_name.contains('tinyc') {
+	if is_tinyc_compiler_label(cc_file_name) {
 		return pref.CompilerType.tinyc, true
 	}
 	if cc_file_name.contains('gcc') {
@@ -402,8 +475,7 @@ fn ccompiler_type_from_version_output_with_ok(output string) (pref.CompilerType,
 		return pref.CompilerType.tinyc, false
 	}
 	lower_output := output.to_lower_ascii()
-	if lower_output.contains('tiny c compiler') || lower_output.contains('tinycc')
-		|| lower_output.contains('\ntcc') || lower_output.starts_with('tcc') {
+	if is_tinyc_version_output(lower_output) {
 		return pref.CompilerType.tinyc, true
 	}
 	if lower_output.contains('clang') {
@@ -716,6 +788,18 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 				ccoptions.args << 'dynamic_lookup'
 			}
 		}
+		if v.pref.os == .windows && ccoptions.cc != .msvc {
+			host_import_lib := v.tcc_quoted_path(live_windows_import_lib_path(v.pref.path))
+			if v.pref.is_livemain {
+				// Re-export host graphics/backend symbols so the live-reload DLL can reuse them.
+				ccoptions.linker_flags << '-Wl,--export-all-symbols'
+				ccoptions.linker_flags << '-Wl,--out-implib,${host_import_lib}'
+			}
+			if v.pref.is_liveshared {
+				// Link the live-reload DLL against the host executable's import library.
+				ccoptions.linker_flags << host_import_lib
+			}
+		}
 	}
 
 	// macOS code can include objective C  TODO remove once objective C is replaced with C
@@ -742,8 +826,18 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 		}
 	}
 	if v.pref.os == .windows {
-		ccoptions.post_args << v.get_subsystem_flag()
+		subsystem_flag := v.get_subsystem_flag()
+		if subsystem_flag != '' {
+			ccoptions.post_args << subsystem_flag
+		}
 	}
+	ccoptions.env_cflags = os.getenv('CFLAGS').replace('\n', ' ')
+	ccoptions.env_ldflags = os.getenv('LDFLAGS').replace('\n', ' ')
+	// Set the cache salt before resolving cached thirdparty object paths,
+	// so object building and final compilation agree on the same cache entry.
+	v.pref.cache_manager.set_temporary_options(v.thirdparty_object_args(ccoptions, [
+		ccoptions.guessed_compiler,
+	], false))
 	cflags := v.get_os_cflags()
 
 	if v.pref.build_mode != .build_module {
@@ -775,8 +869,6 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 			ccoptions.linker_flags << '-lelf'
 		}
 	}
-	ccoptions.env_cflags = os.getenv('CFLAGS').replace('\n', ' ')
-	ccoptions.env_ldflags = os.getenv('LDFLAGS').replace('\n', ' ')
 	if v.pref.os == .macos {
 		if v.pref.use_cache {
 			ccoptions.source_args << '-x none'
@@ -809,10 +901,6 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 		println('>>> setup_ccompiler_options ccoptions: ${ccoptions}')
 	}
 	v.ccoptions = ccoptions
-	// setup the cache too, so that different compilers/options do not interfere:
-	v.pref.cache_manager.set_temporary_options(v.thirdparty_object_args(v.ccoptions, [
-		ccoptions.guessed_compiler,
-	], false))
 }
 
 fn (v &Builder) all_args(ccoptions CcompilerOptions) []string {
@@ -873,6 +961,53 @@ fn (v &Builder) only_linker_args(ccoptions CcompilerOptions) []string {
 	return all
 }
 
+struct ThirdpartyCrossCompileConfig {
+	target_args           []string
+	trailing_include_args []string
+	sysroot               string
+}
+
+fn (v &Builder) thirdparty_cross_compile_config() ThirdpartyCrossCompileConfig {
+	if v.pref.os == .linux && current_os != 'linux' {
+		sysroot := os.join_path(os.vmodules_dir(), 'linuxroot')
+		return ThirdpartyCrossCompileConfig{
+			target_args:           ['-target x86_64-linux-gnu']
+			trailing_include_args: [
+				'-I',
+				os.quoted_path('${sysroot}/include'),
+			]
+			sysroot:               sysroot
+		}
+	}
+	if v.pref.os == .freebsd && current_os != 'freebsd' {
+		sysroot := os.join_path(os.vmodules_dir(), 'freebsdroot')
+		return ThirdpartyCrossCompileConfig{
+			target_args:           ['-target x86_64-unknown-freebsd14.0']
+			trailing_include_args: [
+				'-I',
+				os.quoted_path('${sysroot}/include'),
+				'-I',
+				os.quoted_path('${sysroot}/usr/include'),
+			]
+			sysroot:               sysroot
+		}
+	}
+	return ThirdpartyCrossCompileConfig{}
+}
+
+fn (mut v Builder) ensure_thirdparty_cross_compile_sysroot(cfg ThirdpartyCrossCompileConfig) {
+	if cfg.sysroot == '' {
+		return
+	}
+	if v.pref.os == .linux {
+		v.ensure_linuxroot_exists(cfg.sysroot)
+		return
+	}
+	if v.pref.os == .freebsd {
+		v.ensure_freebsdroot_exists(cfg.sysroot)
+	}
+}
+
 fn (mut v Builder) thirdparty_object_args(ccoptions CcompilerOptions, middle []string, cpp_file bool) []string {
 	mut all := []string{}
 
@@ -885,17 +1020,10 @@ fn (mut v Builder) thirdparty_object_args(ccoptions CcompilerOptions, middle []s
 		all << '-D_DEFAULT_SOURCE'
 	}
 
-	sysroot := os.join_path(os.vmodules_dir(), 'linuxroot')
-	mut cross_compiling_from_macos_to_linux := false
-	if v.pref.os == .linux && v.pref.arch == .amd64 {
-		$if macos {
-			cross_compiling_from_macos_to_linux = true
-		}
-	}
-
-	if cross_compiling_from_macos_to_linux {
-		v.ensure_linuxroot_exists(sysroot)
-		all << '-target x86_64-linux-gnu'
+	cross_cfg := v.thirdparty_cross_compile_config()
+	if cross_cfg.sysroot != '' {
+		v.ensure_thirdparty_cross_compile_sysroot(cross_cfg)
+		all << cross_cfg.target_args
 	}
 
 	all << ccoptions.env_cflags
@@ -905,12 +1033,11 @@ fn (mut v Builder) thirdparty_object_args(ccoptions CcompilerOptions, middle []s
 	// compilers are inconsistent about how they handle:
 	// all << ccoptions.env_ldflags
 	// all << ccoptions.ldflags
-	if cross_compiling_from_macos_to_linux {
+	if cross_cfg.sysroot != '' {
 		// add the system include/ folder after everything else,
 		// so that local folders like thirdparty/mbedtls have a
 		// chance to supply their own headers
-		all << '-I'
-		all << os.quoted_path('${sysroot}/include')
+		all << cross_cfg.trailing_include_args
 	}
 	return all
 }
@@ -948,13 +1075,72 @@ fn (mut v Builder) setup_output_name() {
 }
 
 pub fn (mut v Builder) tcc_quoted_path(p string) string {
+	wp := v.tcc_windows_path(p)
 	if v.ccoptions.cc == .tcc && !v.pref.no_rsp {
-		// tcc has a bug, that prevents it from being able to parse names quoted with ' in .rsp files :-|
-		mut escaped := p.replace('\\', '\\\\')
+		// tcc has a bug that prevents it from parsing names quoted with `'` in .rsp files,
+		// so force double-quoted, backslash-escaped paths for tcc rsp mode.
+		mut escaped := wp.replace('\\', '\\\\')
 		escaped = escaped.replace('"', '\\"')
 		return '"${escaped}"'
 	}
-	return os.quoted_path(p)
+	return os.quoted_path(wp)
+}
+
+fn looks_like_windows_path(value string) bool {
+	return value.contains('\\') || value.contains('/') || (value.len > 1 && value[1] == `:`)
+}
+
+fn rewrite_windows_path_arg(arg string, resolver WindowsPathResolver) string {
+	if arg == '' {
+		return ''
+	}
+	if start := arg.index('"') {
+		end := arg.last_index('"') or { -1 }
+		if end > start {
+			path := arg[start + 1..end]
+			if looks_like_windows_path(path) {
+				return arg[..start] + '"${resolver(path)}"' + arg[end + 1..]
+			}
+		}
+	}
+	for prefix in ['-I', '-L', '-B', '-o ', '-c '] {
+		if arg.starts_with(prefix) {
+			path := arg[prefix.len..].trim_space().trim('"')
+			if looks_like_windows_path(path) {
+				return prefix + '"${resolver(path)}"'
+			}
+		}
+	}
+	trimmed := arg.trim_space().trim('"')
+	if !arg.starts_with('-') && looks_like_windows_path(trimmed) {
+		return '"${resolver(trimmed)}"'
+	}
+	return arg
+}
+
+fn short_windows_path(path string) string {
+	$if windows {
+		return os.short_path(path)
+	}
+	return path
+}
+
+fn (v &Builder) tcc_windows_path(p string) string {
+	$if windows {
+		if v.ccoptions.cc == .tcc {
+			return short_windows_path(p)
+		}
+	}
+	return p
+}
+
+fn (v &Builder) tcc_windows_path_arg(arg string) string {
+	$if windows {
+		if v.ccoptions.cc == .tcc {
+			return rewrite_windows_path_arg(arg, short_windows_path)
+		}
+	}
+	return arg
 }
 
 fn (v &Builder) rsp_safe_arg(arg string) string {
@@ -973,6 +1159,20 @@ fn (v &Builder) should_use_rsp(rsp_args []string) bool {
 	}
 	for arg in rsp_args {
 		if arg.contains("'\\''") || arg.contains('\n') || arg.contains('\r') {
+			return false
+		}
+	}
+	return true
+}
+
+fn (v &Builder) msvc_should_use_rsp(args []string) bool {
+	if !v.should_use_rsp(args) {
+		return false
+	}
+	// Keep Unicode paths on the direct CreateProcessW command line. MSVC response
+	// files still mis-handle non-ASCII file names on some Windows setups.
+	for arg in args {
+		if !arg.is_ascii() {
 			return false
 		}
 	}
@@ -1216,7 +1416,8 @@ pub fn (mut v Builder) cc() {
 		//
 		all_args := v.all_args(v.ccoptions)
 		v.dump_c_options(all_args)
-		rsp_args := all_args.map(v.rsp_safe_arg(it))
+		mut rsp_args := all_args.map(v.rsp_safe_arg(it))
+		rsp_args = rsp_args.map(v.tcc_windows_path_arg(it))
 		shell_args := rsp_args.join(' ')
 		mut should_use_rsp := v.should_use_rsp(rsp_args)
 		mut str_args := if !should_use_rsp {
@@ -1236,9 +1437,9 @@ pub fn (mut v Builder) cc() {
 		if should_use_rsp {
 			response_file = '${v.out_name_c}.rsp'
 			response_file_content = str_args.replace('\\', '\\\\')
-			rspexpr := '@${response_file}'
-			cmd = '${v.quote_compiler_name(ccompiler)} ${os.quoted_path(rspexpr)}'
 			write_response_file(response_file, response_file_content)
+			rspexpr := '@${v.tcc_windows_path(response_file)}'
+			cmd = '${v.quote_compiler_name(ccompiler)} ${os.quoted_path(rspexpr)}'
 			if !v.ccoptions.debug_mode {
 				v.pref.cleanup_files << response_file
 			}
@@ -1303,6 +1504,10 @@ pub fn (mut v Builder) cc() {
 					if v.pref.ccompiler != '' && v.pref.ccompiler != ccompiler {
 						if v.pref.is_verbose {
 							eprintln('Compilation with tcc failed. Retrying with ${v.pref.ccompiler} ...')
+						} else {
+							$if macos {
+								eprintln(term.red('warning: tcc compilation failed, falling back to ${v.pref.ccompiler} (this is much slower)'))
+							}
 						}
 						continue
 					}
@@ -1402,6 +1607,9 @@ fn (mut b Builder) ensure_freebsdroot_exists(sysroot string) {
 }
 
 fn (mut b Builder) get_subsystem_flag() string {
+	if b.pref.is_shared || b.pref.build_mode == .build_module || b.pref.is_o {
+		return ''
+	}
 	return match b.pref.subsystem {
 		.auto { '-municode' }
 		.console { '-municode -mconsole' }
@@ -1409,7 +1617,30 @@ fn (mut b Builder) get_subsystem_flag() string {
 	}
 }
 
+struct LinuxCrossTarget {
+	triple           string
+	lib_dir          string
+	dynamic_linker   string
+	linker_emulation string
+}
+
+fn linux_cross_target_for_arch(arch pref.Arch) !LinuxCrossTarget {
+	if arch != .amd64 {
+		return error('Linux cross compilation currently supports only `-arch amd64`; the bundled linuxroot sysroot does not provide `${arch}` runtime files.')
+	}
+	return LinuxCrossTarget{
+		triple:           'x86_64-linux-gnu'
+		lib_dir:          'x86_64-linux-gnu'
+		dynamic_linker:   '/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2'
+		linker_emulation: 'elf_x86_64'
+	}
+}
+
 fn (mut b Builder) cc_linux_cross() {
+	linux_cross_target := linux_cross_target_for_arch(b.pref.arch) or {
+		verror(err.msg())
+		return
+	}
 	b.setup_ccompiler_options(b.pref.ccompiler)
 	b.build_thirdparty_obj_files()
 	b.setup_output_name()
@@ -1419,13 +1650,17 @@ fn (mut b Builder) cc_linux_cross() {
 	}
 	sysroot := os.join_path(os.vmodules_dir(), 'linuxroot')
 	b.ensure_linuxroot_exists(sysroot)
-	obj_file := b.out_name_c + '.o'
+	obj_file := if b.pref.build_mode == .build_module {
+		b.pref.out_name
+	} else {
+		b.out_name_c + '.o'
+	}
 	cflags := b.get_os_cflags()
 	defines, others, libs := cflags.defines_others_libs()
 	mut cc_args := []string{cap: 20}
 	cc_args << '-w'
 	cc_args << '-fPIC'
-	cc_args << '-target x86_64-linux-gnu'
+	cc_args << '-target ${linux_cross_target.triple}'
 	cc_args << defines
 	cc_args << '-I ${os.quoted_path('${sysroot}/include')} '
 	cc_args << others
@@ -1448,13 +1683,16 @@ fn (mut b Builder) cc_linux_cross() {
 		verror(cc_res.output)
 		return
 	}
+	if b.pref.build_mode == .build_module {
+		return
+	}
 	// Compile compiler runtime builtins (provides __udivti3 etc. for 128-bit integer
 	// operations used by thirdparty code like mbedtls bignum.c, since the linuxroot
 	// sysroot doesn't include libgcc or compiler-rt).
 	builtins_src := os.join_path(@VEXEROOT, 'thirdparty', 'builtins', 'compiler_builtins.c')
-	builtins_obj := os.join_path(os.vtmp_dir(), 'compiler_builtins.o')
+	builtins_obj := os.join_path(os.vtmp_dir(), 'compiler_builtins_${linux_cross_target.lib_dir}.o')
 	if os.exists(builtins_src) {
-		builtins_cmd := '${b.quote_compiler_name(cc_name)} -w -fPIC -target x86_64-linux-gnu -o ${os.quoted_path(builtins_obj)} -c ${os.quoted_path(builtins_src)}'
+		builtins_cmd := '${b.quote_compiler_name(cc_name)} -w -fPIC -target ${linux_cross_target.triple} -o ${os.quoted_path(builtins_obj)} -c ${os.quoted_path(builtins_src)}'
 		builtins_res := os.execute(builtins_cmd)
 		if builtins_res.exit_code != 0 {
 			println('Warning: failed to compile compiler builtins for cross compilation.')
@@ -1462,16 +1700,16 @@ fn (mut b Builder) cc_linux_cross() {
 	}
 	mut linker_args := [
 		'-L',
-		os.quoted_path('${sysroot}/usr/lib/x86_64-linux-gnu/'),
+		os.quoted_path(os.join_path(sysroot, 'usr', 'lib', linux_cross_target.lib_dir)),
 		'-L',
-		os.quoted_path('${sysroot}/lib/x86_64-linux-gnu'),
+		os.quoted_path(os.join_path(sysroot, 'lib', linux_cross_target.lib_dir)),
 		'--sysroot=' + os.quoted_path(sysroot),
 		'-v',
 		'-o',
 		os.quoted_path(out_name),
-		'-m elf_x86_64',
+		'-m ${linux_cross_target.linker_emulation}',
 		'-dynamic-linker',
-		os.quoted_path('/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2'),
+		os.quoted_path(linux_cross_target.dynamic_linker),
 		os.quoted_path('${sysroot}/crt1.o'),
 		os.quoted_path('${sysroot}/crti.o'),
 		os.quoted_path(obj_file),
@@ -1686,7 +1924,10 @@ fn (mut c Builder) cc_windows_cross() {
 	all_args << debug_options
 
 	all_args << args
-	all_args << c.get_subsystem_flag()
+	subsystem_flag := c.get_subsystem_flag()
+	if subsystem_flag != '' {
+		all_args << subsystem_flag
+	}
 	all_args << c.pref.ldflags
 	c.dump_c_options(all_args)
 	mut cmd := cross_compiler_name_path + ' ' + all_args.join(' ')
@@ -1710,7 +1951,7 @@ fn (mut c Builder) cc_windows_cross() {
 fn (mut b Builder) build_thirdparty_obj_files() {
 	b.log('build_thirdparty_obj_files: v.ast.cflags: ${b.table.cflags}')
 	for flag in b.get_os_cflags() {
-		if flag.value.ends_with('.o') {
+		if flag.value.ends_with('.o') || flag.value.ends_with('.obj') {
 			rest_of_module_flags := b.get_rest_of_module_cflags(flag)
 			$if windows {
 				if b.pref.ccompiler == 'msvc' {
@@ -1745,6 +1986,22 @@ fn c_project_source_from_object_path(obj_path string) ?string {
 	return none
 }
 
+fn sqlite_thirdparty_validation_error(mod string, obj_path string, source_file string, source_kind SourceKind) string {
+	if mod != 'db.sqlite' || os.file_name(obj_path) != 'sqlite3.o'
+		|| os.base(os.dir(obj_path)) != 'sqlite'
+		|| os.base(os.dir(os.dir(obj_path))) != 'thirdparty' {
+		return ''
+	}
+	sqlite_dir := os.dir(obj_path)
+	if source_kind == .cpp && os.file_name(source_file) == 'sqlite3.cpp' {
+		return 'The `db.sqlite` module expects the SQLite amalgamation files `sqlite3.c` and `sqlite3.h` in `${sqlite_dir}`. Do not rename `sqlite3.c` to `sqlite3.cpp`; run `v vlib/db/sqlite/install_thirdparty_sqlite.vsh`, or download the SQLite amalgamation package and place those files there.'
+	}
+	if source_kind == .unknown {
+		return 'The `db.sqlite` module expects the SQLite amalgamation files `sqlite3.c` and `sqlite3.h` in `${sqlite_dir}`. Run `v vlib/db/sqlite/install_thirdparty_sqlite.vsh`, or download the SQLite amalgamation package and place those files there.'
+	}
+	return ''
+}
+
 fn (v &Builder) should_compile_bundled_thirdparty_object_from_source(obj_path string, source_file string, source_kind SourceKind) bool {
 	if source_kind == .unknown {
 		return false
@@ -1770,6 +2027,11 @@ fn (mut v Builder) build_thirdparty_obj_file(mod string, path string, moduleflag
 		SourceKind.asm
 	} else {
 		SourceKind.unknown
+	}
+	sqlite_validation_message := sqlite_thirdparty_validation_error(mod, obj_path, source_file,
+		source_kind)
+	if sqlite_validation_message != '' {
+		verror(sqlite_validation_message)
 	}
 	compile_bundled_source := v.should_compile_bundled_thirdparty_object_from_source(obj_path,
 		source_file, source_kind)
@@ -1813,7 +2075,7 @@ fn (mut v Builder) build_thirdparty_obj_file(mod string, path string, moduleflag
 	os.chdir(v.pref.vroot) or {}
 
 	cc_options := if source_kind == .asm {
-		'-o ${os.quoted_path(opath)} -c ${os.quoted_path(source_file)}'
+		'-o ${v.tcc_quoted_path(opath)} -c ${v.tcc_quoted_path(source_file)}'
 	} else {
 		mut all_options := []string{cap: 4}
 		all_options << v.pref.third_party_option
@@ -1821,7 +2083,7 @@ fn (mut v Builder) build_thirdparty_obj_file(mod string, path string, moduleflag
 		all_options << '-o ${v.tcc_quoted_path(opath)}'
 		all_options << '-c ${v.tcc_quoted_path(source_file)}'
 		cpp_file := source_kind == .cpp
-		v.thirdparty_object_args(v.ccoptions, all_options, cpp_file).join(' ')
+		v.thirdparty_object_args(v.ccoptions, all_options, cpp_file).map(v.tcc_windows_path_arg(it)).join(' ')
 	}
 
 	// If the third party object file requires a CPP file compilation, switch to a CPP compiler
@@ -1880,9 +2142,20 @@ fn is_tcc_compilation_failure(ccompiler string, cc_kind CC, output string) bool 
 		|| is_tcc_error_output(output)
 }
 
+fn is_tinyc_compiler_label(label string) bool {
+	return label.contains('tcc') || label.contains('tinyc') || label.contains('tinygcc')
+		|| label.contains('tiny_gcc') || label.contains('tiny-gcc')
+}
+
+fn is_tinyc_version_output(output string) bool {
+	return output.contains('tiny c compiler') || output.contains('tinycc')
+		|| output.contains('tinygcc') || output.contains('tiny_gcc') || output.contains('tiny-gcc')
+		|| output.contains('\ntcc') || output.starts_with('tcc')
+}
+
 fn is_tcc_compiler_name(ccompiler string) bool {
 	name := os.file_name(ccompiler).to_lower()
-	return name.starts_with('tcc') || name.starts_with('tinyc')
+	return is_tinyc_compiler_label(name)
 }
 
 fn is_tcc_error_output(output string) bool {
@@ -1899,8 +2172,7 @@ fn is_tcc_alias_compiler(ccompiler string) bool {
 		return false
 	}
 	lcc_version := cc_version.output.to_lower()
-	return lcc_version.contains('tiny c compiler') || lcc_version.contains('tinycc')
-		|| lcc_version.contains('\ntcc') || lcc_version.starts_with('tcc')
+	return is_tinyc_version_output(lcc_version)
 }
 
 fn ccompiler_is_available(ccompiler string) bool {

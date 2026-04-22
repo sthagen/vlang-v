@@ -1,5 +1,7 @@
 module json2
 
+import time
+
 // EncoderOptions provides a list of options for encoding
 @[params]
 pub struct EncoderOptions {
@@ -110,7 +112,7 @@ fn (mut encoder Encoder) encode_value[T](val T) {
 		}
 		encoder.output << `}`
 	} $else $if T.unaliased_typ is $enum {
-		if encoder.enum_as_int {
+		if encoder.enum_as_int || enum_uses_json_as_number[T]() {
 			encoder.encode_number(int(val))
 		} else {
 			mut enum_val := 'unknown enum value'
@@ -406,7 +408,7 @@ fn (mut encoder Encoder) encode_map[K, T](val map[K]T) {
 }
 
 fn (mut encoder Encoder) encode_enum[T](val T) {
-	if encoder.enum_as_int {
+	if encoder.enum_as_int || enum_uses_json_as_number[T]() {
 		encoder.encode_number(int(val))
 	} else {
 		mut enum_val := 'unknown enum value'
@@ -433,10 +435,63 @@ fn (mut encoder Encoder) encode_sumtype[T](val T) {
 	} $else {
 		$for variant in T.variants {
 			if val is variant {
-				encoder.encode_value(val)
+				variant_name := sumtype_variant_name(typeof(variant.typ).name)
+				$if variant.typ is time.Time {
+					encoder.encode_sumtype_time_variant(val, variant_name)
+				} $else $if variant.typ is $struct {
+					encoder.encode_sumtype_struct_variant(val, variant_name)
+				} $else {
+					encoder.encode_value(val)
+				}
 			}
 		}
 	}
+}
+
+fn (mut encoder Encoder) encode_object_key(is_first bool, key string) bool {
+	if is_first {
+		if encoder.prettify {
+			encoder.increment_level()
+		}
+	} else {
+		encoder.output << `,`
+	}
+	if encoder.prettify {
+		encoder.add_indent()
+	}
+	encoder.encode_string(key)
+	encoder.output << `:`
+	if encoder.prettify {
+		encoder.output << ` `
+	}
+	return false
+}
+
+fn (mut encoder Encoder) encode_sumtype_struct_variant[T](val T, variant_name string) {
+	encoder.output << `{`
+	mut is_first := unsafe { encoder.encode_struct_fields[T](val, true, [], '') }
+	is_first = encoder.encode_object_key(is_first, '_type')
+	encoder.encode_string(variant_name)
+	if encoder.prettify && !is_first {
+		encoder.decrement_level()
+		encoder.add_indent()
+	}
+	encoder.output << `}`
+}
+
+@[markused]
+fn (mut encoder Encoder) encode_sumtype_time_variant(val time.Time, variant_name string) {
+	encoder.output << `{`
+	mut is_first := true
+	is_first = encoder.encode_object_key(is_first, '_type')
+	encoder.encode_string(variant_name)
+	is_first = encoder.encode_object_key(is_first, 'value')
+	encoder.encode_number(val.unix())
+	if encoder.prettify && !is_first {
+		encoder.decrement_level()
+		encoder.add_indent()
+	}
+	encoder.output << `}`
 }
 
 struct EncoderFieldInfo {
@@ -445,6 +500,7 @@ struct EncoderFieldInfo {
 	is_skip      bool
 	is_omitempty bool
 	is_required  bool
+	is_json_null bool
 }
 
 fn get_value_from_optional[T](val ?T) T {
@@ -452,14 +508,18 @@ fn get_value_from_optional[T](val ?T) T {
 }
 
 fn check_not_empty[T](val T) ?bool {
-	$if val is string {
+	$if T.indirections != 0 {
+		return val != unsafe { nil }
+	} $else $if T.unaliased_typ is string {
 		if val == '' {
 			return false
 		}
-	} $else $if val is $int || val is $float {
+	} $else $if T.unaliased_typ is $int || T.unaliased_typ is $float {
 		if val == 0 {
 			return false
 		}
+	} $else $if T.unaliased_typ is $array || T.unaliased_typ is $map {
+		return val.len != 0
 	} $else $if val is ?string {
 		opt := ?string(val)
 		if sval := opt {
@@ -499,6 +559,7 @@ fn (mut encoder Encoder) cached_field_infos[T]() []EncoderFieldInfo {
 			mut key_name := ''
 			mut is_omitempty := false
 			mut is_required := false
+			mut is_json_null := false
 			for attr in field.attrs {
 				match attr {
 					'skip' {
@@ -510,6 +571,9 @@ fn (mut encoder Encoder) cached_field_infos[T]() []EncoderFieldInfo {
 					}
 					'required' {
 						is_required = true
+					}
+					'json_null' {
+						is_json_null = true
 					}
 					else {}
 				}
@@ -528,6 +592,7 @@ fn (mut encoder Encoder) cached_field_infos[T]() []EncoderFieldInfo {
 				is_skip:      is_skip
 				is_omitempty: is_omitempty
 				is_required:  is_required
+				is_json_null: is_json_null
 			}
 		}
 	}
@@ -566,6 +631,24 @@ fn struct_field_is_nil[T](val T) bool {
 	return false
 }
 
+fn struct_field_should_encode[T](field_info EncoderFieldInfo, val T) bool {
+	if field_info.is_skip {
+		return false
+	}
+	if field_info.is_omitempty {
+		if !(check_not_empty(val) or { false }) {
+			return false
+		}
+	}
+	if !field_info.is_required && !field_info.is_json_null && struct_field_is_none(val) {
+		return false
+	}
+	if struct_field_is_nil(val) {
+		return false
+	}
+	return true
+}
+
 @[unsafe]
 fn (mut encoder Encoder) encode_struct[T](val T) {
 	encoder.output << `{`
@@ -596,21 +679,7 @@ fn (mut encoder Encoder) encode_struct_fields[T](val T, was_first bool, old_used
 			$if field.typ is $shared {
 				shared field_value := unsafe { val.$(field.name) }
 				rlock field_value {
-					if field_info.is_skip {
-						write_field = false
-					} else {
-						if field_info.is_omitempty {
-							write_field = check_not_empty(field_value) or { false }
-						}
-
-						if !field_info.is_required && struct_field_is_none(field_value) {
-							write_field = false
-						}
-					}
-
-					if struct_field_is_nil(field_value) {
-						write_field = false
-					}
+					write_field = struct_field_should_encode(field_info, field_value)
 
 					if write_field {
 						if is_first {
@@ -641,25 +710,7 @@ fn (mut encoder Encoder) encode_struct_fields[T](val T, was_first bool, old_used
 					}
 				}
 			} $else {
-				if field_info.is_skip {
-					write_field = false
-				} else {
-					if field_info.is_omitempty {
-						$if field.typ is $option {
-							write_field = check_not_empty(val.$(field.name)) or { false }
-						} $else {
-							write_field = check_not_empty(val.$(field.name)) or { false }
-						}
-					}
-
-					if !field_info.is_required && struct_field_is_none(val.$(field.name)) {
-						write_field = false
-					}
-				}
-
-				if struct_field_is_nil(val.$(field.name)) {
-					write_field = false
-				}
+				write_field = struct_field_should_encode(field_info, val.$(field.name))
 
 				if write_field {
 					if is_first {

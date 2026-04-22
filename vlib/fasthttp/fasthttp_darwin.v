@@ -193,112 +193,6 @@ fn send_request_timeout(fd int) {
 	C.send(fd, status_408_response.data, status_408_response.len, 0)
 }
 
-// has_complete_body checks if a raw HTTP request buffer contains the full body
-// as indicated by the Content-Length or Transfer-Encoding headers. Returns true if:
-//   - there is no Content-Length header and no chunked encoding (body not expected)
-//   - Content-Length is 0
-//   - enough body bytes have been received
-//   - chunked encoding is complete (0\r\n\r\n terminator found)
-// Returns false only when more body data is expected.
-@[direct_array_access]
-fn has_complete_body(buf &u8, buf_len int) bool {
-	// Find end of headers: \r\n\r\n or \n\n
-	mut header_end := -1
-	for i := 0; i < buf_len - 1; i++ {
-		unsafe {
-			if buf[i] == `\n` {
-				if i + 1 < buf_len && buf[i + 1] == `\n` {
-					header_end = i + 2
-					break
-				}
-				if i + 2 < buf_len && buf[i + 1] == `\r` && buf[i + 2] == `\n` {
-					header_end = i + 3
-					break
-				}
-			}
-			if i + 3 < buf_len && buf[i] == `\r` && buf[i + 1] == `\n` && buf[i + 2] == `\r`
-				&& buf[i + 3] == `\n` {
-				header_end = i + 4
-				break
-			}
-		}
-	}
-	if header_end < 0 {
-		return false // headers not complete yet
-	}
-	// Check for Transfer-Encoding: chunked header (case-insensitive)
-	if has_chunked_transfer_encoding_in_buf(buf, header_end) {
-		// For chunked encoding, look for the terminating chunk: "\r\n0\r\n\r\n"
-		// (preceding chunk delimiter + zero-size chunk + empty trailer section)
-		// Also check for "0\r\n\r\n" right at the body start (degenerate empty-body case)
-		unsafe {
-			if buf_len >= header_end + 5 && buf[header_end] == `0` && buf[header_end + 1] == `\r`
-				&& buf[header_end + 2] == `\n` && buf[header_end + 3] == `\r`
-				&& buf[header_end + 4] == `\n` {
-				return true
-			}
-			if buf_len >= header_end + 7 {
-				for i := header_end; i <= buf_len - 7; i++ {
-					if buf[i] == `\r` && buf[i + 1] == `\n` && buf[i + 2] == `0`
-						&& buf[i + 3] == `\r` && buf[i + 4] == `\n` && buf[i + 5] == `\r`
-						&& buf[i + 6] == `\n` {
-						return true
-					}
-				}
-			}
-		}
-		return false
-	}
-	// Search for Content-Length header (case-insensitive)
-	// Look for "\nContent-Length:" or "\ncontent-length:" at start of a line
-	mut content_length := -1
-	for i := 0; i < header_end - 16; i++ {
-		unsafe {
-			if buf[i] != `\n` {
-				continue
-			}
-			// Start of a line — check for "Content-Length:"
-			mut pos := i + 1
-			// Skip optional \r after \n (for \r\n line endings)
-			cl_lower := 'content-length:'
-			if pos + cl_lower.len > header_end {
-				continue
-			}
-			mut matched := true
-			for j := 0; j < cl_lower.len; j++ {
-				mut ch := buf[pos + j]
-				// to lowercase
-				if ch >= `A` && ch <= `Z` {
-					ch = ch + 32
-				}
-				if ch != cl_lower[j] {
-					matched = false
-					break
-				}
-			}
-			if matched {
-				// Parse the number after "Content-Length: "
-				mut start := pos + cl_lower.len
-				for start < header_end && buf[start] == ` ` {
-					start++
-				}
-				mut val := 0
-				for start < header_end && buf[start] >= `0` && buf[start] <= `9` {
-					val = val * 10 + int(buf[start] - `0`)
-					start++
-				}
-				content_length = val
-				break
-			}
-		}
-	}
-	if content_length <= 0 {
-		return true // no content-length or zero: body complete
-	}
-	body_received := buf_len - header_end
-	return body_received >= content_length
-}
-
 // chunked_body_complete checks whether the combined read_buf + read_extra
 // data ends with the chunked transfer encoding terminator \r\n0\r\n\r\n.
 @[direct_array_access]
@@ -423,33 +317,48 @@ fn (c &Conn) get_full_request_data() []u8 {
 fn handle_read(server Server, kq int, c_ptr voidptr, mut clients map[int]voidptr) {
 	mut c := unsafe { &Conn(c_ptr) }
 
-	// Read into fixed buffer or dynamic overflow
-	if c.read_len < buf_size {
-		n := C.recv(c.fd, &c.read_buf[c.read_len], buf_size - c.read_len, 0)
-		if n <= 0 {
-			if n < 0 && C.errno != C.EAGAIN && C.errno != C.EWOULDBLOCK {
+	// Drain the socket for this kqueue notification. EV_CLEAR only rearms once
+	// all readable data has been consumed.
+	for {
+		if c.read_len < buf_size {
+			n := C.recv(c.fd, &c.read_buf[c.read_len], buf_size - c.read_len, 0)
+			if n < 0 {
+				if C.errno == C.EAGAIN || C.errno == C.EWOULDBLOCK {
+					break
+				}
 				C.send(c.fd, status_444_response.data, status_444_response.len, 0)
 				close_conn(server, kq, c_ptr, mut clients)
 				return
 			}
-			close_conn(server, kq, c_ptr, mut clients)
-			return
-		}
-		c.read_len += int(n)
-	} else {
-		// Fixed buffer is full, read into dynamic overflow
-		mut tmp := []u8{len: 65536}
-		n := C.recv(c.fd, tmp.data, tmp.len, 0)
-		if n <= 0 {
-			if n < 0 && C.errno != C.EAGAIN && C.errno != C.EWOULDBLOCK {
+			if n == 0 {
+				if c.total_read_len() == 0 {
+					close_conn(server, kq, c_ptr, mut clients)
+					return
+				}
+				break
+			}
+			c.read_len += int(n)
+		} else {
+			// Fixed buffer is full, read the rest into dynamic overflow.
+			mut tmp := []u8{len: 65536}
+			n := C.recv(c.fd, tmp.data, tmp.len, 0)
+			if n < 0 {
+				if C.errno == C.EAGAIN || C.errno == C.EWOULDBLOCK {
+					break
+				}
 				C.send(c.fd, status_444_response.data, status_444_response.len, 0)
 				close_conn(server, kq, c_ptr, mut clients)
 				return
 			}
-			close_conn(server, kq, c_ptr, mut clients)
-			return
+			if n == 0 {
+				if c.total_read_len() == 0 {
+					close_conn(server, kq, c_ptr, mut clients)
+					return
+				}
+				break
+			}
+			c.read_extra << tmp[..int(n)]
 		}
-		c.read_extra << tmp[..int(n)]
 	}
 
 	total := c.total_read_len()
@@ -457,12 +366,16 @@ fn handle_read(server Server, kq int, c_ptr voidptr, mut clients map[int]voidptr
 		return
 	}
 
-	// For non-chunked requests, enforce the fixed buffer size limit
-	if total >= buf_size && c.read_extra.len == 0 && !has_chunked_transfer_encoding_in_buf(&c.read_buf[0], if c.read_len < buf_size {
-		c.read_len
+	// Enforce the configured header limit without capping large request bodies.
+	mut header_end := -1
+	if c.read_extra.len > 0 {
+		full_data := c.get_full_request_data()
+		header_end = find_header_end_in_buf(full_data.data, full_data.len)
 	} else {
-		buf_size
-	}) {
+		header_end = find_header_end_in_buf(&c.read_buf[0], c.read_len)
+	}
+	if (header_end == -1 && total >= server.max_request_buffer_size)
+		|| header_end > server.max_request_buffer_size {
 		C.send(c.fd, status_413_response.data, status_413_response.len, 0)
 		close_conn(server, kq, c_ptr, mut clients)
 		return
@@ -496,8 +409,7 @@ fn handle_read(server Server, kq int, c_ptr voidptr, mut clients map[int]voidptr
 				return
 			}
 		} else {
-			// Non-chunked large request shouldn't happen (413 was sent above)
-			// but handle gracefully
+			// Non-chunked large requests spill into the dynamic overflow buffer too.
 			full_data := c.get_full_request_data()
 			if !has_complete_body(full_data.data, full_data.len) {
 				elapsed_ns := time.sys_mono_now() - c.read_start

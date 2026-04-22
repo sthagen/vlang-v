@@ -41,7 +41,7 @@ cd v
 make
 ```
 
-Note: If you are on windows, outside of WSL, run `make.bat` instead of `make`, in a CMD shell.
+Note: If you are on windows, outside of WSL, run `makev.bat` instead of `make`, in a CMD shell.
 Note: On Ubuntu/Debian, you may need to run `sudo apt install git build-essential make` first.
 
 For more details, see the
@@ -1356,6 +1356,10 @@ memory location when the size increases thus becoming independent from the
 parent array (*copy on grow*). In particular pushing elements to a slice
 does not alter the parent:
 
+When a slice expression like `a[2..4]` is assigned to another array outside
+`unsafe`, V inserts an implicit `.clone()` and shows a notice. The
+shared-memory examples below therefore use `unsafe {}` intentionally.
+
 ```v
 mut a := [0, 1, 2, 3, 4, 5]
 
@@ -1406,8 +1410,9 @@ println(b) // [7, 3]
 ```
 
 Note that, by default, V makes an implicit clone of the slice and displays a notice about this.
-So without the `.clone()` call the result of the code above will be the same. Make the slice in an
-`unsafe {}` block if you want to reuse memory, otherwise use explicit cloning.
+So without the `.clone()` call the result of the code above will be the same.
+Make the slice in an `unsafe {}` block if you want to reuse memory,
+otherwise use explicit cloning.
 
 ##### Slices with negative indexes
 
@@ -1528,6 +1533,25 @@ It's also possible to use an `or {}` block to handle missing keys:
 ```v
 mm := map[string]int{}
 val := mm['bad_key'] or { panic('key not found') }
+```
+
+Modules can opt into stricter map indexing:
+
+```v
+@[strict_map_index]
+module main
+
+fn main() {
+	m := {
+		'abc': 'xyz'
+	}
+	value := m['abc'] or { panic('missing map key') }
+	if other := m['abc'] {
+		println(other)
+	}
+	// m['bad_key'] // compile error in `@[strict_map_index]` modules
+	println(value)
+}
 ```
 
 You can also check, if a key is present, and get its value, if it was present, in one go:
@@ -3634,8 +3658,25 @@ fn main() {
 * Module names must use `snake_case`.
 * Circular imports are not allowed.
 * You can have as many .v files in a module as you want.
-* You can create modules anywhere.
+* You can create modules anywhere under a valid V module lookup root.
 * All modules are compiled statically into a single executable.
+
+In normal projects, the nearest `v.mod` file is that lookup root.
+Besides package metadata, `v.mod` also acts as a relative module anchor:
+V prepends the folder containing `v.mod` to the module lookup path, so
+files beside or below it can import sibling modules under the same tree.
+
+For example, this layout works:
+
+```text
+myapp/
+├── v.mod
+├── main.v
+└── myapp/common/structs.v
+```
+
+`main.v` can use `import myapp.common`, and `structs.v` should still
+declare `module common`.
 
 ### Special considerations for project folders
 
@@ -5999,6 +6040,10 @@ fn main() {
 A V *module* is a single folder with .v files inside. A V *package* can
 contain one or more V modules. A V *package* should have a `v.mod` file
 at its top folder, describing the contents of the package.
+
+That `v.mod` file is also the package's relative module anchor. When V
+compiles a file beside or below it, imports are resolved relative to the
+folder containing `v.mod`.
 
 V packages are installed normally in your `~/.vmodules` folder. That
 location can be overridden by setting the env variable `VMODULES`.

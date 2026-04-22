@@ -25,8 +25,7 @@ fn run_v_ok(command string) string {
 
 fn test_conditional_executable_removal() {
 	os.chdir(test_path)!
-	os.mkdir_all('src')!
-	os.write_file('src/main.v', 'fn main(){\n\tprintln("Hello World!")\n}\n')!
+	os.write_file('main.v', 'fn main(){\n\tprintln("Hello World!")\n}\n')!
 
 	mut executable := 'run_check'
 	$if windows {
@@ -93,57 +92,6 @@ pub struct BS{}
 	assert os.execute('./${executable}').output.trim_space() == 'AS{}=>BS{}'
 }
 
-fn test_run_explicit_src_directory_uses_project_root_lookup() {
-	os.chdir(test_path)!
-	project_dir := os.join_path(test_path, 'run_src_project')
-	defer {
-		os.chdir(test_path) or {}
-	}
-	os.mkdir_all(os.join_path(project_dir, 'src'))!
-	os.mkdir_all(os.join_path(project_dir, 'modules', 'somemoduletwo'))!
-	os.write_file(os.join_path(project_dir, 'src', 'main.v'), 'module main
-import somemoduletwo
-
-fn main() {
-	println(somemoduletwo.name())
-}
-')!
-	os.write_file(os.join_path(project_dir, 'modules', 'somemoduletwo', 'somemoduletwo.v'), 'module somemoduletwo
-
-pub fn name() string {
-	return "somemoduletwo"
-}
-')!
-	os.chdir(project_dir)!
-	assert run_v_ok('${os.quoted_path(vexe)} run src').trim_space() == 'somemoduletwo'
-	assert run_v_ok('${os.quoted_path(vexe)} run ./src').trim_space() == 'somemoduletwo'
-}
-
-fn test_run_explicit_main_file_inside_src_resolves_nested_module_imports() {
-	os.chdir(test_path)!
-	project_dir := os.join_path(test_path, 'run_src_main_file_project')
-	os.mkdir_all(os.join_path(project_dir, 'src', 'infrastructure', 'database'))!
-	os.write_file(os.join_path(project_dir, 'src', 'infrastructure', 'database', 'database.v'), 'module database
-
-pub fn name() string {
-	return "database"
-}
-')!
-	os.write_file(os.join_path(project_dir, 'src', 'infrastructure', 'infrastructure.v'), 'module infrastructure
-')!
-	os.write_file(os.join_path(project_dir, 'src', 'main.v'), 'module main
-
-import infrastructure.database
-
-fn main() {
-	println(database.name())
-}
-')!
-
-	main_file := os.join_path('run_src_main_file_project', 'src', 'main.v')
-	assert run_v_ok('${os.quoted_path(vexe)} run ${os.quoted_path(main_file)}').trim_space() == 'database'
-}
-
 fn test_run_custom_base_url_uses_project_root_lookup() {
 	os.chdir(test_path)!
 	project_dir := os.join_path(test_path, 'run_base_url_project')
@@ -178,6 +126,27 @@ pub fn name() string {
 	assert run_v_ok('${os.quoted_path(vexe)} run .').trim_space() == 'foo+dep'
 	assert run_v_ok('${os.quoted_path(vexe)} run source').trim_space() == 'foo+dep'
 	assert run_v_ok('${os.quoted_path(vexe)} run ./source').trim_space() == 'foo+dep'
+}
+
+fn test_removed_src_layout_error_mentions_vmod_subdirs() {
+	os.chdir(test_path)!
+	project_dir := os.join_path(test_path, 'run_removed_src_project')
+	defer {
+		os.chdir(test_path) or {}
+	}
+	os.mkdir_all(os.join_path(project_dir, 'src'))!
+	os.write_file(os.join_path(project_dir, 'src', 'main.v'),
+		'fn main() {\n\tprintln("Hello from src")\n}\n')!
+	os.chdir(project_dir)!
+
+	res := os.execute('${os.quoted_path(vexe)} run .')
+	normalized_output := res.output.replace('\r\n', '\n')
+
+	assert res.exit_code != 0
+	assert normalized_output.contains('the virtual `src/` module directory is no longer supported.')
+	assert !normalized_output.contains('base_url')
+	assert normalized_output.contains('add `subdirs` to v.mod')
+	assert normalized_output.contains("subdirs: ['admin', 'repo', 'commit', 'ci', 'security', 'ssh', 'user']")
 }
 
 fn test_thirdparty_object_build_with_multiline_cflags() {
