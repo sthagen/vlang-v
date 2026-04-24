@@ -10,6 +10,21 @@ fn (c &Checker) can_be_embedded_in_struct(typ ast.Type) bool {
 	return c.table.final_sym(typ).kind in [.struct, .function]
 }
 
+fn (c &Checker) is_opaque_c_typedef_struct_alias(typ ast.Type) bool {
+	sym := c.table.sym(typ)
+	if sym.kind != .alias {
+		return false
+	}
+	final_sym := c.table.final_sym(typ)
+	if final_sym.language != .c || final_sym.kind != .struct {
+		return false
+	}
+	if final_sym.info is ast.Struct {
+		return final_sym.info.is_typedef && final_sym.info.is_empty_struct()
+	}
+	return false
+}
+
 fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 	util.timing_start(@METHOD)
 	defer {
@@ -33,6 +48,20 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 
 		if node.language == .v && !c.is_builtin_mod && !struct_sym.info.is_anon {
 			c.check_valid_pascal_case(node.name, 'struct name', node.pos)
+		}
+		if node.language == .v {
+			for embed in node.embeds {
+				embed_typ := c.table.unaliased_type(embed.typ)
+				if embed_typ.is_ptr() || embed_typ.has_flag(.option) {
+					continue
+				}
+				embed_sym := c.table.sym(embed_typ)
+				if embed_sym.name == struct_sym.name
+					|| c.table.has_deep_child_no_ref(embed_sym, struct_sym.name) {
+					c.error('invalid recursive struct `${node.name}`', node.pos)
+					break
+				}
+			}
 		}
 		for embed in node.embeds {
 			// gotodef for embedded struct types
@@ -193,6 +222,14 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 				c.error('struct field does not support storing Result', field.option_pos)
 			}
 			if !c.ensure_type_exists(field.typ, field.type_pos) {
+				continue
+			}
+			if node.language == .v && !field.typ.is_ptr()
+				&& c.is_opaque_c_typedef_struct_alias(field.typ) {
+				field_typ := c.table.type_to_str(field.typ)
+				ref_typ := c.table.type_to_str(field.typ.clear_option_and_result().set_nr_muls(1))
+				c.error('cannot use opaque C struct `${field_typ}` as a non-reference struct field; use `${ref_typ}` instead',
+					field.type_pos)
 				continue
 			}
 			// gotodef for struct field types
@@ -1076,6 +1113,11 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 							pos:     init_field.expr.pos()
 						}
 						init_field.typ = exp_type
+					} else if c.has_direct_numeric_alias_struct_init_mismatch(init_field.expr,
+						got_type, exp_type)
+					{
+						c.error('cannot assign to field `${field_info.name}`: ${c.expected_msg(got_type,
+							exp_type)}', init_field.pos)
 					} else {
 						c.check_expected(c.unwrap_generic(got_type), c.unwrap_generic(exp_type)) or {
 							// For generic types, the same concrete type may have been
@@ -1288,6 +1330,22 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 		}
 	}
 	return node.typ
+}
+
+fn (c &Checker) has_direct_numeric_alias_struct_init_mismatch(expr ast.Expr, got ast.Type, expected ast.Type) bool {
+	if expr.remove_par() !is ast.Ident && expr.remove_par() !is ast.SelectorExpr {
+		return false
+	}
+	got_sym := c.table.sym(got)
+	if got_sym.kind != .alias || got_sym.info !is ast.Alias {
+		return false
+	}
+	got_num_type := c.table.unalias_num_type(got).clear_flags()
+	expected_num_type := c.table.unalias_num_type(expected).clear_flags()
+	if !got_num_type.is_number() || !expected_num_type.is_number() {
+		return false
+	}
+	return c.promote_num(expected_num_type, got_num_type) != expected_num_type
 }
 
 // Check uninitialized refs/sum types

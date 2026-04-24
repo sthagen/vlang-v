@@ -60,6 +60,15 @@ fn (mut g Gen) struct_init(node ast.StructInit) {
 		node.typ
 	}
 	mut sym := g.table.final_sym(unwrapped_typ)
+	old_cur_struct_init_typ := g.cur_struct_init_typ
+	if node.typ != 0 {
+		g.cur_struct_init_typ = node.typ
+	}
+	g.zero_struct_init_stack << g.zero_struct_init_type(struct_init_typ)
+	defer {
+		g.cur_struct_init_typ = old_cur_struct_init_typ
+		g.zero_struct_init_stack.delete_last()
+	}
 	if sym.kind == .sum_type {
 		if unwrapped_typ.is_ptr() {
 			// handle promotions to a sumtype for generic functions like this one: `fn (d Struct) a[T]() T { return d }`
@@ -289,34 +298,57 @@ fn (mut g Gen) struct_init(node ast.StructInit) {
 				embed_sym := g.table.sym(embed)
 				embed_name := embed_sym.embed_name()
 				if embed_name !in inited_fields {
-					embed_info := if embed_sym.info is ast.Struct {
-						embed_sym.info
+					mut embed_info := ast.Struct{}
+					mut has_embed_struct_info := false
+					if embed_sym.info is ast.Struct {
+						embed_info = embed_sym.info
+						has_embed_struct_info = true
 					} else {
-						g.table.final_sym(embed).info as ast.Struct
+						final_embed_sym := g.table.final_sym(embed)
+						if final_embed_sym.info is ast.Struct {
+							embed_info = final_embed_sym.info
+							has_embed_struct_info = true
+						}
 					}
-					embed_field_names := embed_info.fields.map(it.name)
-					fields_to_embed := init_fields_to_embed.filter(it.name !in used_embed_fields
-						&& it.name in embed_field_names)
-					used_embed_fields << fields_to_embed.map(it.name)
-					default_init := ast.StructInit{
-						...node
-						typ:             embed
-						is_update_embed: true
-						init_fields:     init_fields_to_embed
-					}
-					inside_cast_in_heap := g.inside_cast_in_heap
-					g.inside_cast_in_heap = 0 // prevent use of pointers in child structs
+					if has_embed_struct_info {
+						embed_field_names := embed_info.fields.map(it.name)
+						fields_to_embed := init_fields_to_embed.filter(
+							it.name !in used_embed_fields && it.name in embed_field_names)
+						used_embed_fields << fields_to_embed.map(it.name)
+						default_init := ast.StructInit{
+							...node
+							typ:             embed
+							is_update_embed: true
+							init_fields:     init_fields_to_embed
+						}
+						inside_cast_in_heap := g.inside_cast_in_heap
+						g.inside_cast_in_heap = 0 // prevent use of pointers in child structs
 
-					g.write('.${embed_name} = ')
-					g.struct_init(default_init)
+						g.write('.${embed_name} = ')
+						g.struct_init(default_init)
 
-					g.inside_cast_in_heap = inside_cast_in_heap // restore value for further struct inits
-					if is_multiline {
-						g.writeln(',')
+						g.inside_cast_in_heap = inside_cast_in_heap // restore value for further struct inits
+						if is_multiline {
+							g.writeln(',')
+						} else {
+							g.write(',')
+						}
+						initialized = true
 					} else {
-						g.write(',')
+						// Embedded fn/interface/alias fields do not have child fields to recurse into.
+						if g.zero_struct_field(ast.StructField{
+							name: embed_name
+							typ:  embed
+						})
+						{
+							if is_multiline {
+								g.writeln(',')
+							} else {
+								g.write(',')
+							}
+							initialized = true
+						}
 					}
-					initialized = true
 				}
 			}
 			g.is_shared = old_is_shared2
@@ -632,6 +664,27 @@ fn (mut g Gen) init_shared_field(field ast.StructField) {
 	g.write('}, sizeof(${shared_styp}))')
 }
 
+fn (mut g Gen) zero_struct_init_type(typ ast.Type) ast.Type {
+	mut resolved_typ := g.unwrap_generic(g.recheck_concrete_type(typ))
+	if resolved_typ == 0 {
+		resolved_typ = typ
+	}
+	return resolved_typ.clear_option_and_result().clear_flag(.shared_f).clear_flag(.atomic_f)
+}
+
+fn (mut g Gen) zero_struct_init_would_recurse(typ ast.Type) bool {
+	resolved_typ := g.zero_struct_init_type(typ)
+	return resolved_typ in g.zero_struct_init_stack
+}
+
+fn (mut g Gen) write_zero_struct_init(default_init ast.StructInit) {
+	if g.zero_struct_init_would_recurse(default_init.typ) {
+		g.write(g.type_default(default_init.typ))
+		return
+	}
+	g.struct_init(default_init)
+}
+
 fn (mut g Gen) zero_struct_field(field ast.StructField) bool {
 	old_inside_cast_in_heap := g.inside_cast_in_heap
 	g.inside_cast_in_heap = 0
@@ -677,7 +730,7 @@ fn (mut g Gen) zero_struct_field(field ast.StructField) bool {
 						g.expr_with_tmp_var(default_init, field.typ, field.typ, tmp_var, true)
 					}
 				} else {
-					g.struct_init(default_init)
+					g.write_zero_struct_init(default_init)
 				}
 				return true
 			} else if sym.language == .v && !field.typ.is_ptr() && sym.mod != 'builtin'
@@ -686,7 +739,7 @@ fn (mut g Gen) zero_struct_field(field ast.StructField) bool {
 					typ: field.typ
 				}
 				g.write('.${field_name} = ')
-				g.struct_init(default_init)
+				g.write_zero_struct_init(default_init)
 				return true
 			}
 		}
@@ -743,7 +796,7 @@ fn (mut g Gen) zero_struct_field(field ast.StructField) bool {
 	} else if field.typ.has_flag(.option) {
 		g.gen_option_error(field.typ, ast.None{})
 		return true
-	} else if sym.info is ast.SumType {
+	} else if sym.info is ast.SumType && !field.typ.is_any_kind_of_pointer() {
 		g.write(g.type_default_sumtype(field.typ, sym))
 		return true
 	} else if sym.info is ast.ArrayFixed {

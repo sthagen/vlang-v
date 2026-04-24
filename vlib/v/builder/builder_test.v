@@ -1,6 +1,8 @@
 module main
 
 import os
+import v.builder
+import v.pref
 
 const vexe = @VEXE
 const test_path = os.join_path(os.vtmp_dir(), 'run_check')
@@ -51,6 +53,29 @@ fn test_conditional_executable_removal() {
 	after_second_run___ := os.ls(test_path)!
 	dump(after_second_run___)
 	assert executable in after_second_run___
+}
+
+fn test_run_from_workdir_with_spaces() {
+	project_dir := os.join_path(test_path, 'issue 16501 path with spaces')
+	os.rmdir_all(project_dir) or {}
+	os.mkdir_all(project_dir)!
+	defer {
+		os.chdir(test_path) or {}
+		os.rmdir_all(project_dir) or {}
+	}
+	os.write_file(os.join_path(project_dir, 'main.v'),
+		'fn main(){\n\tprintln("Hello from a spaced path")\n}\n')!
+	os.write_file(os.join_path(project_dir, 'Test.vsh'),
+		"println('Hello from a spaced script path')\n")!
+	os.chdir(project_dir)!
+
+	run_file_res := os.execute('${os.quoted_path(vexe)} run Test.vsh')
+	assert run_file_res.exit_code == 0, run_file_res.output
+	assert run_file_res.output.trim_space() == 'Hello from a spaced script path'
+
+	run_dir_res := os.execute('${os.quoted_path(vexe)} run .')
+	assert run_dir_res.exit_code == 0, run_dir_res.output
+	assert run_dir_res.output.trim_space() == 'Hello from a spaced path'
 }
 
 fn test_file_list() {
@@ -128,6 +153,23 @@ pub fn name() string {
 	assert run_v_ok('${os.quoted_path(vexe)} run ./source').trim_space() == 'foo+dep'
 }
 
+fn test_empty_local_dir_does_not_shadow_vlib_module() {
+	os.chdir(test_path)!
+	project_dir := os.join_path(test_path, 'run_empty_local_module_dir')
+	defer {
+		os.chdir(test_path) or {}
+	}
+	os.mkdir_all(os.join_path(project_dir, 'os'))!
+	os.write_file(os.join_path(project_dir, 'main.v'),
+		"module main\n\nimport os\n\nfn main() {\n\tprintln(os.is_dir('.'))\n}\n")!
+	os.chdir(project_dir)!
+
+	res := os.execute('${os.quoted_path(vexe)} run main.v')
+
+	assert res.exit_code == 0, res.output
+	assert res.output.trim_space() == 'true'
+}
+
 fn test_removed_src_layout_error_mentions_vmod_subdirs() {
 	os.chdir(test_path)!
 	project_dir := os.join_path(test_path, 'run_removed_src_project')
@@ -186,6 +228,57 @@ fn test_missing_library_is_reported_without_compiler_bug_hint() {
 	assert !normalized_output.contains('This is a V compiler bug')
 }
 
+fn test_windows_host_c_compiler_probe_is_skipped_for_non_windows_targets() {
+	assert builder.should_find_windows_host_c_compiler(&pref.Preferences{
+		backend: .c
+		os:      .windows
+	})
+	assert !builder.should_find_windows_host_c_compiler(&pref.Preferences{
+		backend: .c
+		os:      .linux
+	})
+	assert !builder.should_find_windows_host_c_compiler(&pref.Preferences{
+		backend:        .c
+		os:             .windows
+		output_cross_c: true
+	})
+	assert !builder.should_find_windows_host_c_compiler(&pref.Preferences{
+		backend: .js_browser
+		os:      .windows
+	})
+}
+
+fn test_message_limit_notices_do_not_fail_build() {
+	os.chdir(test_path)!
+	src_file := os.join_path(test_path, 'message_limit_notices.v')
+	mut exe_file := os.join_path(test_path, 'message_limit_notices')
+	$if windows {
+		exe_file += '.exe'
+	}
+
+	mut lines := []string{}
+	for i in 0 .. 10 {
+		lines << '@[deprecated]'
+		lines << "@[deprecated_after: '3000-12-30']"
+		lines << 'fn future_${i}() {}'
+	}
+	lines << 'fn main() {'
+	for i in 0 .. 10 {
+		lines << '\tfuture_${i}()'
+	}
+	lines << '}'
+	os.write_file(src_file, lines.join('\n') + '\n')!
+
+	res :=
+		os.execute('${os.quoted_path(vexe)} -stats -message-limit 5 -o ${os.quoted_path(exe_file)} ${os.quoted_path(src_file)}')
+	normalized_output := res.output.replace('\r\n', '\n')
+
+	assert res.exit_code == 0, normalized_output
+	assert os.exists(exe_file), normalized_output
+	assert !normalized_output.contains('builder error: too many errors/warnings/notices')
+	assert normalized_output.contains('checker summary: 0 V errors, 0 V warnings, 10 V notices'), normalized_output
+}
+
 fn test_run_with_obscure_source_filenames() {
 	if os.user_os() == 'windows' {
 		return
@@ -224,4 +317,16 @@ fn test_macos_2048_build_does_not_force_deployment_target() {
 	flags_output := run_v_ok('${os.quoted_path(vexe)} -dump-c-flags - ${os.quoted_path(game_path)}')
 	assert flags_output.contains('-fobjc-arc')
 	assert !flags_output.contains('-mmacosx-version-min=')
+}
+
+fn test_macos_arch_flag_is_forwarded_to_c_compiler() {
+	$if !macos {
+		return
+	}
+	src_file := os.join_path(test_path, 'macos_arch_forwarding.v')
+	out_file := os.join_path(test_path, 'macos_arch_forwarding')
+	os.write_file(src_file, 'fn main() {\n\tprintln("hello")\n}\n')!
+	flags_output :=
+		run_v_ok('${os.quoted_path(vexe)} -gc none -showcc -skip-running -arch amd64 -o ${os.quoted_path(out_file)} ${os.quoted_path(src_file)}')
+	assert flags_output.contains('-arch x86_64')
 }

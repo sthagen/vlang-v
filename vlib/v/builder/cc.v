@@ -27,6 +27,8 @@ const missing_libatomic_markers = [
 	'library not found for -latomic',
 	'cannot find libatomic',
 ]!
+const max_cross_sysroot_git_symlink_depth = 32
+const max_cross_sysroot_git_symlink_placeholder_size = 256
 
 fn live_windows_import_lib_path(source_path string) string {
 	cache_dir := os.join_path(os.cache_dir(), 'v', 'live')
@@ -80,6 +82,15 @@ fn c_output_suggests_missing_header_for_typedef_c_struct(c_output string, known_
 				|| lower_line.contains('does not name a type')) {
 				return known_typedef_c_struct_aliases[name]
 			}
+			if name.contains('__')
+				&& (lower_line.contains('expected (got') || lower_line.contains('unknown type name')
+				|| lower_line.contains('undeclared identifier')
+				|| lower_line.contains('does not name a type')) {
+				suffix := name.all_after_last('__')
+				if suffix in known_typedef_c_structs {
+					return suffix
+				}
+			}
 		}
 	}
 	return ''
@@ -97,6 +108,11 @@ fn c_output_suggests_missing_typedef_for_c_struct(c_output string, known_non_typ
 			continue
 		}
 		lower_line := line.to_lower()
+		if lower_line.contains('has no member named') && (lower_line.contains("aka 'struct ")
+			|| lower_line.contains('aka `struct ')
+			|| lower_line.contains('aka "struct ')) {
+			return name
+		}
 		if lower_line.contains('forward declaration of') {
 			if name in incomplete {
 				return name
@@ -470,6 +486,21 @@ fn ccompiler_type_from_name(ccompiler string) ?pref.CompilerType {
 	return if ok { resolved } else { none }
 }
 
+fn ccompiler_type_from_resolved_path(ccompiler string) ?pref.CompilerType {
+	ccompiler_path := if os.exists(ccompiler) {
+		ccompiler
+	} else {
+		os.find_abs_path_of_executable(ccompiler) or { return none }
+	}
+	$if macos {
+		if ccompiler_path == '/usr/bin/cc' {
+			return pref.CompilerType.clang
+		}
+	}
+	resolved, ok := ccompiler_type_from_name_with_ok(os.real_path(ccompiler_path))
+	return if ok { resolved } else { none }
+}
+
 fn ccompiler_type_from_version_output_with_ok(output string) (pref.CompilerType, bool) {
 	if output == '' {
 		return pref.CompilerType.tinyc, false
@@ -505,6 +536,9 @@ fn resolve_ccompiler_type(ccompiler string, fallback pref.CompilerType) pref.Com
 	if name_ok {
 		return resolved_by_name
 	}
+	if resolved_by_path := ccompiler_type_from_resolved_path(ccompiler) {
+		return resolved_by_path
+	}
 	quoted_ccompiler := os.quoted_path(ccompiler)
 	for version_flag in ['--version', '-v'] {
 		res := os.execute('${quoted_ccompiler} ${version_flag} 2>&1')
@@ -514,6 +548,17 @@ fn resolve_ccompiler_type(ccompiler string, fallback pref.CompilerType) pref.Com
 		}
 	}
 	return fallback
+}
+
+fn darwin_target_arch_name(arch pref.Arch) string {
+	return match arch {
+		.amd64 { 'x86_64' }
+		.arm64 { 'arm64' }
+		.i386 { 'i386' }
+		.ppc { 'ppc' }
+		.ppc64 { 'ppc64' }
+		else { '' }
+	}
 }
 
 fn cc_from_pref_ccompiler_type(cc_type pref.CompilerType) CC {
@@ -586,6 +631,12 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 	}
 	if ccoptions.cc == .unknown {
 		eprintln('Compilation with unknown C compiler `${cc_file_name}`')
+	}
+	if v.pref.os == .macos {
+		darwin_target_arch := darwin_target_arch_name(v.pref.arch)
+		if darwin_target_arch != '' {
+			ccoptions.args << ['-arch', darwin_target_arch]
+		}
 	}
 
 	// Add -fwrapv to handle UB overflows
@@ -808,9 +859,19 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 			ccoptions.source_args << '-x objective-c'
 		}
 	}
+	// Newer Windows runner images can surface short paths with an uppercase `.C` suffix,
+	// which makes GCC/Clang compile the generated V C file as C++ unless we force C mode.
+	force_generated_c_language := v.pref.os == .windows && !v.pref.parallel_cc
+		&& ccoptions.cc in [.gcc, .clang, .emcc]
+	if force_generated_c_language {
+		ccoptions.source_args << '-x c'
+	}
 	// The C file we are compiling
 	if !v.pref.parallel_cc { // parallel_cc uses its own split up c files
 		ccoptions.source_args << v.tcc_quoted_path(v.out_name_c)
+	}
+	if force_generated_c_language {
+		ccoptions.source_args << '-x none'
 	}
 	// Min macos version is mandatory I think?
 	if v.pref.os == .macos {
@@ -1588,6 +1649,13 @@ fn (mut b Builder) ensure_linuxroot_exists(sysroot string) {
 		}
 		os.chmod(os.join_path(sysroot, 'ld.lld'), 0o755) or { panic(err) }
 	}
+	repaired := repair_cross_sysroot_git_symlink_placeholders(sysroot) or {
+		verror('Failed to repair `${sysroot}` symlink placeholders: ${err}')
+		return
+	}
+	if repaired > 0 {
+		println('Materialized ${repaired} Git symlink placeholder files in ${os.quoted_path(sysroot)}.')
+	}
 }
 
 fn (mut b Builder) ensure_freebsdroot_exists(sysroot string) {
@@ -1603,6 +1671,135 @@ fn (mut b Builder) ensure_freebsdroot_exists(sysroot string) {
 		if !os.exists(sysroot_git_config_path) {
 			verror('Failed to clone `${crossrepo_url}` to `${sysroot}`')
 		}
+	}
+	repaired := repair_cross_sysroot_git_symlink_placeholders(sysroot) or {
+		verror('Failed to repair `${sysroot}` symlink placeholders: ${err}')
+		return
+	}
+	if repaired > 0 {
+		println('Materialized ${repaired} Git symlink placeholder files in ${os.quoted_path(sysroot)}.')
+	}
+}
+
+fn git_repo_tracked_symlink_paths(repo string) ![]string {
+	git_cmd := 'git -C ${os.quoted_path(repo)} ls-files -s'
+	res := os.execute(git_cmd)
+	if res.exit_code != 0 {
+		return error('`${git_cmd}` failed: ${res.output.trim_space()}')
+	}
+	mut paths := []string{}
+	for line in res.output.split_into_lines() {
+		if !line.starts_with('120000 ') || line.index_u8(`\t`) == -1 {
+			continue
+		}
+		paths << line.all_after('\t')
+	}
+	return paths
+}
+
+fn normalize_git_symlink_target_path(path string, raw_target string) ?string {
+	target := raw_target.trim_space()
+	if target == '' || target.index_u8(`\n`) != -1 || target.index_u8(`\r`) != -1
+		|| target.index_u8(`\t`) != -1 {
+		return none
+	}
+	resolved := if os.is_abs_path(target) {
+		os.norm_path(target)
+	} else {
+		os.norm_path(os.join_path(os.dir(path), target))
+	}
+	if !os.exists(resolved) || os.is_dir(resolved) {
+		return none
+	}
+	return resolved
+}
+
+fn git_symlink_target_path(path string) ?string {
+	if os.is_link(path) {
+		raw_target := os.readlink(path) or { return none }
+		return normalize_git_symlink_target_path(path, raw_target)
+	}
+	if !os.is_file(path) || os.file_size(path) > max_cross_sysroot_git_symlink_placeholder_size {
+		return none
+	}
+	raw_target := os.read_file(path) or { return none }
+	if raw_target.index_u8(0) != -1 {
+		return none
+	}
+	return normalize_git_symlink_target_path(path, raw_target)
+}
+
+fn git_symlink_materialization_source(path string) ?string {
+	mut current := path
+	mut seen := map[string]bool{}
+	for _ in 0 .. max_cross_sysroot_git_symlink_depth {
+		if current in seen {
+			return none
+		}
+		seen[current] = true
+		next := git_symlink_target_path(current) or {
+			if current != path && os.is_file(current) {
+				return current
+			}
+			return none
+		}
+		current = next
+	}
+	return none
+}
+
+fn materialize_git_symlink_placeholder(path string, source string) ! {
+	tmp_path := '${path}.v_symlink_fix_tmp'
+	os.rm(tmp_path) or {}
+	os.cp(source, tmp_path)!
+	os.rm(path)!
+	os.mv(tmp_path, path)!
+}
+
+fn repair_cross_sysroot_git_symlink_placeholders_in_paths(paths []string, strict bool) !int {
+	mut repaired := 0
+	for path in paths {
+		if os.is_link(path) || !os.is_file(path) {
+			continue
+		}
+		source := git_symlink_materialization_source(path) or {
+			if strict {
+				return error('`${path}` is tracked as a symlink in the cross-compilation sysroot, but its target could not be resolved')
+			}
+			continue
+		}
+		if source == path {
+			continue
+		}
+		materialize_git_symlink_placeholder(path, source)!
+		repaired++
+	}
+	return repaired
+}
+
+// Git on Windows can check symlinks out as tiny text files instead of real links.
+fn repair_cross_sysroot_git_symlink_placeholders(sysroot string) !int {
+	if !os.is_dir(sysroot) {
+		return 0
+	}
+	if tracked_paths := git_repo_tracked_symlink_paths(sysroot) {
+		mut candidates := []string{cap: tracked_paths.len}
+		for rel_path in tracked_paths {
+			candidates << os.join_path(sysroot, rel_path)
+		}
+		return repair_cross_sysroot_git_symlink_placeholders_in_paths(candidates, true)
+	} else {
+		mut fallback_candidates := []string{}
+		for path in os.walk_ext(sysroot, '', hidden: false) {
+			if !os.is_file(path) || os.is_link(path) {
+				continue
+			}
+			if os.file_size(path) > max_cross_sysroot_git_symlink_placeholder_size {
+				continue
+			}
+			fallback_candidates << path
+		}
+		return repair_cross_sysroot_git_symlink_placeholders_in_paths(fallback_candidates, false)
 	}
 }
 
@@ -1844,93 +2041,15 @@ fn (mut c Builder) cc_windows_cross() {
 	c.build_thirdparty_obj_files()
 	c.setup_output_name()
 	icon_object := c.prepare_cross_windows_icon_resource() or { verror(err.msg()) }
-	mut args := []string{}
-	args << '${c.pref.cflags}'
-	args << '-o ${os.quoted_path(c.pref.out_name)}'
-	args << '-w -L.'
-
-	cflags := c.get_os_cflags()
-	// -I flags
-	if c.pref.ccompiler == 'msvc' {
-		args << cflags.c_options_before_target_msvc()
-	} else {
-		args << cflags.c_options_before_target()
-	}
-	mut optimization_options := []string{}
-	mut debug_options := []string{}
-	if c.pref.is_prod {
-		if c.pref.ccompiler != 'msvc' {
-			optimization_options = ['-O3']
-			mut have_flto := true
-			if c.pref.parallel_cc {
-				have_flto = false
-			}
-			if c.pref.is_shared {
-				// Keep shared libraries away from LTO to avoid runtime loader regressions.
-				have_flto = false
-			}
-			if have_flto {
-				optimization_options << '-flto'
-			}
-		}
-	}
-	if c.pref.is_debug {
-		if c.pref.ccompiler != 'msvc' {
-			debug_options = ['-O0', '-g', '-gdwarf-2']
-		}
-	}
-	mut libs := []string{}
-	if false && c.pref.build_mode == .default_mode {
-		builtin_o := '${pref.default_module_path}/vlib/builtin.o'
-		libs << os.quoted_path(builtin_o)
-		if !os.exists(builtin_o) {
-			verror('${builtin_o} not found')
-		}
-		for imp in c.table.imports {
-			libs << os.quoted_path('${pref.default_module_path}/vlib/${imp}.o')
-		}
-	}
-	// add the thirdparty .o files, produced by all the #flag directives:
-	args << cflags.c_options_only_object_files()
-	args << os.quoted_path(c.out_name_c)
-	if icon_object != '' {
-		args << os.quoted_path(icon_object)
-	}
-
-	mut c_options_after_target := []string{}
-	if c.pref.ccompiler == 'msvc' {
-		c_options_after_target << cflags.c_options_after_target_msvc()
-	} else {
-		c_options_after_target << cflags.c_options_after_target()
-	}
-	for lf in c.ccoptions.linker_flags {
-		if lf in c_options_after_target {
-			continue
-		}
-		c_options_after_target << lf
-	}
-	args << c_options_after_target
 
 	if current_os !in ['macos', 'linux', 'termux'] {
 		println(current_os)
 		panic('your platform is not supported yet')
 	}
 
-	mut all_args := []string{}
-	all_args << '-std=gnu11'
-	if !c.pref.no_prod_options {
-		all_args << optimization_options
-	}
-	all_args << debug_options
-
-	all_args << args
-	subsystem_flag := c.get_subsystem_flag()
-	if subsystem_flag != '' {
-		all_args << subsystem_flag
-	}
-	all_args << c.pref.ldflags
+	all_args := c.windows_cross_compile_args(icon_object)
 	c.dump_c_options(all_args)
-	mut cmd := cross_compiler_name_path + ' ' + all_args.join(' ')
+	mut cmd := '${c.quote_compiler_name(cross_compiler_name_path)} ${all_args.join(' ')}'
 	// cmd := 'clang -o ${obj_name} -w ${include} -m32 -c -target x86_64-win32 ${pref.default_module_path}/${c.out_name_c}'
 	if c.pref.is_verbose || c.pref.show_cc {
 		println(cmd)
@@ -1946,6 +2065,16 @@ fn (mut c Builder) cc_windows_cross() {
 		exit(1)
 	}
 	println(c.pref.out_name + ' has been successfully cross compiled for windows.')
+}
+
+fn (c &Builder) windows_cross_compile_args(icon_object string) []string {
+	mut ccoptions := c.ccoptions
+	if icon_object != '' {
+		mut o_args := ccoptions.o_args.clone()
+		o_args << os.quoted_path(icon_object)
+		ccoptions.o_args = o_args
+	}
+	return c.all_args(ccoptions)
 }
 
 fn (mut b Builder) build_thirdparty_obj_files() {

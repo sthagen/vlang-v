@@ -141,6 +141,33 @@ fn test_resolve_ccompiler_type_detects_cc_alias_path_as_clang() {
 	assert resolve_ccompiler_type(alias_cc, pref.cc_from_string(alias_cc)) == .clang
 }
 
+fn test_resolve_ccompiler_type_detects_real_path_without_running_alias() {
+	$if windows {
+		return
+	}
+	test_root := os.join_path(os.vtmp_dir(), 'v_builder_cc_symlink_${os.getpid()}')
+	os.rmdir_all(test_root) or {}
+	os.mkdir_all(test_root) or { panic(err) }
+	defer {
+		os.rmdir_all(test_root) or {}
+	}
+	clang_path := os.join_path(test_root, 'clang')
+	os.write_file(clang_path, '#!/bin/sh
+exit 1
+') or { panic(err) }
+	os.chmod(clang_path, 0o700) or { panic(err) }
+	link_path := os.join_path(test_root, 'cc')
+	os.symlink(clang_path, link_path) or { panic(err) }
+	assert resolve_ccompiler_type(link_path, pref.cc_from_string(link_path)) == .clang
+}
+
+fn test_ccompiler_type_from_resolved_path_detects_macos_cc_wrapper_as_clang() {
+	$if macos {
+		detected := ccompiler_type_from_resolved_path('/usr/bin/cc') or { panic(err) }
+		assert detected == .clang
+	}
+}
+
 fn test_setup_ccompiler_options_detects_cl_path_as_msvc() {
 	mut full_args := ['']
 	full_args << hello_world_example()
@@ -222,6 +249,71 @@ fn test_linux_cross_target_for_arm64_errors() {
 	}
 }
 
+fn test_git_symlink_target_path_detects_placeholder_file() {
+	test_root := os.join_path(os.vtmp_dir(), 'v_builder_git_symlink_target_${os.getpid()}')
+	os.rmdir_all(test_root) or {}
+	defer {
+		os.rmdir_all(test_root) or {}
+	}
+	lib_dir := os.join_path(test_root, 'lib', 'x86_64-linux-gnu')
+	os.mkdir_all(lib_dir)!
+	target_file := os.join_path(lib_dir, 'libm-2.31.so')
+	placeholder := os.join_path(lib_dir, 'libm.so.6')
+	os.write_file(target_file, 'ELF PLACEHOLDER')!
+	os.write_file(placeholder, 'libm-2.31.so\n')!
+	assert git_symlink_target_path(placeholder) or { panic(err) } == target_file
+}
+
+fn test_git_symlink_target_path_ignores_linker_script() {
+	test_root := os.join_path(os.vtmp_dir(), 'v_builder_git_symlink_script_${os.getpid()}')
+	os.rmdir_all(test_root) or {}
+	defer {
+		os.rmdir_all(test_root) or {}
+	}
+	lib_dir := os.join_path(test_root, 'lib', 'x86_64-linux-gnu')
+	os.mkdir_all(lib_dir)!
+	linker_script := os.join_path(lib_dir, 'libm.so')
+	os.write_file(linker_script, '/* GNU ld script */\nGROUP ( /lib/x86_64-linux-gnu/libm.so.6 )\n')!
+	assert git_symlink_target_path(linker_script) == none
+}
+
+fn test_git_symlink_materialization_source_follows_placeholder_chain() {
+	test_root := os.join_path(os.vtmp_dir(), 'v_builder_git_symlink_chain_${os.getpid()}')
+	os.rmdir_all(test_root) or {}
+	defer {
+		os.rmdir_all(test_root) or {}
+	}
+	lib_dir := os.join_path(test_root, 'lib', 'x86_64-linux-gnu')
+	os.mkdir_all(lib_dir)!
+	final_target := os.join_path(lib_dir, 'libm-2.31.so')
+	first_link := os.join_path(lib_dir, 'libm.so.6')
+	second_link := os.join_path(lib_dir, 'libm.so')
+	os.write_file(final_target, 'ELF FINAL')!
+	os.write_file(first_link, 'libm-2.31.so\n')!
+	os.write_file(second_link, 'libm.so.6\n')!
+	assert git_symlink_materialization_source(second_link) or { panic(err) } == final_target
+}
+
+fn test_repair_cross_sysroot_git_symlink_placeholders_in_paths_materializes_target_copy() {
+	test_root := os.join_path(os.vtmp_dir(), 'v_builder_git_symlink_repair_${os.getpid()}')
+	os.rmdir_all(test_root) or {}
+	defer {
+		os.rmdir_all(test_root) or {}
+	}
+	lib_dir := os.join_path(test_root, 'lib', 'x86_64-linux-gnu')
+	os.mkdir_all(lib_dir)!
+	final_target := os.join_path(lib_dir, 'libm-2.31.so')
+	placeholder := os.join_path(lib_dir, 'libm.so.6')
+	final_bytes := 'ELF DATA BINARY'
+	os.write_file(final_target, final_bytes)!
+	os.write_file(placeholder, 'libm-2.31.so\n')!
+	repaired := repair_cross_sysroot_git_symlink_placeholders_in_paths([placeholder], true) or {
+		panic(err)
+	}
+	assert repaired == 1
+	assert os.read_file(placeholder)! == final_bytes
+}
+
 fn test_msvc_should_use_rsp_for_ascii_args() {
 	builder := new_builder_for_args(['-cc', 'msvc', hello_world_example()])
 	assert builder.msvc_should_use_rsp(['/OUT:"C:\\Users\\russo\\Desktop\\main.exe"'])
@@ -287,6 +379,31 @@ fn test_thirdparty_cross_compile_config_for_freebsd_matches_target() {
 	]
 }
 
+fn test_linux_tcc_arm64_stdatomic_does_not_add_atomic_s() {
+	$if !linux {
+		return
+	}
+	test_dir := os.join_path(os.vtmp_dir(), 'v_builder_stdatomic_tcc_arm64_${os.getpid()}')
+	os.mkdir_all(test_dir) or { panic(err) }
+	defer {
+		os.rmdir_all(test_dir) or {}
+	}
+	src_file := os.join_path(test_dir, 'main.v')
+	os.write_file(src_file, 'import sync.stdatomic
+fn main() {
+	mut x := u64(0)
+	stdatomic.store_u64(&x, 1)
+}
+') or {
+		panic(err)
+	}
+	res :=
+		os.execute('${os.quoted_path(@VEXE)} -dump-c-flags - -cc tcc -arch arm64 ${os.quoted_path(src_file)}')
+	assert res.exit_code == 0, res.output
+	assert !res.output.contains('thirdparty/stdatomic/nix/atomic.S')
+	assert res.output.contains('libatomic.so')
+}
+
 fn test_live_windows_main_linker_args_export_host_symbols() {
 	linker_args := builder_linker_args([
 		'-os',
@@ -314,6 +431,20 @@ fn test_live_windows_shared_linker_args_include_host_import_lib() {
 	assert linker_args.contains(live_windows_import_lib_path(hot_reload_graph_example()))
 }
 
+fn test_windows_cross_compile_args_match_shared_prod_args() {
+	$if windows {
+		return
+	}
+	mut builder := new_test_builder(['-os', 'windows', '-prod', hello_world_example()])
+	all_args := builder.windows_cross_compile_args('')
+	assert all_args == builder.all_args(builder.ccoptions)
+	assert all_args.contains('-O3')
+	assert all_args.contains('-fwrapv')
+	assert all_args.contains('-fno-strict-aliasing')
+	assert all_args.contains('-DNDEBUG')
+	assert all_args.contains('-DNO_DEBUGGING')
+}
+
 fn test_shared_windows_builds_do_not_add_subsystem_flags() {
 	mut builder := new_test_builder(['-os', 'windows', '-shared', hello_world_example()])
 	assert builder.get_subsystem_flag() == ''
@@ -321,6 +452,28 @@ fn test_shared_windows_builds_do_not_add_subsystem_flags() {
 	assert !compile_args.contains('-municode')
 	assert !compile_args.contains('-mwindows')
 	assert !compile_args.contains('-mconsole')
+}
+
+fn test_windows_gcc_compile_args_force_generated_source_to_c_mode() {
+	compile_args := builder_compile_args(['-os', 'windows', '-cc', 'gcc', hello_world_example()])
+	assert compile_args.contains('-x c')
+	assert compile_args.contains('-x none')
+}
+
+fn test_shared_tcc_compile_args_skip_bt25_after_late_compiler_resolution() {
+	mut full_args := ['']
+	full_args << ['-shared', hello_world_example()]
+	mut prefs, _ := pref.parse_args_and_show_errors([], full_args, false)
+	prefs.ccompiler = 'tcc'
+	prefs.ccompiler_type = .tinyc
+	prefs.normalize_gc_defaults_for_resolved_ccompiler()
+	assert 'no_backtrace' in prefs.compile_defines_all
+
+	mut builder := new_builder(prefs)
+	builder.out_name_c = os.join_path(os.vtmp_dir(), 'builder_cc_test.tmp.c')
+	builder.setup_ccompiler_options(prefs.ccompiler)
+
+	assert !builder.get_compile_args().contains('-bt25')
 }
 
 fn test_should_use_rsp_for_linux_by_default() {
@@ -430,6 +583,17 @@ fn test_c_output_suggests_missing_typedef_for_c_struct_requires_matching_redecla
 	}) == ''
 }
 
+fn test_c_output_suggests_missing_typedef_for_c_struct_with_issue_17101_output() {
+	c_output := [
+		"C:\\Users\\USER\\AppData\\Local\\Temp\\v_0\\main2.3589850650208729523.tmp.c:12338:99: error: 'tilengine__TLN_Affine' {aka 'struct TLN_Affine'} has no member named 'angle'",
+		'12338 |         tilengine__TLN_Affine* affine = ((tilengine__TLN_Affine*)memdup(&(tilengine__TLN_Affine){.angle = 10,.dx = 1,.dy = 1,.sx = 1,.sy = 1,}, sizeof(tilengine__TLN_Affine)));',
+		'      |                                                                                                   ^~~~~',
+	].join('\n')
+	assert c_output_suggests_missing_typedef_for_c_struct(c_output, {
+		'TLN_Affine': true
+	}) == 'TLN_Affine'
+}
+
 fn test_extract_quoted_identifier_supports_double_quotes() {
 	assert extract_quoted_identifier('error: \';\' expected (got "glfw__GLFWwindow")') == 'glfw__GLFWwindow'
 }
@@ -458,6 +622,13 @@ fn test_c_output_suggests_missing_header_for_typedef_c_struct_with_issue_25384_g
 fn test_c_output_suggests_missing_header_for_typedef_c_struct_requires_known_type() {
 	c_output := 'C:/Users/si_z_/AppData/Local/Temp/v_0/TestV.tmp.c:904: error: \';\' expected (got "glfw__GLFWwindow")'
 	assert c_output_suggests_missing_header_for_typedef_c_struct(c_output, {}, {}) == ''
+}
+
+fn test_c_output_suggests_missing_header_for_typedef_c_struct_with_issue_23648_tcc_output() {
+	c_output := 'D:/Temp/Temp/v_0/main.tmp.c:1028: error: \';\' expected (got "duarteroso__glfw__GLFWmonitor")'
+	assert c_output_suggests_missing_header_for_typedef_c_struct(c_output, {
+		'GLFWmonitor': true
+	}, {}) == 'GLFWmonitor'
 }
 
 fn test_c_error_missing_library_name_detects_tcc_output() {

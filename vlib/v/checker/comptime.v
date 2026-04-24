@@ -35,6 +35,162 @@ fn comptime_power_value(left ast.ComptTimeConstValue, right ast.ComptTimeConstVa
 	return none
 }
 
+fn comptime_compare_i64_values(op token.Kind, left i64, right i64) ?bool {
+	return match op {
+		.eq { left == right }
+		.ne { left != right }
+		.gt { left > right }
+		.lt { left < right }
+		.ge { left >= right }
+		.le { left <= right }
+		else { none }
+	}
+}
+
+fn comptime_compare_f64_values(op token.Kind, left f64, right f64) ?bool {
+	return match op {
+		.eq { left == right }
+		.ne { left != right }
+		.gt { left > right }
+		.lt { left < right }
+		.ge { left >= right }
+		.le { left <= right }
+		else { none }
+	}
+}
+
+fn comptime_compare_string_values(op token.Kind, left string, right string) ?bool {
+	return match op {
+		.eq { left == right }
+		.ne { left != right }
+		else { none }
+	}
+}
+
+struct ComptimeComparisonResult {
+	val        bool
+	keep_stmts bool
+}
+
+fn (mut c Checker) eval_comptime_type_meta_value(typ ast.Type, field_name string) ?ast.ComptTimeConstValue {
+	base_type := c.unwrap_generic(typ)
+	match field_name {
+		'name' {
+			return c.table.sym(base_type).name
+		}
+		'idx', 'typ' {
+			return i64(int(base_type))
+		}
+		'unaliased_typ' {
+			return i64(int(c.table.unaliased_type(base_type)))
+		}
+		'indirections' {
+			return i64(base_type.nr_muls())
+		}
+		'key_type', 'value_type', 'element_type' {
+			resolved_type := c.type_resolver.typeof_field_type(base_type, field_name)
+			if resolved_type != ast.no_type {
+				return i64(int(c.unwrap_generic(resolved_type)))
+			}
+		}
+		else {}
+	}
+
+	return none
+}
+
+fn (mut c Checker) eval_comptime_type_selector_value(expr ast.SelectorExpr) ?ast.ComptTimeConstValue {
+	if expr.expr is ast.Ident && c.table.cur_fn != unsafe { nil } {
+		idx := c.table.cur_fn.generic_names.index(expr.expr.name)
+		if idx >= 0 && idx < c.table.cur_concrete_types.len {
+			return c.eval_comptime_type_meta_value(c.table.cur_concrete_types[idx], expr.field_name)
+		}
+	}
+	if expr.expr is ast.TypeOf {
+		mut resolved_type := c.recheck_concrete_type(expr.expr.typ)
+		if resolved_type == ast.void_type || resolved_type == ast.no_type {
+			resolved_type = c.recheck_concrete_type(expr.name_type)
+		}
+		if resolved_type == ast.void_type || resolved_type == ast.no_type {
+			resolved_type = c.type_resolver.typeof_type(expr.expr.expr, expr.name_type)
+		}
+		if resolved_type != ast.void_type && resolved_type != ast.no_type {
+			return c.eval_comptime_type_meta_value(resolved_type, expr.field_name)
+		}
+	}
+	return none
+}
+
+fn (c &Checker) comptime_expr_needs_multi_pass(expr ast.Expr) bool {
+	return match expr {
+		ast.TypeOf {
+			true
+		}
+		ast.Ident {
+			(c.table.cur_fn != unsafe { nil } && expr.name in c.table.cur_fn.generic_names)
+				|| (expr.obj is ast.Var && expr.obj.typ.has_flag(.generic))
+				|| expr.ct_expr
+		}
+		ast.SelectorExpr {
+			expr.expr is ast.TypeOf || (expr.expr is ast.Ident && c.table.cur_fn != unsafe { nil }
+				&& expr.expr.name in c.table.cur_fn.generic_names)
+				|| c.comptime_expr_needs_multi_pass(expr.expr)
+		}
+		ast.InfixExpr {
+			c.comptime_expr_needs_multi_pass(expr.left)
+				|| c.comptime_expr_needs_multi_pass(expr.right)
+		}
+		ast.CastExpr {
+			c.comptime_expr_needs_multi_pass(expr.expr)
+		}
+		ast.IndexExpr {
+			c.comptime_expr_needs_multi_pass(expr.left)
+				|| c.comptime_expr_needs_multi_pass(expr.index)
+		}
+		ast.ParExpr {
+			c.comptime_expr_needs_multi_pass(expr.expr)
+		}
+		ast.PostfixExpr {
+			c.comptime_expr_needs_multi_pass(expr.expr)
+		}
+		ast.PrefixExpr {
+			c.comptime_expr_needs_multi_pass(expr.right)
+		}
+		else {
+			false
+		}
+	}
+}
+
+fn (mut c Checker) try_eval_comptime_comparison(mut left ast.Expr, mut right ast.Expr, op token.Kind) ?ComptimeComparisonResult {
+	start_errors := c.nr_errors
+	left_type := c.unwrap_generic(c.expr(mut left))
+	right_type := c.unwrap_generic(c.expr(mut right))
+	if c.nr_errors > start_errors {
+		return none
+	}
+	left_value := c.eval_comptime_const_expr(left, 0)?
+	right_value := c.eval_comptime_const_expr(right, 0)?
+	keep_stmts := c.comptime_expr_needs_multi_pass(left) || c.comptime_expr_needs_multi_pass(right)
+	if left_type == ast.string_type || right_type == ast.string_type {
+		return ComptimeComparisonResult{
+			val:        comptime_compare_string_values(op, left_value.string()?,
+				right_value.string()?)?
+			keep_stmts: keep_stmts
+		}
+	}
+	if left_type.is_float() || right_type.is_float() {
+		return ComptimeComparisonResult{
+			val:        comptime_compare_f64_values(op, left_value.f64()?, right_value.f64()?)?
+			keep_stmts: keep_stmts
+		}
+	}
+	return ComptimeComparisonResult{
+		val:        comptime_compare_i64_values(op, left_value.i64()?, right_value.i64()?)?
+		keep_stmts: keep_stmts
+	}
+}
+
 fn (mut c Checker) is_string_array_type(typ ast.Type) bool {
 	final_typ := c.table.unaliased_type(c.unwrap_generic(typ))
 	sym := c.table.final_sym(final_typ)
@@ -226,6 +382,9 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 		}
 		mut c2 := new_checker(c.table, pref2)
 		c2.comptime_call_pos = node.pos.pos
+		template_parser_errors := node.veb_tmpl.errors.clone()
+		template_parser_warnings := node.veb_tmpl.warnings.clone()
+		template_parser_notices := node.veb_tmpl.notices.clone()
 		c2.check(mut node.veb_tmpl)
 
 		// Cache template file content for error display using the relative path
@@ -247,7 +406,7 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 					c2.errors[i] = errors.Error{
 						message:    err.message
 						details:    err.details
-						file_path:  err.file_path
+						file_path:  line_info.tmpl_path
 						pos:        token.Pos{
 							...err.pos
 							line_nr: line_info.tmpl_line
@@ -263,7 +422,7 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 					c2.warnings[i] = errors.Warning{
 						message:    warn.message
 						details:    warn.details
-						file_path:  warn.file_path
+						file_path:  line_info.tmpl_path
 						pos:        token.Pos{
 							...warn.pos
 							line_nr: line_info.tmpl_line
@@ -279,7 +438,7 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 					c2.notices[i] = errors.Notice{
 						message:    notice.message
 						details:    notice.details
-						file_path:  notice.file_path
+						file_path:  line_info.tmpl_path
 						pos:        token.Pos{
 							...notice.pos
 							line_nr: line_info.tmpl_line
@@ -290,6 +449,13 @@ fn (mut c Checker) comptime_call(mut node ast.ComptimeCall) ast.Type {
 				}
 			}
 		}
+
+		c.warnings << template_parser_warnings
+		c.errors << template_parser_errors
+		c.notices << template_parser_notices
+		c.nr_warnings += template_parser_warnings.len
+		c.nr_errors += template_parser_errors.len
+		c.nr_notices += template_parser_notices.len
 
 		c.warnings << c2.warnings
 		c.errors << c2.errors
@@ -849,20 +1015,8 @@ fn (mut c Checker) eval_comptime_const_expr_with_locals(expr ast.Expr, nlevel in
 			}
 		}
 		ast.SelectorExpr {
-			if expr.expr is ast.Ident && c.table.cur_fn != unsafe { nil } {
-				idx := c.table.cur_fn.generic_names.index(expr.expr.name)
-				if typ := c.table.cur_concrete_types[idx] {
-					sym := c.table.sym(typ)
-					match expr.field_name {
-						'name' {
-							return sym.name
-						}
-						'idx' {
-							return i32(sym.idx)
-						}
-						else {}
-					}
-				}
+			if value := c.eval_comptime_type_selector_value(expr) {
+				return value
 			}
 		}
 		ast.CastExpr {
@@ -1630,6 +1784,12 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 											}
 										}
 									} else {
+										if comparison := c.try_eval_comptime_comparison(mut cond.left, mut
+											cond.right, cond.op)
+										{
+											sb.write_string(if comparison.val { '1' } else { '0' })
+											return comparison.val, comparison.keep_stmts
+										}
 										c.error('only support .name compare for \$for vars',
 											cond.pos)
 										return false, false
@@ -1706,6 +1866,12 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 											return false, false
 										}
 									} else {
+										if comparison := c.try_eval_comptime_comparison(mut cond.left, mut
+											cond.right, cond.op)
+										{
+											sb.write_string(if comparison.val { '1' } else { '0' })
+											return comparison.val, comparison.keep_stmts
+										}
 										c.error('only support .indirections/.return_type compare for \$for vars and generic',
 											cond.pos)
 										return false, false
@@ -1722,12 +1888,24 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 									return is_true, true
 								}
 								else {
+									if comparison := c.try_eval_comptime_comparison(mut cond.left, mut
+										cond.right, cond.op)
+									{
+										sb.write_string(if comparison.val { '1' } else { '0' })
+										return comparison.val, comparison.keep_stmts
+									}
 									c.error('definition of `${cond.left}` is unknown at compile time',
 										cond.pos)
 									return false, false
 								}
 							}
 
+							if comparison := c.try_eval_comptime_comparison(mut cond.left, mut
+								cond.right, cond.op)
+							{
+								sb.write_string(if comparison.val { '1' } else { '0' })
+								return comparison.val, comparison.keep_stmts
+							}
 							c.error('invalid \$if condition: SelectorExpr', cond.pos)
 							return false, false
 						}
@@ -1771,6 +1949,12 @@ fn (mut c Checker) comptime_if_cond(mut cond ast.Expr, mut sb strings.Builder) (
 							}
 						}
 						else {
+							if comparison := c.try_eval_comptime_comparison(mut cond.left, mut
+								cond.right, cond.op)
+							{
+								sb.write_string(if comparison.val { '1' } else { '0' })
+								return comparison.val, comparison.keep_stmts
+							}
 							c.error('invalid \$if condition', cond.pos)
 							return false, false
 						}

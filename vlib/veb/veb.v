@@ -297,7 +297,11 @@ fn handle_ssl_request[A, X](req http.Request, params &SslRequestParams) ?&Contex
 			global_app.static_compression_max_size, global_app.static_compression_mime_types,
 			global_app.enable_markdown_negotiation), mut user_context, url, host)
 		{
-			return &user_context.Context
+			// Preserve the handled context on the heap before the stack-local user context goes away.
+			unsafe {
+				*ctx = user_context.Context
+			}
+			return ctx
 		}
 	}
 	$if A is ControllerInterface {
@@ -308,7 +312,11 @@ fn handle_ssl_request[A, X](req http.Request, params &SslRequestParams) ?&Contex
 	mut user_context := X{}
 	user_context.Context = ctx
 	handle_route[A, X](mut global_app, mut user_context, url, host, params.routes)
-	return &user_context.Context
+	// Preserve the handled context on the heap before the stack-local user context goes away.
+	unsafe {
+		*ctx = user_context.Context
+	}
+	return ctx
 }
 
 fn write_ssl_context_response(mut ssl_conn mbedtls.SSLConn, completed_context &Context) ! {
@@ -388,6 +396,10 @@ fn handle_route[A, X](mut app A, mut user_context X, url urllib.URL, host string
 	mut route := Route{}
 	mut middleware_has_sent_response := false
 	mut not_found := false
+	mut variadic_route := Route{}
+	mut variadic_route_words := []string{}
+	mut variadic_method_name := ''
+	mut variadic_method_args := []string{}
 
 	defer {
 		// execute middleware functions after veb is done and before the response is send
@@ -544,20 +556,51 @@ fn handle_route[A, X](mut app A, mut user_context X, url urllib.URL, host string
 					}
 
 					if params := route_matches(url_words, route_words) {
-						$if A is MiddlewareApp {
-							if validate_middleware[X](mut user_context, get_handlers_for_method(route.middlewares,
-								user_context.Context.req.method)) == false {
-								middleware_has_sent_response = true
-								return
+						if route_is_variadic(route_words) {
+							if should_prefer_variadic_route(route_words, variadic_route_words) {
+								variadic_route = route
+								variadic_route_words = route_words.clone()
+								variadic_method_name = method.name
+								variadic_method_args = params.clone()
 							}
+						} else {
+							$if A is MiddlewareApp {
+								if validate_middleware[X](mut user_context, get_handlers_for_method(route.middlewares,
+									user_context.Context.req.method)) == false {
+									middleware_has_sent_response = true
+									return
+								}
+							}
+							method_args := params.clone()
+							if method_args.len + 1 != method.args.len {
+								eprintln('[veb] warning: uneven parameters count (${method.args.len}) in `${method.name}`, compared to the veb route `${method.attrs}` (${method_args.len})')
+							}
+							app.$method(mut user_context, ...method_args)
+							return
 						}
-						method_args := params.clone()
-						if method_args.len + 1 != method.args.len {
-							eprintln('[veb] warning: uneven parameters count (${method.args.len}) in `${method.name}`, compared to the veb route `${method.attrs}` (${method_args.len})')
-						}
-						app.$method(mut user_context, ...method_args)
-						return
 					}
+				}
+			}
+		}
+	}
+	if variadic_method_name != '' {
+		route = variadic_route
+		$for method in A.methods {
+			$if method.return_type is Result {
+				if method.name == variadic_method_name {
+					$if A is MiddlewareApp {
+						if validate_middleware[X](mut user_context, get_handlers_for_method(variadic_route.middlewares,
+							user_context.Context.req.method)) == false {
+							middleware_has_sent_response = true
+							return
+						}
+					}
+					method_args := variadic_method_args.clone()
+					if method_args.len + 1 != method.args.len {
+						eprintln('[veb] warning: uneven parameters count (${method.args.len}) in `${method.name}`, compared to the veb route `${method.attrs}` (${method_args.len})')
+					}
+					app.$method(mut user_context, ...method_args)
+					return
 				}
 			}
 		}
@@ -566,6 +609,30 @@ fn handle_route[A, X](mut app A, mut user_context X, url urllib.URL, host string
 	user_context.not_found()
 	not_found = true
 	return
+}
+
+fn route_is_variadic(route_words []string) bool {
+	return route_words.len > 0 && route_words[route_words.len - 1].ends_with('...')
+}
+
+fn should_prefer_variadic_route(candidate []string, current []string) bool {
+	if current.len == 0 {
+		return true
+	}
+	if candidate.len != current.len {
+		return candidate.len > current.len
+	}
+	return variadic_route_static_parts(candidate) > variadic_route_static_parts(current)
+}
+
+fn variadic_route_static_parts(route_words []string) int {
+	mut static_parts := 0
+	for route_word in route_words[..route_words.len - 1] {
+		if !route_word.starts_with(':') {
+			static_parts++
+		}
+	}
+	return static_parts
 }
 
 fn route_matches(url_words []string, route_words []string) ?[]string {

@@ -65,7 +65,7 @@ pub mut:
 	warning_lines map[string]bool // dedup warns
 	notice_lines  map[string]bool // dedup notices
 	error_details []string
-	should_abort  bool // when too many errors/warnings/notices are accumulated, .should_abort becomes true. It is checked in statement/expression loops, so the checker can return early, instead of wasting time.
+	should_abort  bool // when too many errors are accumulated, .should_abort becomes true. It is checked in statement/expression loops, so the checker can return early, instead of wasting time.
 
 	expected_type               ast.Type
 	expected_or_type            ast.Type // fn() or { 'this type' } eg. string. expected or block type
@@ -1420,11 +1420,14 @@ fn (mut c Checker) type_has_mutable_aliasing(typ ast.Type) bool {
 fn (mut c Checker) expr_is_mutable_alias_of_immutable_source(expr ast.Expr) bool {
 	match expr {
 		ast.Ident {
-			if expr.obj is ast.Var && expr.obj.is_mut
-				&& expr.obj.expr in [ast.Ident, ast.CallExpr, ast.CastExpr, ast.AsCast, ast.ParExpr, ast.UnsafeExpr]
-				&& c.type_has_mutable_aliasing(expr.obj.typ) {
-				return c.expr_is_immutable_source(expr.obj.expr)
-					|| c.expr_is_mutable_alias_of_immutable_source(expr.obj.expr)
+			if expr.obj is ast.Var && expr.obj.is_mut && c.type_has_mutable_aliasing(expr.obj.typ) {
+				match expr.obj.expr {
+					ast.Ident, ast.CallExpr, ast.CastExpr, ast.AsCast, ast.ParExpr, ast.UnsafeExpr {
+						return c.expr_is_immutable_source(expr.obj.expr)
+							|| c.expr_is_mutable_alias_of_immutable_source(expr.obj.expr)
+					}
+					else {}
+				}
 			}
 			return false
 		}
@@ -1704,12 +1707,12 @@ fn (mut c Checker) fail_if_immutable_to_mutable(left_type ast.Type, right_type a
 					if field_info.is_mut {
 						if init_field.expr is ast.Ident && !init_field.expr.is_mut()
 							&& init_field.typ.is_ptr() {
-							c.note('`${init_field.expr.name}` is immutable, cannot have a mutable reference to an immutable object',
+							c.error('`${init_field.expr.name}` is immutable, cannot have a mutable reference to an immutable object',
 								init_field.pos)
 						} else if init_field.expr is ast.PrefixExpr {
 							if init_field.expr.op == .amp && init_field.expr.right is ast.Ident
 								&& !init_field.expr.right.is_mut() {
-								c.note('`${init_field.expr.right.name}` is immutable, cannot have a mutable reference to an immutable object',
+								c.error('`${init_field.expr.right.name}` is immutable, cannot have a mutable reference to an immutable object',
 									init_field.expr.right.pos)
 							}
 						}
@@ -1780,6 +1783,10 @@ fn (mut c Checker) fail_if_immutable(mut expr ast.Expr) (string, token.Pos) {
 				if !c.pref.translated && c.mod != 'veb' {
 					// TODO: fix this in c2v, do not allow modification of all consts
 					// in translated code
+					c.error('cannot modify constant `${expr.name}`', expr.pos)
+				}
+			} else if expr.obj is ast.GlobalField && expr.obj.is_const {
+				if !c.pref.translated && c.mod != 'veb' {
 					c.error('cannot modify constant `${expr.name}`', expr.pos)
 				}
 			}
@@ -1916,6 +1923,13 @@ fn (mut c Checker) fail_if_immutable(mut expr ast.Expr) (string, token.Pos) {
 							c.error('field `${expr.field_name}` of struct `${type_str}` is immutable',
 								expr.pos)
 						}
+						if field_info.is_mut && expr.expr_type.is_ptr() && !c.inside_unsafe
+							&& c.expr_is_mutable_alias_of_immutable_source(expr.expr) {
+							expr_str := ast.Expr(expr).str()
+							c.error('`${expr_str}` aliases mutable data from an immutable value',
+								expr.pos)
+							return '', expr.pos
+						}
 						to_lock, pos = c.fail_if_immutable(mut expr.expr)
 					}
 					if to_lock != '' {
@@ -1936,6 +1950,13 @@ fn (mut c Checker) fail_if_immutable(mut expr ast.Expr) (string, token.Pos) {
 							expr.pos)
 						return '', expr.pos
 					}
+					if expr.expr_type.is_ptr() && !c.inside_unsafe
+						&& c.expr_is_mutable_alias_of_immutable_source(expr.expr) {
+						expr_str := ast.Expr(expr).str()
+						c.error('`${expr_str}` aliases mutable data from an immutable value',
+							expr.pos)
+						return '', expr.pos
+					}
 					c.fail_if_immutable(mut expr.expr)
 				}
 				.sum_type {
@@ -1948,6 +1969,13 @@ fn (mut c Checker) fail_if_immutable(mut expr ast.Expr) (string, token.Pos) {
 					if !field_info.is_mut {
 						type_str := c.table.type_to_str(expr.expr_type)
 						c.error('field `${expr.field_name}` of sumtype `${type_str}` is immutable',
+							expr.pos)
+						return '', expr.pos
+					}
+					if expr.expr_type.is_ptr() && !c.inside_unsafe
+						&& c.expr_is_mutable_alias_of_immutable_source(expr.expr) {
+						expr_str := ast.Expr(expr).str()
+						c.error('`${expr_str}` aliases mutable data from an immutable value',
 							expr.pos)
 						return '', expr.pos
 					}
@@ -2725,6 +2753,13 @@ fn (mut c Checker) check_or_expr(node ast.OrExpr, ret_type ast.Type, expr_return
 	}
 	mut valid_stmts := node.stmts.filter(it !is ast.SemicolonStmt)
 	mut last_stmt := if valid_stmts.len > 0 { valid_stmts.last() } else { node.stmts.last() }
+	if !node.err_used && c.cur_or_expr != unsafe { nil } {
+		if last_stmt is ast.ExprStmt {
+			if last_stmt.expr is ast.Ident && last_stmt.expr.name == 'err' {
+				c.cur_or_expr.err_used = true
+			}
+		}
+	}
 	allow_none_as_option_value := expr is ast.IndexExpr && ret_type.has_flag(.option)
 	default_or_type := if expr is ast.IndexExpr && ret_type.has_flag(.option) {
 		ret_type
@@ -4108,6 +4143,9 @@ fn (mut c Checker) global_decl(mut node ast.GlobalDecl) {
 			c.table.export_names[field.name] = check_name
 		}
 		c.ensure_type_exists(field.typ, field.typ_pos)
+		if field.is_const && !field.is_extern && !field.has_expr {
+			c.error('const globals must have an explicit initializer', field.pos)
+		}
 		if field.has_expr {
 			if field.expr is ast.AnonFn && field.name == 'main' {
 				c.error('the `main` function is the program entry point, cannot redefine it',
@@ -6132,7 +6170,8 @@ fn (mut c Checker) infer_fn_value_concrete_type(mut inferred map[string]ast.Type
 			template_fn := (template_final_sym.info as ast.FnType).func
 			actual_fn := (actual_final_sym.info as ast.FnType).func
 			if template_fn.params.len != actual_fn.params.len
-				|| template_fn.is_variadic != actual_fn.is_variadic {
+				|| template_fn.is_variadic != actual_fn.is_variadic
+				|| template_fn.is_c_variadic != actual_fn.is_c_variadic {
 				return false
 			}
 			for i, template_param in template_fn.params {
@@ -6163,7 +6202,8 @@ fn (mut c Checker) infer_fn_value_concrete_types(func &ast.Fn, expected_type ast
 		return none
 	}
 	expected_fn := (expected_sym.info as ast.FnType).func
-	if func.params.len != expected_fn.params.len || func.is_variadic != expected_fn.is_variadic {
+	if func.params.len != expected_fn.params.len || func.is_variadic != expected_fn.is_variadic
+		|| func.is_c_variadic != expected_fn.is_c_variadic {
 		return none
 	}
 	mut inferred := map[string]ast.Type{}
@@ -7659,20 +7699,71 @@ fn (mut c Checker) type_error_for_operator(op_label string, types_label string, 
 		pos)
 }
 
+fn (c &Checker) internal_index_type(index_type ast.Type) ast.Type {
+	mut internal_index_type := c.table.unaliased_type(index_type.clear_flag(.variadic))
+	internal_index_sym := c.table.final_sym(internal_index_type)
+	if internal_index_sym.kind == .enum {
+		internal_index_type = internal_index_sym.enum_info().typ
+	}
+	return internal_index_type
+}
+
+fn (mut c Checker) check_internal_index_type(index ast.Expr, index_type ast.Type, typ_sym &ast.TypeSymbol, is_gated bool) bool {
+	if c.pref.translated || c.file.is_translated {
+		return true
+	}
+	internal_index_type := c.internal_index_type(index_type)
+	if internal_index_type == ast.int_literal_type {
+		if c.integer_literal_outside_type_range(ast.int_type, index) {
+			c.error('overflow in implicit type `int`, use explicit type casting instead',
+				index.pos())
+			return false
+		}
+		return true
+	}
+	if c.pref.backend == .c && !is_gated {
+		return true
+	}
+	int_size, _ := c.table.type_size(ast.int_type_idx)
+	internal_index_size, _ := c.table.type_size(internal_index_type.idx_type())
+	if internal_index_size > int_size {
+		index_type_str := if typ_sym.kind == .string { 'string index' } else { 'index' }
+		got_type_str := c.table.type_to_str(index_type)
+		c.error('cannot use `${got_type_str}` as ${index_type_str} type `int`, use an explicit cast like `int(expr)`',
+			index.pos())
+		return false
+	}
+	return true
+}
+
 fn (mut c Checker) check_index(typ_sym &ast.TypeSymbol, index ast.Expr, index_type ast.Type, range_index bool,
 	is_gated bool) {
 	if typ_sym.kind in [.array, .array_fixed, .string] {
 		index_type_sym := c.table.sym(index_type)
-		if !(index_type.is_int() || index_type_sym.kind == .enum
+		is_integer_index := index_type.is_int() || index_type_sym.kind == .enum
 			|| (index_type_sym.kind == .alias
 			&& (index_type_sym.info as ast.Alias).parent_type.is_int())
-			|| (c.pref.translated && index_type.is_any_kind_of_pointer())) {
+			|| (c.pref.translated && index_type.is_any_kind_of_pointer())
+		if !is_integer_index {
 			type_str := if typ_sym.kind == .string {
 				'non-integer string index `${c.table.type_to_str(index_type)}`'
 			} else {
 				'non-integer index `${c.table.type_to_str(index_type)}` (array type `${typ_sym.name}`)'
 			}
 			c.error('${type_str}', index.pos())
+			return
+		}
+		if index_type.has_option_or_result() {
+			type_str := if typ_sym.kind == .string {
+				'(type `${typ_sym.name}`)'
+			} else {
+				'(array type `${typ_sym.name}`)'
+			}
+			c.error('cannot use Option or Result as index ${type_str}', index.pos())
+			return
+		}
+		if !c.check_internal_index_type(index, index_type, typ_sym, is_gated) {
+			return
 		}
 		if index is ast.IntegerLiteral && !is_gated {
 			if index.val[0] == `-` {
@@ -7685,15 +7776,120 @@ fn (mut c Checker) check_index(typ_sym &ast.TypeSymbol, index ast.Expr, index_ty
 				}
 			}
 		}
-		if index_type.has_option_or_result() {
-			type_str := if typ_sym.kind == .string {
-				'(type `${typ_sym.name}`)'
-			} else {
-				'(array type `${typ_sym.name}`)'
+	}
+}
+
+fn (c &Checker) index_expr_parts(node ast.IndexExpr) []ast.Expr {
+	return if node.indices.len > 0 { node.indices } else { [node.index] }
+}
+
+fn (mut c Checker) is_builtin_slice_index_type(typ ast.Type) bool {
+	sym := c.table.final_sym(c.unwrap_generic(typ))
+	return sym.mod == 'builtin' && sym.name.all_after_last('.') == 'SliceIndex'
+}
+
+fn (mut c Checker) is_builtin_slice_index_array_type(typ ast.Type) bool {
+	sym := c.table.final_sym(c.unwrap_generic(typ))
+	return if sym.info is ast.Array {
+		c.is_builtin_slice_index_type(sym.info.elem_type)
+	} else {
+		false
+	}
+}
+
+fn (mut c Checker) builtin_slice_index_type() ast.Type {
+	mut typ := c.table.find_type('SliceIndex')
+	if typ == 0 {
+		typ = c.table.find_type('builtin.SliceIndex')
+	}
+	return typ
+}
+
+fn (mut c Checker) slice_index_struct_init(part ast.Expr) ast.Expr {
+	slice_index_type := c.builtin_slice_index_type()
+	slice_index_name := c.table.sym(slice_index_type).name
+	part_pos := part.pos()
+	mut init_fields := []ast.StructInitField{}
+	match part {
+		ast.RangeExpr {
+			init_fields << ast.StructInitField{
+				name:     'is_range'
+				name_pos: part_pos
+				pos:      part_pos
+				expr:     ast.BoolLiteral{
+					val: true
+					pos: part_pos
+				}
 			}
-			c.error('cannot use Option or Result as index ${type_str}', index.pos())
+			if part.has_low {
+				init_fields << ast.StructInitField{
+					name:     'low'
+					name_pos: part.low.pos()
+					pos:      part.low.pos()
+					expr:     part.low
+				}
+				init_fields << ast.StructInitField{
+					name:     'has_low'
+					name_pos: part.low.pos()
+					pos:      part.low.pos()
+					expr:     ast.BoolLiteral{
+						val: true
+						pos: part.low.pos()
+					}
+				}
+			}
+			if part.has_high {
+				init_fields << ast.StructInitField{
+					name:     'high'
+					name_pos: part.high.pos()
+					pos:      part.high.pos()
+					expr:     part.high
+				}
+				init_fields << ast.StructInitField{
+					name:     'has_high'
+					name_pos: part.high.pos()
+					pos:      part.high.pos()
+					expr:     ast.BoolLiteral{
+						val: true
+						pos: part.high.pos()
+					}
+				}
+			}
+		}
+		else {
+			init_fields << ast.StructInitField{
+				name:     'value'
+				name_pos: part_pos
+				pos:      part_pos
+				expr:     part
+			}
 		}
 	}
+
+	return ast.Expr(ast.StructInit{
+		pos:         part_pos
+		name_pos:    part_pos
+		typ_str:     slice_index_name
+		typ:         slice_index_type
+		init_fields: init_fields
+	})
+}
+
+fn (mut c Checker) slice_index_array_init(parts []ast.Expr) ast.Expr {
+	slice_index_type := c.builtin_slice_index_type()
+	array_type := ast.new_type(c.table.find_or_register_array(slice_index_type))
+	pos := parts[0].pos().extend(parts.last().pos())
+	mut exprs := []ast.Expr{cap: parts.len}
+	for part in parts {
+		exprs << c.slice_index_struct_init(part)
+	}
+	return ast.Expr(ast.ArrayInit{
+		pos:           pos
+		elem_type_pos: pos
+		exprs:         exprs
+		elem_type:     slice_index_type
+		typ:           array_type
+	})
 }
 
 fn (mut c Checker) check_map_key_type(got ast.Type, expected ast.Type) bool {
@@ -7775,13 +7971,11 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 		c.error('type `!${typ_sym.name}` is a Result, it does not support indexing',
 			node.left.pos())
 	}
+	raw_indices := c.index_expr_parts(node)
+	is_multi_index := raw_indices.len > 1
+	has_slice_part := raw_indices.any(it is ast.RangeExpr)
 	if receiver_sym.kind in [.struct, .alias, .generic_inst] {
 		if _ := c.table.find_method(receiver_sym, '[]') {
-			if node.index is ast.RangeExpr {
-				c.error('range expressions are not supported for overloaded index operators',
-					node.pos)
-				return ast.void_type
-			}
 			if node.or_expr.kind != .absent {
 				c.error('custom error handling on overloaded index expressions is not supported yet',
 					node.or_expr.pos)
@@ -7792,6 +7986,30 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 			}
 			method := c.table.find_method(receiver_sym, '[]') or { ast.Fn{} }
 			c.mark_fn_decl_as_referenced(method.fkey())
+			accepts_slice_index := c.is_builtin_slice_index_type(method.params[1].typ)
+			accepts_slice_index_array := c.is_builtin_slice_index_array_type(method.params[1].typ)
+			if is_multi_index {
+				if !accepts_slice_index_array {
+					c.error('multi-index expressions on overloaded `[]` require a `[]SliceIndex` parameter',
+						node.pos)
+					return ast.void_type
+				}
+				node.index = c.slice_index_array_init(raw_indices)
+			} else if has_slice_part {
+				if accepts_slice_index {
+					node.index = c.slice_index_struct_init(raw_indices[0])
+				} else if accepts_slice_index_array {
+					node.index = c.slice_index_array_init(raw_indices)
+				} else {
+					c.error('slice expressions on overloaded `[]` require `SliceIndex` or `[]SliceIndex` parameters',
+						node.pos)
+					return ast.void_type
+				}
+			} else if accepts_slice_index {
+				node.index = c.slice_index_struct_init(raw_indices[0])
+			} else if accepts_slice_index_array {
+				node.index = c.slice_index_array_init(raw_indices)
+			}
 			old_expected_type := c.expected_type
 			c.expected_type = method.params[1].typ
 			index_type := c.expr(mut node.index)
@@ -7809,6 +8027,11 @@ fn (mut c Checker) index_expr(mut node ast.IndexExpr) ast.Type {
 			node.typ = method.return_type
 			return node.typ
 		}
+	}
+	if is_multi_index {
+		c.error('multi-index expressions are only supported by types with overloaded `[]` methods',
+			node.pos)
+		return ast.void_type
 	}
 	is_aggregate_arr := typ_sym.kind == .aggregate
 		&& (typ_sym.info as ast.Aggregate).types.filter(c.table.type_kind(it) !in [.array, .array_fixed, .string, .map]).len == 0

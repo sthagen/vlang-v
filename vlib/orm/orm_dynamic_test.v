@@ -11,6 +11,14 @@ mut:
 	status string
 }
 
+@[table: 'dynamic_cast_members']
+struct DynamicCastMember {
+mut:
+	id          int @[primary; sql: serial]
+	name        string
+	is_required u8
+}
+
 fn test_dynamic_select_with_inline_where_block() {
 	mut db := sqlite.connect(':memory:')!
 	defer {
@@ -119,6 +127,46 @@ fn test_dynamic_update_with_alias_set_block() {
 	assert rows[0].status == next_status
 }
 
+fn test_dynamic_update_with_alias_set_block_cast_expr() {
+	mut db := sqlite.connect(':memory:')!
+	defer {
+		db.close() or { panic(err) }
+	}
+
+	sql db {
+		create table DynamicCastMember
+	}!
+
+	member := DynamicCastMember{
+		name:        'Alice'
+		is_required: 0
+	}
+
+	sql db {
+		insert member into DynamicCastMember
+	}!
+
+	id := db.last_id()
+	next_name := 'Alicia'
+	next_required := true
+	update_expr := {
+				name == next_name,
+				is_required == u8(if next_required { 1 } else { 0 })
+		}
+
+	sql db {
+		dynamic update DynamicCastMember set update_expr where id == id
+	}!
+
+	rows := sql db {
+		select from DynamicCastMember where id == id
+	}!
+
+	assert rows.len == 1
+	assert rows[0].name == next_name
+	assert rows[0].is_required == 1
+}
+
 fn test_dynamic_select_with_in_operator_and_additional_condition() {
 	mut db := sqlite.connect(':memory:')!
 	defer {
@@ -187,4 +235,59 @@ fn test_dynamic_select_with_in_operator_and_additional_condition() {
 	assert rows[0].age == 31
 	assert rows[1].name == 'Charlie'
 	assert rows[1].age == 29
+}
+
+fn test_dynamic_select_with_explicit_order_by_asc() {
+	mut db := sqlite.connect(':memory:')!
+	defer {
+		db.close() or { panic(err) }
+	}
+
+	sql db {
+		create table DynamicMember
+	}!
+
+	members := [
+		DynamicMember{
+			name:   'Alice'
+			email:  'alice@example.com'
+			age:    31
+			status: 'active'
+		},
+		DynamicMember{
+			name:   'Bob'
+			email:  'bob@example.com'
+			age:    19
+			status: 'pending'
+		},
+		DynamicMember{
+			name:   'Charlie'
+			email:  'charlie@example.com'
+			age:    44
+			status: 'inactive'
+		},
+	]
+
+	for member in members {
+		sql db {
+			insert member into DynamicMember
+		}!
+	}
+
+	min_age := 19
+	// vfmt off
+	rows := sql db {
+		dynamic select from DynamicMember where {
+				if min_age > 0 {
+						age >= min_age
+				}
+		} order by age asc limit 2
+	}!
+	// vfmt on
+
+	assert rows.len == 2
+	assert rows[0].name == 'Bob'
+	assert rows[0].age == 19
+	assert rows[1].name == 'Alice'
+	assert rows[1].age == 31
 }

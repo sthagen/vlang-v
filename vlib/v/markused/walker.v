@@ -36,18 +36,21 @@ mut:
 	all_decltypes map[string]ast.TypeDecl
 	all_structs   map[string]ast.StructDecl
 
-	cur_fn                     string
-	cur_fn_concrete_types      []ast.Type
-	level                      int
-	is_builtin_mod             bool
-	is_direct_array_access     bool
-	inside_in_op               bool
-	inside_comptime            int
-	inside_comptime_if         int
-	used_fn_generic_types      map[string][][]ast.Type
-	walked_fn_generic_types    map[string][][]ast.Type
-	keep_all_fn_generic_types  map[string]bool
-	json2_encode_field_helpers map[string]bool
+	cur_fn                      string
+	cur_fn_concrete_types       []ast.Type
+	level                       int
+	is_builtin_mod              bool
+	is_direct_array_access      bool
+	inside_in_op                bool
+	inside_comptime             int
+	inside_comptime_if          int
+	used_fn_generic_types       map[string][][]ast.Type
+	used_fn_generic_type_keys   map[string]bool
+	walked_fn_generic_types     map[string][][]ast.Type
+	walked_fn_generic_type_keys map[string]bool
+	expanding_fn_generic_types  map[string]bool
+	keep_all_fn_generic_types   map[string]bool
+	json2_encode_field_helpers  map[string]bool
 
 	// dependencies finding flags
 	uses_atomic                bool // has atomic
@@ -269,6 +272,15 @@ fn (mut w Walker) mark_json2_optional_field_helpers(concrete_typ ast.Type) {
 	}
 }
 
+fn (mut w Walker) remember_generic_fn_instance(fkey string, concrete_types []ast.Type) {
+	resolved_concrete_types := w.resolve_current_concrete_types(concrete_types)
+	if resolved_concrete_types.len == 0 || resolved_concrete_types.any(it.has_flag(.generic)) {
+		return
+	}
+	w.record_used_fn_generic_types(fkey, resolved_concrete_types)
+	w.mark_fn_as_used(fkey)
+}
+
 fn (mut w Walker) mark_json2_encode_field_helpers(receiver_typ ast.Type, concrete_typ ast.Type) {
 	helper_key := '${int(receiver_typ)}:${int(concrete_typ)}'
 	if w.json2_encode_field_helpers[helper_key] {
@@ -295,16 +307,16 @@ fn (mut w Walker) mark_json2_encode_field_helpers(receiver_typ ast.Type, concret
 			continue
 		}
 		if encode_struct_field_value_fn.name != '' {
-			w.fn_decl_with_concrete_types(mut encode_struct_field_value_fn, [field.typ])
+			w.remember_generic_fn_instance(encode_struct_field_value_fn.fkey(), [field.typ])
 		}
 		if struct_field_is_none_fn.name != '' && field.typ.has_flag(.option) {
-			w.fn_decl_with_concrete_types(mut struct_field_is_none_fn, [field.typ])
+			w.remember_generic_fn_instance(struct_field_is_none_fn.fkey(), [field.typ])
 		}
 		if struct_field_is_nil_fn.name != '' && field.typ.nr_muls() > 0 {
-			w.fn_decl_with_concrete_types(mut struct_field_is_nil_fn, [field.typ])
+			w.remember_generic_fn_instance(struct_field_is_nil_fn.fkey(), [field.typ])
 		}
 		if check_not_empty_fn.name != '' {
-			w.fn_decl_with_concrete_types(mut check_not_empty_fn, [field.typ])
+			w.remember_generic_fn_instance(check_not_empty_fn.fkey(), [field.typ])
 		}
 	}
 }
@@ -468,9 +480,30 @@ fn (mut w Walker) record_used_fn_generic_types(fkey string, concrete_types []ast
 	if concrete_types.len == 0 || concrete_types.any(it.has_flag(.generic)) {
 		return
 	}
-	if concrete_types !in w.used_fn_generic_types[fkey] {
-		w.used_fn_generic_types[fkey] << concrete_types.clone()
+	key := w.fn_generic_types_key(fkey, concrete_types)
+	if w.used_fn_generic_type_keys[key] {
+		return
 	}
+	w.used_fn_generic_type_keys[key] = true
+	w.used_fn_generic_types[fkey] << concrete_types.clone()
+}
+
+fn (w &Walker) fn_generic_types_key(fkey string, concrete_types []ast.Type) string {
+	mut parts := []string{cap: concrete_types.len}
+	for typ in concrete_types {
+		parts << w.table.type_to_str(typ)
+	}
+	return '${fkey}:${parts.join('|')}'
+}
+
+fn (mut w Walker) record_walked_fn_generic_types(fkey string, concrete_types []ast.Type) bool {
+	key := w.fn_generic_types_key(fkey, concrete_types)
+	if w.walked_fn_generic_type_keys[key] {
+		return false
+	}
+	w.walked_fn_generic_type_keys[key] = true
+	w.walked_fn_generic_types[fkey] << concrete_types.clone()
+	return true
 }
 
 @[inline]
@@ -1480,11 +1513,10 @@ fn (mut w Walker) fn_decl_with_concrete_types(mut node ast.FnDecl, concrete_type
 	resolved_concrete_types := w.resolve_current_concrete_types(concrete_types)
 	if resolved_concrete_types.len > 0 {
 		w.record_used_fn_generic_types(fkey, resolved_concrete_types)
-		if resolved_concrete_types in w.walked_fn_generic_types[fkey] {
+		if !w.record_walked_fn_generic_types(fkey, resolved_concrete_types) {
 			w.mark_fn_as_used(fkey)
 			return
 		}
-		w.walked_fn_generic_types[fkey] << resolved_concrete_types.clone()
 	} else if w.used_fns[fkey] {
 		return
 	}
@@ -1633,7 +1665,7 @@ fn (mut w Walker) fn_decl_with_concrete_types(mut node ast.FnDecl, concrete_type
 		if concrete_sym.kind == .sum_type {
 			for concrete_type_list in w.sumtype_variant_concrete_types([concrete_typ]) {
 				if concrete_type_list != resolved_concrete_types {
-					w.fn_decl_with_concrete_types(mut node, concrete_type_list)
+					w.remember_generic_fn_instance(node.fkey(), concrete_type_list)
 				}
 			}
 		}
@@ -1642,7 +1674,7 @@ fn (mut w Walker) fn_decl_with_concrete_types(mut node ast.FnDecl, concrete_type
 				'encode_array')
 			if encode_array_fkey != '' {
 				if mut encode_array_fn := w.all_fns[encode_array_fkey] {
-					w.fn_decl_with_concrete_types(mut encode_array_fn, resolved_concrete_types)
+					w.remember_generic_fn_instance(encode_array_fn.fkey(), resolved_concrete_types)
 				}
 			}
 		}
@@ -1650,7 +1682,7 @@ fn (mut w Walker) fn_decl_with_concrete_types(mut node ast.FnDecl, concrete_type
 			encode_map_fkey, _ := w.resolve_method_fkey_for_type(node.receiver.typ, 'encode_map')
 			if encode_map_fkey != '' {
 				if mut encode_map_fn := w.all_fns[encode_map_fkey] {
-					w.fn_decl_with_concrete_types(mut encode_map_fn, resolved_concrete_types)
+					w.remember_generic_fn_instance(encode_map_fn.fkey(), resolved_concrete_types)
 				}
 			}
 		}
@@ -2056,8 +2088,12 @@ pub fn (mut w Walker) call_expr(mut node ast.CallExpr) {
 				&& call_concrete_types.len > 0)
 			if can_walk_method {
 				if keep_all_generic_types {
-					for concrete_type_list in w.table.fn_generic_types[fn_name] {
-						w.fn_decl_with_concrete_types(mut stmt, concrete_type_list)
+					if !w.expanding_fn_generic_types[fn_name] {
+						w.expanding_fn_generic_types[fn_name] = true
+						for concrete_type_list in w.table.fn_generic_types[fn_name] {
+							w.fn_decl_with_concrete_types(mut stmt, concrete_type_list)
+						}
+						w.expanding_fn_generic_types.delete(fn_name)
 					}
 				} else {
 					w.fn_decl_with_concrete_types(mut stmt, call_concrete_types)
@@ -3281,6 +3317,15 @@ fn (mut w Walker) mark_resource_dependencies() {
 		w.fn_by_name(array_idx_str + '.slice')
 		w.fn_by_name(array_idx_str + '.get')
 	}
+	if w.pref.backend == .c
+		&& (w.uses_arr_getter || w.uses_arr_setter || w.uses_guard || w.uses_index_check) {
+		w.mark_builtin_array_method_as_used('get_i64')
+		w.mark_builtin_array_method_as_used('get_u64')
+		w.mark_builtin_array_method_as_used('get_with_check_i64')
+		w.mark_builtin_array_method_as_used('get_with_check_u64')
+		w.mark_builtin_array_method_as_used('set_i64')
+		w.mark_builtin_array_method_as_used('set_u64')
+	}
 	if w.uses_str_index {
 		w.fn_by_name(string_idx_str + '.at')
 		if w.uses_str_index_check {
@@ -3289,6 +3334,12 @@ fn (mut w Walker) mark_resource_dependencies() {
 		if w.uses_str_range {
 			w.fn_by_name(string_idx_str + '.substr')
 		}
+	}
+	if w.pref.backend == .c && w.uses_str_index {
+		w.fn_by_name(string_idx_str + '.at_i64')
+		w.fn_by_name(string_idx_str + '.at_u64')
+		w.fn_by_name(string_idx_str + '.at_with_check_i64')
+		w.fn_by_name(string_idx_str + '.at_with_check_u64')
 	}
 	for typ, _ in w.table.used_features.print_types {
 		w.mark_by_type(typ)
@@ -3408,6 +3459,15 @@ fn (mut w Walker) mark_resource_dependencies() {
 	}
 	if w.uses_fixed_arr_int {
 		w.fn_by_name('v_fixed_index')
+	}
+	if w.pref.backend == .c && w.uses_fixed_arr_int {
+		w.fn_by_name('v_fixed_index_i64')
+		w.fn_by_name('v_fixed_index_u64')
+	}
+	if w.pref.backend == .c
+		&& (w.uses_arr_range_index || w.uses_str_range_index || w.uses_range_index_check) {
+		w.fn_by_name('v_slice_index_i64')
+		w.fn_by_name('v_slice_index_u64')
 	}
 	if w.uses_str_range_index {
 		w.fn_by_name(string_idx_str + '.substr')

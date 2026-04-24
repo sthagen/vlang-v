@@ -25,6 +25,17 @@ fn (p &Preferences) default_thread_stack_size() int {
 	}
 }
 
+fn (p &Preferences) is_linux_wayland_only_session() bool {
+	if p.os != .linux {
+		return false
+	}
+	if os.getenv('DISPLAY') != '' {
+		return false
+	}
+	return os.getenv('WAYLAND_DISPLAY') != ''
+		|| os.getenv('XDG_SESSION_TYPE').to_lower() == 'wayland'
+}
+
 fn (mut p Preferences) expand_lookup_paths() {
 	if p.vroot == '' {
 		// Location of all vlib files
@@ -246,7 +257,6 @@ pub fn (mut p Preferences) fill_with_defaults() {
 	}
 	p.ccompiler_type = cc_from_string(p.ccompiler)
 	p.normalize_gc_defaults_for_resolved_ccompiler()
-	p.disable_tcc_shared_backtraces()
 	p.is_test = p.path.ends_with('_test.v') || p.path.ends_with('_test.vv')
 		|| p.path.all_before_last('.v').all_before_last('.').ends_with('_test')
 	p.is_vsh = p.path.ends_with('.vsh') || p.raw_vsh_tmp_prefix != ''
@@ -262,6 +272,9 @@ pub fn (mut p Preferences) fill_with_defaults() {
 
 	final_os := p.os.lower()
 	p.parse_define(final_os)
+	if p.is_linux_wayland_only_session() && 'linux_wayland_session' !in p.compile_defines_all {
+		p.parse_define('linux_wayland_session')
+	}
 
 	// Prepare the cache manager. All options that can affect the generated cached .c files
 	// should go into res.cache_manager.vopts, which is used as a salt for the cache hash.
@@ -302,9 +315,10 @@ pub fn (mut p Preferences) fill_with_defaults() {
 	}
 }
 
-// normalize_gc_defaults_for_resolved_ccompiler clears stale default GC state
-// after the effective C compiler has been resolved.
+// normalize_gc_defaults_for_resolved_ccompiler clears stale compiler-dependent
+// defaults after the effective C compiler has been resolved.
 pub fn (mut p Preferences) normalize_gc_defaults_for_resolved_ccompiler() {
+	p.disable_tcc_shared_backtraces()
 	if p.os != .windows || p.ccompiler_type != .msvc || p.gc_set_by_flag {
 		return
 	}
@@ -411,9 +425,9 @@ fn (mut p Preferences) find_cc_if_cross_compiling() {
 }
 
 fn (mut p Preferences) try_to_use_tcc_by_default() {
-	bundled_tcc := usable_bundled_tcc_compiler(os.dir(vexe_path()))
+	preferred_tcc := default_tcc_compiler()
 	if p.ccompiler == 'tcc' {
-		p.ccompiler = if bundled_tcc != '' { bundled_tcc } else { 'tcc' }
+		p.ccompiler = if preferred_tcc != '' { preferred_tcc } else { 'tcc' }
 		return
 	}
 	if p.ccompiler == '' {
@@ -426,9 +440,21 @@ fn (mut p Preferences) try_to_use_tcc_by_default() {
 		if p.is_prod {
 			return
 		}
-		p.ccompiler = bundled_tcc
+		p.ccompiler = preferred_tcc
 		return
 	}
+}
+
+fn usable_system_tcc_compiler() string {
+	if get_host_os() != .termux {
+		return ''
+	}
+	system_tcc := os.find_abs_path_of_executable('tcc') or { return '' }
+	tcc_probe := os.execute('${os.quoted_path(system_tcc)} -v')
+	if tcc_probe.exit_code != 0 {
+		return ''
+	}
+	return system_tcc
 }
 
 fn usable_bundled_tcc_compiler(vroot string) string {
@@ -444,11 +470,15 @@ fn usable_bundled_tcc_compiler(vroot string) string {
 	return vtccexe
 }
 
-// default_tcc_compiler returns the bundled TinyCC path when it exists and works on the host.
+// default_tcc_compiler returns the preferred TinyCC path when it exists and works on the host.
 pub fn default_tcc_compiler() string {
 	vexe := vexe_path()
 	vroot := os.dir(vexe)
-	return usable_bundled_tcc_compiler(vroot)
+	bundled_tcc := usable_bundled_tcc_compiler(vroot)
+	if bundled_tcc != '' {
+		return bundled_tcc
+	}
+	return usable_system_tcc_compiler()
 }
 
 pub fn (mut p Preferences) default_c_compiler() {

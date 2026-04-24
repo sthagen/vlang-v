@@ -454,30 +454,30 @@ fn (mut c Checker) can_convert_array_elem_to_interface_array(got ast.Type, expec
 	return c.table.does_type_implement_interface(got_type, expected_type)
 }
 
-fn (mut c Checker) warn_if_integer_literal_overflow_for_known_type(expected ast.Type, expr ast.Expr, pos token.Pos) {
+fn (c &Checker) integer_literal_outside_type_range(expected ast.Type, expr ast.Expr) bool {
 	if !expected.is_int() {
-		return
+		return false
 	}
 	if expr !is ast.IntegerLiteral {
-		return
+		return false
 	}
 	int_lit := expr as ast.IntegerLiteral
 	mut lit := int_lit.val.replace('_', '')
 	if lit.len == 0 {
-		return
+		return false
 	}
 	is_negative := lit.starts_with('-')
 	if is_negative || lit.starts_with('+') {
 		lit = lit[1..]
 	}
 	if lit.len == 0 {
-		return
+		return false
 	}
 	literal_value := lit.u64()
 	bits, _ := c.table.type_size(expected.idx_type())
 	bit_size := bits * 8
 	if bit_size == 0 {
-		return
+		return false
 	}
 	mut outside_type_range := false
 	if expected.is_signed() {
@@ -498,11 +498,17 @@ fn (mut c Checker) warn_if_integer_literal_overflow_for_known_type(expected ast.
 			outside_type_range = literal_value > max_unsigned
 		}
 	}
-	if outside_type_range {
-		expected_type_str := c.table.type_to_str(expected.clear_flag(.variadic))
-		c.warn('value `${int_lit.val}` is outside the range of `${expected_type_str}` in argument, this will be considered hard error soon',
-			pos)
+	return outside_type_range
+}
+
+fn (mut c Checker) warn_if_integer_literal_overflow_for_known_type(expected ast.Type, expr ast.Expr, pos token.Pos) {
+	if !c.integer_literal_outside_type_range(expected, expr) {
+		return
 	}
+	int_lit := expr as ast.IntegerLiteral
+	expected_type_str := c.table.type_to_str(expected.clear_flag(.variadic))
+	c.warn('value `${int_lit.val}` is outside the range of `${expected_type_str}` in argument, this will be considered hard error soon',
+		pos)
 }
 
 fn (c &Checker) get_string_names_of(got ast.Type, expected ast.Type) (string, string) {
@@ -995,26 +1001,27 @@ fn (mut c Checker) symmetric_check(left ast.Type, right ast.Type) bool {
 	return c.check_basic(left, right)
 }
 
+fn (c &Checker) type_args_from_generic_name(name string) []ast.Type {
+	if !name.contains('[') || !name.ends_with(']') {
+		return []ast.Type{}
+	}
+	mut parsed := []ast.Type{}
+	for arg_name in ast.split_generic_args(name.all_after_last('[').trim_right(']')) {
+		idx := c.table.find_type_idx(arg_name.trim_space())
+		if idx <= 0 {
+			return []ast.Type{}
+		}
+		parsed << ast.idx_to_type(idx)
+	}
+	return parsed
+}
+
 fn (c &Checker) generic_type_args_and_parent_idx(typ ast.Type) ([]ast.Type, int) {
 	mut base_typ := c.table.fully_unaliased_type(typ.clear_flags().clear_option_and_result())
 	if base_typ.nr_muls() > 0 {
 		base_typ = base_typ.deref()
 	}
 	sym := c.table.sym(base_typ)
-	parse_type_args_from_name := fn [c] (name string) []ast.Type {
-		if !name.contains('[') || !name.ends_with(']') {
-			return []ast.Type{}
-		}
-		mut parsed := []ast.Type{}
-		for arg_name in ast.split_generic_args(name.all_after_last('[').trim_right(']')) {
-			idx := c.table.find_type_idx(arg_name.trim_space())
-			if idx <= 0 {
-				return []ast.Type{}
-			}
-			parsed << ast.idx_to_type(idx)
-		}
-		return parsed
-	}
 	match sym.info {
 		ast.Struct {
 			mut type_args := sym.info.concrete_types.clone()
@@ -1025,7 +1032,7 @@ fn (c &Checker) generic_type_args_and_parent_idx(typ ast.Type) ([]ast.Type, int)
 				type_args = sym.info.generic_types.clone()
 			}
 			if type_args.len == 0 {
-				type_args = parse_type_args_from_name(sym.name)
+				type_args = c.type_args_from_generic_name(sym.name)
 			}
 			parent_idx := if sym.parent_idx > 0 {
 				sym.parent_idx
@@ -1045,7 +1052,7 @@ fn (c &Checker) generic_type_args_and_parent_idx(typ ast.Type) ([]ast.Type, int)
 				type_args = sym.info.generic_types.clone()
 			}
 			if type_args.len == 0 {
-				type_args = parse_type_args_from_name(sym.name)
+				type_args = c.type_args_from_generic_name(sym.name)
 			}
 			parent_idx := if sym.parent_idx > 0 {
 				sym.parent_idx
@@ -1065,7 +1072,7 @@ fn (c &Checker) generic_type_args_and_parent_idx(typ ast.Type) ([]ast.Type, int)
 				type_args = sym.info.generic_types.clone()
 			}
 			if type_args.len == 0 {
-				type_args = parse_type_args_from_name(sym.name)
+				type_args = c.type_args_from_generic_name(sym.name)
 			}
 			parent_idx := if sym.parent_idx > 0 {
 				sym.parent_idx

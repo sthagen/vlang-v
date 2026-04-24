@@ -210,6 +210,25 @@ fn test_imported_empty_interface_concat_does_not_emit_noop_array_cast_helper() {
 	assert !compilation.output.contains(symbol)
 }
 
+fn test_windows_sharedlive_string_interpolation_in_ternary_does_not_emit_inline_tmp_decl() {
+	os.chdir(vroot) or {}
+	test_source := os.join_path(os.vtmp_dir(), 'coutput_live_windows_ternary_str_intp.vv')
+	os.write_file(test_source,
+		"module main\n\n@[live]\nfn foo(ok bool, name string) string {\n\treturn if ok { 'Hello, \${name}!' } else { '\${u32(7)}' }\n}\n\nfn main() {\n\tprintln(foo(true, 'V'))\n}\n")!
+	defer {
+		os.rm(test_source) or {}
+	}
+	cmd := '${os.quoted_path(vexe)} -o - -os windows -sharedlive ${os.quoted_path(test_source)}'
+	compilation := os.execute(cmd)
+	ensure_compilation_succeeded(compilation, cmd)
+	mut normalized := compilation.output.replace('\t', ' ').replace('\n', ' ')
+	for normalized.contains('  ') {
+		normalized = normalized.replace('  ', ' ')
+	}
+	assert !normalized.contains('? ( string _t')
+	assert compilation.output.contains('builtin__str_intp')
+}
+
 fn test_no_main_exports_initialize_windows_runtime() {
 	os.chdir(vroot) or {}
 	test_source := os.join_path(os.vtmp_dir(), 'coutput_no_main_export_windows_init.vv')
@@ -240,6 +259,89 @@ fn test_no_main_exports_initialize_windows_runtime() {
 	for expected_line in expected_lines {
 		assert does_line_match_one_of_generated_lines(expected_line, generated_c_lines)
 	}
+}
+
+fn test_user_defined_windows_dllmain_disables_generated_entrypoint() {
+	os.chdir(vroot) or {}
+	test_source := os.join_path(os.vtmp_dir(), 'coutput_user_defined_windows_dllmain.vv')
+	os.write_file(test_source,
+		['module test', '', 'pub type C.DWORD = u32', 'pub type C.LPVOID = voidptr', '', 'fn C._vinit_caller()', 'fn C._vcleanup_caller()', '', "@[export: 'library_answer']", 'pub fn library_answer() int {', '\treturn 42', '}', '', "@[export: 'DllMain']", 'pub fn dll_main(hinst C.HINSTANCE, reason C.DWORD, reserved C.LPVOID) C.BOOL {', '\t_ = hinst', '\t_ = reserved', '\tif reason == C.DWORD(1) {', '\t\tC._vinit_caller()', '\t} else if reason == C.DWORD(0) {', '\t\tC._vcleanup_caller()', '\t}', '\treturn 1', '}'].join('\n') +
+		'\n')!
+	defer {
+		os.rm(test_source) or {}
+	}
+	cmd := '${os.quoted_path(vexe)} -o - -os windows -shared -gc boehm ${os.quoted_path(test_source)}'
+	compilation := os.execute(cmd)
+	ensure_compilation_succeeded(compilation, cmd)
+	assert compilation.output.contains('void _vinit_caller() {')
+	assert compilation.output.contains('GC_set_pages_executable(0);')
+	assert compilation.output.contains('GC_INIT();')
+	assert compilation.output.contains('DllMain(')
+	assert compilation.output.contains('_vinit_caller();')
+	assert compilation.output.contains('_vcleanup_caller();')
+	assert !compilation.output.contains('switch (fdwReason)')
+	assert !compilation.output.contains('case DLL_PROCESS_ATTACH')
+}
+
+fn test_array_sort_with_compare_uses_qsort_adapters() {
+	os.chdir(vroot) or {}
+	test_source := os.join_path(os.vtmp_dir(), 'coutput_array_sort_with_compare_qsort_adapter.vv')
+	source_lines := [
+		'module main',
+		'',
+		'struct Foo {',
+		'\tx int',
+		'}',
+		'',
+		'fn by_x(a &Foo, b &Foo) int {',
+		'\treturn a.x - b.x',
+		'}',
+		'',
+		'fn main() {',
+		'\tmut xs := [Foo{ x: 2 }, Foo{ x: 1 }]',
+		'\txs.sort_with_compare(by_x)',
+		'\tmut ys := [Foo{ x: 2 }, Foo{ x: 1 }]!',
+		'\tys.sort_with_compare(by_x)',
+		'\tmut zs := [Foo{ x: 2 }, Foo{ x: 1 }]',
+		'\tzs.sort(a.x < b.x)',
+		'}',
+	]
+	os.write_file(test_source, source_lines.join('\n') + '\n')!
+	defer {
+		os.rm(test_source) or {}
+	}
+	cmd := '${os.quoted_path(vexe)} -o - ${os.quoted_path(test_source)}'
+	compilation := os.execute(cmd)
+	ensure_compilation_succeeded(compilation, cmd)
+	mut normalized := compilation.output.replace('\t', ' ').replace('\n', ' ')
+	for normalized.contains('  ') {
+		normalized = normalized.replace('  ', ' ')
+	}
+	assert normalized.contains('int main__by_x_qsort_adapter(const void* a, const void* b) { return main__by_x((main__Foo*)a, (main__Foo*)b); }')
+	assert normalized.contains('if (xs.len > 0) { qsort(xs.data, xs.len, xs.element_size, main__by_x_qsort_adapter); }')
+	assert normalized.contains('qsort(&ys, 2, sizeof(main__Foo), main__by_x_qsort_adapter);')
+	assert normalized.contains('_qsort_adapter(const void* a, const void* b) { return compare_')
+	assert normalized.contains('qsort(zs.data, zs.len, zs.element_size, compare_')
+	assert normalized.contains('_qsort_adapter);')
+}
+
+fn test_veb_implicit_ctx_alias_uses_user_context_name() {
+	os.chdir(vroot) or {}
+	test_source := os.join_path(os.vtmp_dir(), 'coutput_veb_implicit_ctx_alias.vv')
+	os.write_file(test_source,
+		['module main', '', 'import veb', '', 'struct App {}', '', 'struct Context {', '\tveb.Context', '}', '', 'fn (app App) nested(mut ctx Context) veb.Result {', "\treturn ctx.text('nested')", '}', '', 'fn (app App) log(_ Context) {', "\tprintln('hi')", '}', '', 'fn (app App) index(mut c Context) veb.Result {', '\tapp.log(c)', '\treturn app.nested()', '}', '', 'fn main() {', '\tmut app := App{}', '\tmut ctx := Context{}', '\t_ = app.index(mut ctx)', '}'].join('\n') +
+		'\n')!
+	defer {
+		os.rm(test_source) or {}
+	}
+	cmd := '${os.quoted_path(vexe)} -o - ${os.quoted_path(test_source)}'
+	compilation := os.execute(cmd)
+	ensure_compilation_succeeded(compilation, cmd)
+	mut normalized := compilation.output.replace('\t', ' ').replace('\n', ' ')
+	for normalized.contains('  ') {
+		normalized = normalized.replace('  ', ' ')
+	}
+	assert normalized.contains('veb__Result main__App_index(main__App app, main__Context* c) { main__App_log(app, *c); GC_reachable_here(&c); return main__App_nested(app, c); }')
 }
 
 fn does_line_match_one_of_generated_lines(line string, generated_c_lines []string) bool {
@@ -364,6 +466,14 @@ fn should_skip(relpath string) bool {
 		if gcc_path == '' {
 			eprintln('> skipping ${relpath} since it needs gcc, which is not detected')
 			return true
+		}
+	}
+	if user_os == 'macos' {
+		$if arm64 {
+			if relpath.ends_with('spawn_stack_nix.vv') {
+				eprintln('> skipping ${relpath} on macOS arm64, since i386 linking is unavailable')
+				return true
+			}
 		}
 	}
 	return false

@@ -336,9 +336,6 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 				c.error('cannot dereference a function call on the left side of an assignment, use a temporary variable',
 					left.pos)
 			}
-		} else if mut left is ast.IndexExpr && left.index is ast.RangeExpr {
-			c.error('cannot reassign using range expression on the left side of an assignment',
-				left.pos)
 		} else if mut left is ast.Ident && node.op == .decl_assign {
 			if left.name in c.global_names {
 				c.note('the global variable named `${left.name}` already exists', left.pos)
@@ -356,6 +353,10 @@ fn (mut c Checker) assign_stmt(mut node ast.AssignStmt) {
 				c.is_index_assign = true
 			}
 			left_type = c.expr(mut left)
+			if left is ast.IndexExpr && left.index is ast.RangeExpr && !left.is_index_operator {
+				c.error('cannot reassign using range expression on the left side of an assignment',
+					left.pos)
+			}
 			left_type = c.smartcasted_assign_lhs_type(left, left_type)
 			c.is_index_assign = false
 			c.expected_type = c.unwrap_generic(left_type)
@@ -947,12 +948,15 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 				} else {
 					left_type
 				}
-				if left_deref == ast.string_type {
+				if c.is_string_like_type(left_deref) {
 					if node.op != .plus_assign {
 						c.error('operator `${node.op}` not defined on left operand type `${left_sym.name}`',
 							left.pos())
 					}
-					if right_type != ast.string_type {
+					if node.op == .plus_assign && !c.is_string_concat_type(right_type) {
+						c.error('invalid right operand: ${left_sym.name} ${node.op} ${right_sym.name}',
+							right.pos())
+					} else if node.op != .plus_assign && !c.is_string_like_type(right_type) {
 						c.error('invalid right operand: ${left_sym.name} ${node.op} ${right_sym.name}',
 							right.pos())
 					}
@@ -1136,8 +1140,12 @@ or use an explicit `unsafe{ a[..] }`, if you do not want a copy of the slice.',
 					right.pos())
 			}
 			// Dual sides check (compatibility check)
-			assign_right_type := if original_op in [.left_shift_assign, .right_shift_assign,
-				.unsigned_right_shift_assign] {
+			is_string_plus_assign := original_op == .plus_assign
+				&& c.is_string_like_type(left_type_unwrapped)
+				&& c.is_string_concat_type(right_type_unwrapped)
+			assign_right_type := if
+				original_op in [.left_shift_assign, .right_shift_assign, .unsigned_right_shift_assign]
+				|| is_string_plus_assign {
 				left_type_unwrapped
 			} else {
 				right_type_unwrapped

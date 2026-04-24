@@ -695,6 +695,9 @@ fn (mut g Gen) is_used_by_main(node ast.FnDecl) bool {
 	if node.is_method && node.name in ['[]', '[]='] {
 		return true
 	}
+	if node.is_test && node.name.all_after_last('.') in ['before_each', 'after_each'] {
+		return true
+	}
 	if node.mod == 'builtin' && node.name in ['print', 'println', 'eprint', 'eprintln'] {
 		return true
 	}
@@ -2479,6 +2482,16 @@ fn (mut g Gen) gen_array_method_call(node ast.CallExpr, left_type ast.Type, left
 		.sorted {
 			g.gen_array_sorted(node)
 		}
+		.sort_with_compare {
+			if !g.gen_array_sort_with_compare(node) {
+				return false
+			}
+		}
+		.sorted_with_compare {
+			if !g.gen_array_sorted_with_compare(node) {
+				return false
+			}
+		}
 		.insert {
 			g.gen_array_insert(node)
 		}
@@ -2644,10 +2657,14 @@ fn (mut g Gen) gen_fixed_array_method_call(node ast.CallExpr, left_type ast.Type
 			g.gen_array_sorted(node)
 		}
 		.sort_with_compare {
-			g.gen_fixed_array_sort_with_compare(node)
+			if !g.gen_array_sort_with_compare(node) {
+				return false
+			}
 		}
 		.sorted_with_compare {
-			g.gen_fixed_array_sorted_with_compare(node)
+			if !g.gen_array_sorted_with_compare(node) {
+				return false
+			}
 		}
 		.reverse {
 			g.gen_fixed_array_reverse(node)
@@ -3749,19 +3766,27 @@ fn (g &Gen) has_active_call_generic_context() bool {
 		&& g.active_call_generic_names.len == g.active_call_concrete_types.len
 }
 
+fn (g &Gen) active_call_generic_concrete_types(generic_names []string) []ast.Type {
+	if generic_names.len == 0 || !g.has_active_call_generic_context() {
+		return []ast.Type{}
+	}
+	mut concrete_types := []ast.Type{cap: generic_names.len}
+	for generic_name in generic_names {
+		idx := g.active_call_generic_names.index(generic_name)
+		if idx < 0 || idx >= g.active_call_concrete_types.len {
+			return []ast.Type{}
+		}
+		concrete_types << g.active_call_concrete_types[idx]
+	}
+	return concrete_types
+}
+
 fn (g &Gen) active_call_lambda_concrete_types(node ast.LambdaExpr) []ast.Type {
 	if node.func == unsafe { nil } || node.func.decl.generic_names.len == 0 {
 		return []ast.Type{}
 	}
-	if g.has_active_call_generic_context() {
-		mut concrete_types := []ast.Type{cap: node.func.decl.generic_names.len}
-		for generic_name in node.func.decl.generic_names {
-			idx := g.active_call_generic_names.index(generic_name)
-			if idx < 0 || idx >= g.active_call_concrete_types.len {
-				return []ast.Type{}
-			}
-			concrete_types << g.active_call_concrete_types[idx]
-		}
+	concrete_types := g.active_call_generic_concrete_types(node.func.decl.generic_names)
+	if concrete_types.len > 0 {
 		return concrete_types
 	}
 	if node.call_ctx != unsafe { nil }
@@ -4358,6 +4383,9 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		if method := left_sym.find_method(method_name) {
 			use_builtin_array_sort = method.params.len == 1
 		}
+	} else if final_left_sym.kind == .array
+		&& node.kind in [.sort_with_compare, .sorted_with_compare] && node.args.len == 1 {
+		use_builtin_array_sort = true
 	}
 	if final_left_sym.kind == .array && (!(left_sym.has_method(method_name)
 		|| left_sym.has_method_with_generic_parent(method_name))

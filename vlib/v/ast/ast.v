@@ -19,8 +19,8 @@ pub const result_name = '_result'
 pub const option_name = '_option'
 
 // V builtin types defined on .v files
-pub const builtins = ['string', 'array', 'DenseArray', 'map', 'Error', 'IError', option_name,
-	result_name]
+pub const builtins = ['string', 'array', 'DenseArray', 'map', 'Error', 'IError', 'SliceIndex',
+	option_name, result_name]
 
 pub type TypeDecl = AliasTypeDecl | FnTypeDecl | SumTypeDecl
 
@@ -745,9 +745,9 @@ pub mut:
 
 fn (f &Fn) method_equals(o &Fn) bool {
 	return f.params[1..].equals(o.params[1..]) && f.return_type == o.return_type
-		&& f.is_variadic == o.is_variadic && f.language == o.language
-		&& f.generic_names == o.generic_names && f.is_pub == o.is_pub && f.mod == o.mod
-		&& f.name == o.name
+		&& f.is_variadic == o.is_variadic && f.is_c_variadic == o.is_c_variadic
+		&& f.language == o.language && f.generic_names == o.generic_names && f.is_pub == o.is_pub
+		&& f.mod == o.mod && f.name == o.name
 }
 
 @[minify]
@@ -1057,6 +1057,7 @@ pub:
 	typ_pos     token.Pos
 	is_markused bool // an explicit `@[markused]` tag; the global will NOT be removed by `-skip-unused`
 	is_volatile bool
+	is_const    bool
 	is_exported bool // an explicit `@[export]` tag; the global will NOT be removed by `-skip-unused`
 	is_weak     bool
 	is_hidden   bool
@@ -1251,7 +1252,8 @@ pub fn (i &Ident) is_mut() bool {
 	match i.obj {
 		Var { return i.obj.is_mut }
 		ConstField, EmptyScopeObject { return false }
-		AsmRegister, GlobalField { return true }
+		AsmRegister { return true }
+		GlobalField { return !i.obj.is_const }
 	}
 }
 
@@ -1320,7 +1322,8 @@ pub struct IndexExpr {
 pub:
 	pos token.Pos
 pub mut:
-	index             Expr // [0], RangeExpr [start..end] or map[key]
+	index             Expr   // [0], RangeExpr [start..end] or map[key]
+	indices           []Expr // parsed index parts, e.g. [i], [i, j], [1..3, ..]
 	or_expr           OrExpr
 	left              Expr
 	left_type         Type // array, map, fixed array, or overloaded index receiver
@@ -2395,6 +2398,12 @@ pub enum SqlAggregateKind {
 	max
 }
 
+pub struct SqlSelectField {
+pub:
+	name string
+	pos  token.Pos
+}
+
 pub struct SqlExpr {
 pub:
 	aggregate_kind  SqlAggregateKind
@@ -2422,6 +2431,7 @@ pub mut:
 	limit_expr           Expr
 	offset_expr          Expr
 	table_expr           TypeNode
+	requested_fields     []SqlSelectField
 	fields               []StructField
 	sub_structs          map[string]SqlExpr
 	or_expr              OrExpr
@@ -2904,7 +2914,11 @@ pub fn (node Node) children() []Node {
 			IndexExpr {
 				index_expr := node
 				children << index_expr.left
-				children << index_expr.index
+				if index_expr.indices.len > 0 {
+					children << index_expr.indices.map(Node(it))
+				} else {
+					children << index_expr.index
+				}
 			}
 			IfExpr {
 				if_expr := node

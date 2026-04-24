@@ -62,6 +62,14 @@ fn test_mac_is_alias_for_macos() {
 	assert !pref.OS.linux.is_target_of('mac')
 }
 
+fn test_bsd_target_matches_macos_and_bsd_systems() {
+	for os_kind in [pref.OS.macos, .freebsd, .openbsd, .netbsd, .dragonfly] {
+		assert os_kind.is_target_of('bsd')
+	}
+	assert !pref.OS.linux.is_target_of('bsd')
+	assert !pref.OS.windows.is_target_of('bsd')
+}
+
 fn test_disable_explicit_mutability_flag() {
 	target := os.join_path(vroot, 'examples', 'hello_world.v')
 	prefs, _ := pref.parse_args_and_show_errors([], ['-disable-explicit-mutability', target], false)
@@ -111,6 +119,35 @@ fn new_wasm_preferences() pref.Preferences {
 	}
 }
 
+fn new_c_preferences() pref.Preferences {
+	return pref.Preferences{
+		backend: .c
+		os:      .linux
+		arch:    .amd64
+	}
+}
+
+fn test_c_backend_filters_backend_specific_files() {
+	prefs := new_c_preferences()
+	dir := os.join_path(os.vtmp_dir(), 'c_backend_filters')
+	filtered := prefs.should_compile_filtered_files(dir, [
+		'mod.c.v',
+		'mod.js.v',
+		'mod.v',
+		'mod.wasm.v',
+	])
+	assert filtered == [
+		os.join_path(dir, 'mod.c.v'),
+		os.join_path(dir, 'mod.v'),
+	]
+}
+
+fn test_c_backend_skips_modules_with_only_non_c_variants() {
+	prefs := new_c_preferences()
+	filtered := prefs.should_compile_filtered_files('sus', ['sus.js.v', 'sus.wasm.v'])
+	assert filtered.len == 0
+}
+
 fn test_wasm_backend_filters_backend_specific_files() {
 	prefs := new_wasm_preferences()
 	dir := os.join_path(os.vtmp_dir(), 'wasm_backend_filters')
@@ -130,6 +167,57 @@ fn test_wasm_backend_skips_modules_with_only_c_and_js_variants() {
 	prefs := new_wasm_preferences()
 	filtered := prefs.should_compile_filtered_files('sus', ['sus.c.v', 'sus.js.v'])
 	assert filtered.len == 0
+}
+
+fn filtered_file_names_for_os(os_kind pref.OS, files []string) []string {
+	prefs := pref.Preferences{
+		os: os_kind
+	}
+	dir := os.join_path(os.vtmp_dir(), 'environment_specific_files')
+	mut res := []string{}
+	for file in prefs.should_compile_filtered_files(dir, files) {
+		res << os.base(file)
+	}
+	return res
+}
+
+fn test_bsd_specific_files_are_filtered_by_target_os() {
+	for os_kind in [pref.OS.macos, .freebsd, .openbsd, .netbsd, .dragonfly] {
+		assert filtered_file_names_for_os(os_kind, ['mod_bsd.c.v', 'mod_bsd.v']) == [
+			'mod_bsd.c.v',
+			'mod_bsd.v',
+		]
+	}
+	assert filtered_file_names_for_os(.linux, ['mod_bsd.c.v', 'mod_bsd.v']).len == 0
+	assert filtered_file_names_for_os(.windows, ['mod_bsd.c.v', 'mod_bsd.v']).len == 0
+}
+
+fn test_bsd_specific_files_prefer_more_specific_variants() {
+	mut files := [
+		'main.v',
+		'something_default.c.v',
+		'something_windows.c.v',
+	]
+	assert filtered_file_names_for_os(.freebsd, files) == ['main.v', 'something_default.c.v']
+
+	files << 'something_nix.c.v'
+	assert filtered_file_names_for_os(.freebsd, files) == ['main.v', 'something_nix.c.v']
+
+	files << 'something_bsd.c.v'
+	assert filtered_file_names_for_os(.freebsd, files) == ['main.v', 'something_bsd.c.v']
+
+	files << 'something_freebsd.c.v'
+	assert filtered_file_names_for_os(.freebsd, files) == ['main.v', 'something_freebsd.c.v']
+}
+
+fn test_bsd_specific_files_prefer_darwin_on_macos() {
+	files := [
+		'main.v',
+		'something_nix.c.v',
+		'something_bsd.v',
+		'something_darwin.v',
+	]
+	assert filtered_file_names_for_os(.macos, files) == ['main.v', 'something_darwin.v']
 }
 
 fn test_explicit_gc_mode_is_forwarded_to_build_module() {
@@ -171,6 +259,7 @@ fn test_cross_compile_defaults_linux_to_amd64() {
 	target := os.join_path(vroot, 'examples', 'hello_world.v')
 	prefs, _ := pref.parse_args_and_show_errors([], ['', '-os', 'linux', target], false)
 	assert prefs.arch == .amd64
+	assert prefs.ccompiler == 'clang'
 }
 
 fn test_cross_compile_infers_android_arch_from_vcross_compiler_name() {
@@ -449,4 +538,45 @@ fn test_tcc_shared_builds_disable_backtraces() {
 	}
 	regular_prefs.fill_with_defaults()
 	assert 'no_backtrace' !in regular_prefs.compile_defines_all
+}
+
+fn test_late_resolved_tcc_shared_builds_disable_backtraces() {
+	mut shared_prefs := &pref.Preferences{
+		path:      'libfoo.v'
+		is_shared: true
+		ccompiler: 'gcc'
+	}
+	shared_prefs.fill_with_defaults()
+	assert 'no_backtrace' !in shared_prefs.compile_defines_all
+
+	shared_prefs.ccompiler_type = .tinyc
+	shared_prefs.normalize_gc_defaults_for_resolved_ccompiler()
+
+	assert 'no_backtrace' in shared_prefs.compile_defines_all
+	assert shared_prefs.build_options.contains('-d no_backtrace')
+}
+
+fn test_wayland_only_linux_session_surfaces_a_v_error_for_gg() {
+	if os.user_os() == 'windows' {
+		return
+	}
+	pid := os.getpid()
+	test_dir := os.join_path(os.vtmp_dir(), 'v_issue_18030_gg_wayland_${pid}')
+	source_path := os.join_path(test_dir, 'main.v')
+	exe_path := os.join_path(test_dir, 'app')
+	source := 'import gg as _\n\nfn main() {}\n'
+	os.mkdir_all(test_dir) or { panic(err) }
+	os.write_file(source_path, source) or { panic(err) }
+	defer {
+		os.rmdir_all(test_dir) or {}
+	}
+	cmd := 'DISPLAY= WAYLAND_DISPLAY=wayland-0 XDG_SESSION_TYPE=wayland ${os.quoted_path(vexe)} -os linux -o ${os.quoted_path(exe_path)} ${os.quoted_path(source_path)}'
+	res := os.execute(cmd)
+	output := res.output.replace('\r', '')
+	if res.exit_code == 0 {
+		eprintln('> failed command: ${cmd}')
+	}
+	assert res.exit_code != 0
+	assert output.contains('Wayland-only Linux session without `-d sokol_wayland`')
+	assert !output.contains('C error. This should never happen.')
 }
