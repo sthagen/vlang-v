@@ -2158,6 +2158,10 @@ fn (mut g Gen) expr_is_pointer(arg ast.Expr) bool {
 			return arg.op == .amp
 		}
 		ast.SelectorExpr {
+			if arg.lhs is ast.Ident && arg.lhs.name == 'C'
+				&& arg.rhs.name in ['stdin', 'stdout', 'stderr', 'environ'] {
+				return true
+			}
 			if arg.rhs.name == 'data' {
 				lhs_type := g.get_expr_type(arg.lhs)
 				if lhs_type == 'array' || lhs_type.starts_with('Array_') || lhs_type == 'map'
@@ -4142,6 +4146,15 @@ fn (mut g Gen) call_expr(lhs ast.Expr, args []ast.Expr) {
 	}
 	// array__repeat → array__repeat_to_depth with automatic depth for deep clone
 	if name == 'array__repeat' && call_args.len == 2 {
+		elem_type := g.infer_array_elem_type_from_expr(call_args[0]).trim_right('*')
+		if elem_type != '' && g.is_interface_type(elem_type) {
+			g.sb.write_string('${array_interface_repeat_fn_name(elem_type)}(')
+			g.gen_call_arg(name, 0, call_args[0])
+			g.sb.write_string(', ')
+			g.gen_call_arg(name, 1, call_args[1])
+			g.sb.write_string(')')
+			return
+		}
 		g.sb.write_string('array__repeat_to_depth(')
 		g.gen_call_arg(name, 0, call_args[0])
 		g.sb.write_string(', ')
@@ -4608,8 +4621,19 @@ fn (g &Gen) alias_base_c_type(type_name string) ?string {
 	if type_name == '' {
 		return none
 	}
+	cache_key := '${g.cur_module}|${type_name}'
+	if cached := g.alias_base_lookup_cache[cache_key] {
+		return cached
+	}
+	if cache_key in g.alias_base_lookup_miss {
+		return none
+	}
 	if base_name := g.alias_base_types[type_name] {
 		if base_name != '' && base_name != type_name {
+			unsafe {
+				mut self := g
+				self.alias_base_lookup_cache[cache_key] = base_name
+			}
 			return base_name
 		}
 	}
@@ -4628,12 +4652,20 @@ fn (g &Gen) alias_base_c_type(type_name string) ?string {
 				}
 				base_name := stmt.base_type.name().replace('.', '__')
 				if base_name != '' && base_name != type_name {
+					unsafe {
+						mut self := g
+						self.alias_base_lookup_cache[cache_key] = base_name
+					}
 					return base_name
 				}
 			}
 		}
 	}
 	if g.env == unsafe { nil } {
+		unsafe {
+			mut self := g
+			self.alias_base_lookup_miss[cache_key] = true
+		}
 		return none
 	}
 	mut modules := []string{}
@@ -4660,6 +4692,10 @@ fn (g &Gen) alias_base_c_type(type_name string) ?string {
 						alias_obj := obj as types.Alias
 						base_name := g.types_type_to_c(alias_obj.base_type)
 						if base_name != '' && base_name != type_name {
+							unsafe {
+								mut self := g
+								self.alias_base_lookup_cache[cache_key] = base_name
+							}
 							return base_name
 						}
 					}
@@ -4678,11 +4714,19 @@ fn (g &Gen) alias_base_c_type(type_name string) ?string {
 					alias_obj := obj as types.Alias
 					base_name := g.types_type_to_c(alias_obj.base_type)
 					if base_name != '' && base_name != type_name {
+						unsafe {
+							mut self := g
+							self.alias_base_lookup_cache[cache_key] = base_name
+						}
 						return base_name
 					}
 				}
 			}
 		}
+	}
+	unsafe {
+		mut self := g
+		self.alias_base_lookup_miss[cache_key] = true
 	}
 	return none
 }

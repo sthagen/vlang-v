@@ -15,6 +15,7 @@ set V_EXE=./v.exe
 set V_BOOTSTRAP=./v_win_bootstrap.exe
 set V_OLD=./v_old.exe
 set V_UPDATED=./v_up.exe
+set V_STAGE=./v_stage.exe
 set V_C_FILE=./vc/v_win.c
 set where_exe=where.exe
 if not ["%SystemRoot%"] == [""] if exist "%SystemRoot%\System32\where.exe" set where_exe=%SystemRoot%\System32\where.exe
@@ -140,34 +141,38 @@ if not [!compiler!] == [] goto :!compiler!_strap
 REM By default, use tcc, since we have it prebuilt:
 :tcc_strap
 :tcc32_strap
-echo  ^> Attempting to build "%V_BOOTSTRAP%" (from %V_C_FILE%) with "!tcc_exe!"
-"!tcc_exe!" -B"%tcc_dir%" -bt10 -g -w -o "%V_BOOTSTRAP%" "%V_C_FILE%" -ladvapi32 -lws2_32 -Wl,-stack=33554432
+call :build_bootstrap_with_tcc
 if %ERRORLEVEL% NEQ 0 goto :compile_error
 echo  ^> Compiling "%V_EXE%" with "%V_BOOTSTRAP%"
 REM Keep the TCC root relative here; V forwards -cflags through a response file.
 REM An absolute -B path breaks there when the checkout path contains spaces.
 "%V_BOOTSTRAP%" -keepc -g -showcc -cc "!tcc_exe!" -cflags -Bthirdparty/tcc -o "%V_UPDATED%" cmd/v
-if %ERRORLEVEL% NEQ 0 goto :clang_strap
+if %ERRORLEVEL% NEQ 0 goto :tcc_retry_with_host_bootstrap
+call :move_updated_to_v
+goto :success
+
+:tcc_retry_with_host_bootstrap
+echo  ^> TCC-built bootstrap failed; retrying bootstrap with Clang/GCC before compiling "%V_EXE%" with TCC
+call :build_bootstrap_with_clang
+if %ERRORLEVEL% NEQ 0 call :build_bootstrap_with_gcc
+if %ERRORLEVEL% NEQ 0 (
+	if [!compiler!] == [] goto :clang_strap
+	goto :compile_error
+)
+echo  ^> Compiling "%V_EXE%" with "%V_BOOTSTRAP%"
+"%V_BOOTSTRAP%" -keepc -g -showcc -cc "!tcc_exe!" -cflags -Bthirdparty/tcc -o "%V_UPDATED%" cmd/v
+if %ERRORLEVEL% NEQ 0 (
+	if [!compiler!] == [] goto :clang_strap
+	goto :compile_error
+)
 call :move_updated_to_v
 goto :success
 
 :clang_strap
-"%where_exe%" /q clang
+call :build_bootstrap_with_clang
 if %ERRORLEVEL% NEQ 0 (
-	echo  ^> Clang not found
 	if not [!compiler!] == [] goto :error
 	goto :gcc_strap
-)
-
-if "%PROCESSOR_ARCHITECTURE%" == "x86" ( set clang_target=i686-w64-mingw32 ) else ( set clang_target=x86_64-w64-mingw32 )
-
-echo  ^> Attempting to build "%V_BOOTSTRAP%" (from %V_C_FILE%) with Clang
-clang --target=!clang_target! -std=c99 -municode -g -w -Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types -o "%V_BOOTSTRAP%" "%V_C_FILE%" -ladvapi32 -lws2_32 -Wl,-stack=33554432
-if %ERRORLEVEL% NEQ 0 (
-	echo In most cases, compile errors happen because the version of Clang installed is too old
-	clang --version
-	if [!compiler!] == [] goto :gcc_strap
-	goto :compile_error
 )
 
 echo  ^> Compiling "%V_EXE%" with "%V_BOOTSTRAP%"
@@ -177,19 +182,10 @@ call :move_updated_to_v
 goto :success
 
 :gcc_strap
-call :find_gcc_exe
+call :build_bootstrap_with_gcc
 if %ERRORLEVEL% NEQ 0 (
-	echo  ^> GCC not found
 	if not [!compiler!] == [] goto :error
 	goto :msvc_strap
-)
-
-echo  ^> Attempting to build "%V_BOOTSTRAP%" (from %V_C_FILE%) with GCC "!gcc_exe!"
-"!gcc_exe!" -std=c99 -municode -g -w -o "%V_BOOTSTRAP%" "%V_C_FILE%" -ladvapi32 -lws2_32 -Wl,-stack=33554432
-if %ERRORLEVEL% NEQ 0 (
-	echo In most cases, compile errors happen because the version of GCC installed is too old
-	"!gcc_exe!" --version
-	goto :compile_error
 )
 
 echo  ^> Compiling "%V_EXE%" with "%V_BOOTSTRAP%"
@@ -225,19 +221,40 @@ if exist "%InstallDir%/Common7/Tools/vsdevcmd.bat" (
 
 set ObjFile=.v.c.obj
 
-echo  ^> Attempting to build "%V_BOOTSTRAP%" from %V_C_FILE% with MSVC
-cl.exe /volatile:ms /Fo%ObjFile% /W0 /MT /D_VBOOTSTRAP /F33554432 "%V_C_FILE%" user32.lib kernel32.lib advapi32.lib shell32.lib ws2_32.lib /link /nologo /out:"%V_BOOTSTRAP%" /incremental:no
-if %ERRORLEVEL% NEQ 0 (
-	echo In some cases, compile errors happen because of the MSVC compiler version
-	cl.exe
+echo  ^> Bootstrapping "%V_BOOTSTRAP%" before compiling "%V_EXE%" with MSVC
+set stage_vflags=
+call :build_bootstrap_with_clang
+if %ERRORLEVEL% EQU 0 (
+	set stage_vflags=-cc clang -cflags "--target=!clang_target!"
+) else (
+	call :build_bootstrap_with_gcc
+	if %ERRORLEVEL% EQU 0 (
+		set stage_vflags=-cc "!gcc_exe!"
+	) else (
+		call :build_bootstrap_with_tcc
+		if %ERRORLEVEL% EQU 0 set stage_vflags=-cc "!tcc_exe!" -cflags -Bthirdparty/tcc
+	)
+)
+if not defined stage_vflags (
+	echo Could not build a bootstrap compiler before compiling with MSVC
 	if exist %ObjFile% del %ObjFile%
 	goto :compile_error
 )
 
-echo  ^> Compiling "%V_EXE%" with "%V_BOOTSTRAP%"
-"%V_BOOTSTRAP%" -keepc -g -showcc -cc msvc -o "%V_UPDATED%" cmd/v
+echo  ^> Compiling "%V_STAGE%" with "%V_BOOTSTRAP%"
+"%V_BOOTSTRAP%" -keepc -g -showcc !stage_vflags! -o "%V_STAGE%" cmd/v
+if %ERRORLEVEL% NEQ 0 (
+	if exist %ObjFile% del %ObjFile%
+	if exist "%V_STAGE%" del "%V_STAGE%"
+	goto :compile_error
+)
+
+echo  ^> Compiling "%V_EXE%" with "%V_STAGE%"
+"%V_STAGE%" -keepc -g -showcc -cc msvc -o "%V_UPDATED%" cmd/v
+set msvc_error=%ERRORLEVEL%
 if exist %ObjFile% del %ObjFile%
-if %ERRORLEVEL% NEQ 0 goto :compile_error
+if exist "%V_STAGE%" del "%V_STAGE%"
+if %msvc_error% NEQ 0 goto :compile_error
 call :move_updated_to_v
 goto :success
 
@@ -378,6 +395,46 @@ echo  ^> Cloning from remote !vc_url!
 git clone --filter=blob:none --quiet "%vc_url%"
 exit /b 0
 
+:build_bootstrap_with_tcc
+if not exist "!tcc_exe!" (
+	echo  ^> TCC not found
+	exit /b 1
+)
+echo  ^> Attempting to build "%V_BOOTSTRAP%" (from %V_C_FILE%) with "!tcc_exe!"
+"!tcc_exe!" -B"%tcc_dir%" -bt10 -g -w -o "%V_BOOTSTRAP%" "%V_C_FILE%" -ladvapi32 -lws2_32 -Wl,-stack=33554432
+exit /b %ERRORLEVEL%
+
+:build_bootstrap_with_clang
+"%where_exe%" /q clang
+if %ERRORLEVEL% NEQ 0 (
+	echo  ^> Clang not found
+	exit /b 1
+)
+if "%PROCESSOR_ARCHITECTURE%" == "x86" ( set clang_target=i686-w64-mingw32 ) else ( set clang_target=x86_64-w64-mingw32 )
+echo  ^> Attempting to build "%V_BOOTSTRAP%" (from %V_C_FILE%) with Clang
+clang --target=!clang_target! -std=c99 -municode -g -w -Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types -o "%V_BOOTSTRAP%" "%V_C_FILE%" -ladvapi32 -lws2_32 -Wl,-stack=33554432
+if %ERRORLEVEL% NEQ 0 (
+	echo In most cases, compile errors happen because the version of Clang installed is too old
+	clang --version
+	exit /b 1
+)
+exit /b 0
+
+:build_bootstrap_with_gcc
+call :find_gcc_exe
+if %ERRORLEVEL% NEQ 0 (
+	echo  ^> GCC not found
+	exit /b 1
+)
+echo  ^> Attempting to build "%V_BOOTSTRAP%" (from %V_C_FILE%) with GCC "!gcc_exe!"
+"!gcc_exe!" -std=c99 -municode -g -w -o "%V_BOOTSTRAP%" "%V_C_FILE%" -ladvapi32 -lws2_32 -Wl,-stack=33554432
+if %ERRORLEVEL% NEQ 0 (
+	echo In most cases, compile errors happen because the version of GCC installed is too old
+	"!gcc_exe!" --version
+	exit /b 1
+)
+exit /b 0
+
 :find_gcc_exe
 REM Prefer MinGW target-prefixed drivers when present, so PATH conflicts do not pick an unrelated gcc.exe.
 set "gcc_exe="
@@ -421,14 +478,6 @@ exit /b 0
 :move_updated_to_v
 @REM del "%V_EXE%" &:: breaks if `makev.bat` is run from `v up` b/c of held file handle on `%V_EXE%`
 if exist "%V_EXE%" move "%V_EXE%" "%V_OLD%" >nul
-REM sleep for at most 100ms
-ping 192.0.2.1 -n 1 -w 100 >nul
-move "%V_UPDATED%" "%V_EXE%" >nul
-exit /b 0
-1 -n 1 -w 100 >nul
-move "%V_UPDATED%" "%V_EXE%" >nul
-exit /b 0
-%" >nul
 REM sleep for at most 100ms
 ping 192.0.2.1 -n 1 -w 100 >nul
 move "%V_UPDATED%" "%V_EXE%" >nul
