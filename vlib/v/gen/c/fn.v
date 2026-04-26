@@ -774,6 +774,16 @@ fn file_has_c_includes(file &ast.File) bool {
 	return false
 }
 
+fn modules_with_c_includes(files []&ast.File) map[string]bool {
+	mut mods := map[string]bool{}
+	for file in files {
+		if file_has_c_includes(file) {
+			mods[file.mod.name] = true
+		}
+	}
+	return mods
+}
+
 fn file_imports_c_header_module(file &ast.File) bool {
 	if file == unsafe { nil } {
 		return false
@@ -809,7 +819,8 @@ fn (g &Gen) c_prelude_provides_decl(c_sym_name string) bool {
 fn (g &Gen) should_emit_c_fallback_decl(node ast.FnDecl) bool {
 	c_sym_name := node.name.all_after_first('C__').all_after_first('C.')
 	if node.language != .c || node.is_c_extern || file_has_c_includes(node.source_file)
-		|| g.module_has_c_header_module(node.source_file) || g.c_prelude_provides_decl(c_sym_name) {
+		|| node.mod in g.mods_with_c_includes || g.module_has_c_header_module(node.source_file)
+		|| g.c_prelude_provides_decl(c_sym_name) {
 		return false
 	}
 	if node.source_file == unsafe { nil } {
@@ -1093,6 +1104,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 	defer {
 		g.cur_fn = cur_fn_save
 		g.cur_concrete_types = cur_concrete_types_save
+		g.clear_type_resolution_caches()
 	}
 	mut effective_cur_fn := *node
 	if g.cur_concrete_types.len > 0 && effective_generic_names.len == g.cur_concrete_types.len
@@ -1120,6 +1132,7 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 		// TODO: remove unsafe
 		g.cur_fn = &effective_cur_fn
 	}
+	g.clear_type_resolution_caches()
 	g.refresh_current_generic_fn_scope_vars(g.cur_fn)
 	fn_start_pos := g.out.len
 	is_closure := node.scope.has_inherited_vars()
@@ -1722,6 +1735,12 @@ fn (mut g Gen) gen_anon_fn(mut node ast.AnonFn) {
 						g.write('${closure_ctx}->${var_name}[${i}],')
 					}
 					g.writeln('},')
+				} else if g.resolved_ident_is_by_value_auto_deref_capture(ast.Ident{
+					name:  var.name
+					scope: node.decl.scope
+				})
+				{
+					g.writeln('.${var_name} = *${closure_ctx}->${var_name},')
 				} else {
 					g.writeln('.${var_name} = ${closure_ctx}->${var_name},')
 				}
@@ -1856,7 +1875,6 @@ fn (mut g Gen) fn_decl_params(params []ast.Param, scope &ast.Scope, is_variadic 
 		}
 	}
 	for i, param in params {
-		mut caname := if param.name in ['', '_'] { '_d${i + 1}' } else { c_name(param.name) }
 		mut typ := g.unwrap_generic(param.typ)
 		if g.pref.translated && g.file.is_translated && param.typ.has_flag(.variadic) {
 			typ = g.table.sym(typ).array_info().elem_type.set_flag(.variadic)
@@ -1885,6 +1903,13 @@ fn (mut g Gen) fn_decl_params(params []ast.Param, scope &ast.Scope, is_variadic 
 			typ = typ.ref()
 		}
 		param_type_sym := g.table.sym(typ)
+		mut caname := if param.name in ['', '_'] {
+			'_d${i + 1}'
+		} else if param_type_sym.kind == .function && !typ.has_flag(.option) {
+			c_fn_name(param.name)
+		} else {
+			c_name(param.name)
+		}
 		mut param_type_name := g.styp(typ)
 		if param.typ.has_flag(.generic) {
 			param_type_name = param_type_name.replace_each(c_fn_name_escape_seq)
@@ -3310,7 +3335,7 @@ fn (mut g Gen) resolved_generic_call_arg_type(arg ast.CallArg) ast.Type {
 	return g.unwrap_generic(g.recheck_concrete_type(arg_type))
 }
 
-fn (g &Gen) generic_param_infer_type(param ast.Param) ast.Type {
+fn (mut g Gen) generic_param_infer_type(param ast.Param) ast.Type {
 	if param.orig_typ != 0 && (param.orig_typ.has_flag(.generic)
 		|| g.type_has_unresolved_generic_parts(param.orig_typ)) {
 		return param.orig_typ
@@ -3707,33 +3732,31 @@ fn (mut g Gen) current_fn_generic_params() ([]ast.Param, []string) {
 		|| g.cur_concrete_types.len == 0 {
 		return []ast.Param{}, []string{}
 	}
-	mut params := g.cur_fn.params.clone()
-	mut generic_names := g.cur_fn.generic_names.clone()
 	if g.cur_fn.name.contains('_T_') {
 		for generic_fn in g.file.generic_fns {
 			if generic_fn.generic_names.len == 0 {
 				continue
 			}
 			if g.generic_fn_name(g.cur_concrete_types, generic_fn.name) == g.cur_fn.name {
-				return generic_fn.params.clone(), generic_fn.generic_names.clone()
+				return generic_fn.params, generic_fn.generic_names
 			}
 		}
-		return params, generic_names
+		return g.cur_fn.params, g.cur_fn.generic_names
 	}
 	if func := g.table.find_fn(g.cur_fn.name) {
-		params = func.params.clone()
 		if func.generic_names.len > 0 {
-			generic_names = func.generic_names.clone()
+			return func.params, func.generic_names
 		}
+		return func.params, g.cur_fn.generic_names
 	} else if g.cur_fn.mod != '' && !g.cur_fn.name.contains('.') {
 		if func := g.table.find_fn('${g.cur_fn.mod}.${g.cur_fn.name}') {
-			params = func.params.clone()
 			if func.generic_names.len > 0 {
-				generic_names = func.generic_names.clone()
+				return func.params, func.generic_names
 			}
+			return func.params, g.cur_fn.generic_names
 		}
 	}
-	return params, generic_names
+	return g.cur_fn.params, g.cur_fn.generic_names
 }
 
 fn (mut g Gen) current_fn_generic_names() []string {
@@ -3797,11 +3820,11 @@ fn (mut g Gen) resolve_active_call_concrete_type(typ ast.Type) ast.Type {
 }
 
 fn (mut g Gen) call_args_with_context(node ast.CallExpr, generic_names []string, concrete_types []ast.Type) {
-	old_generic_names := g.active_call_generic_names.clone()
-	old_concrete_types := g.active_call_concrete_types.clone()
+	old_generic_names := g.active_call_generic_names
+	old_concrete_types := g.active_call_concrete_types
 	if generic_names.len > 0 && generic_names.len == concrete_types.len {
-		g.active_call_generic_names = generic_names.clone()
-		g.active_call_concrete_types = concrete_types.clone()
+		g.active_call_generic_names = generic_names
+		g.active_call_concrete_types = concrete_types
 	} else {
 		g.active_call_generic_names = []string{}
 		g.active_call_concrete_types = []ast.Type{}
@@ -3918,8 +3941,7 @@ fn (mut g Gen) refresh_current_generic_local_scope_vars(scope &ast.Scope) {
 	}
 }
 
-fn (mut g Gen) resolve_current_fn_generic_param_type(name string) ast.Type {
-	params, generic_names := g.current_fn_generic_params()
+fn (mut g Gen) resolve_generic_param_type_from_params(name string, params []ast.Param, generic_names []string) ast.Type {
 	if params.len == 0 || generic_names.len == 0 {
 		return 0
 	}
@@ -3933,6 +3955,42 @@ fn (mut g Gen) resolve_current_fn_generic_param_type(name string) ast.Type {
 		}
 	}
 	return 0
+}
+
+fn (mut g Gen) resolve_current_fn_generic_param_type(name string) ast.Type {
+	if g.cur_fn == unsafe { nil } || g.cur_fn.generic_names.len == 0
+		|| g.cur_concrete_types.len == 0 {
+		return 0
+	}
+	if g.cur_fn.name.contains('_T_') {
+		for generic_fn in g.file.generic_fns {
+			if generic_fn.generic_names.len == 0 {
+				continue
+			}
+			if g.generic_fn_name(g.cur_concrete_types, generic_fn.name) == g.cur_fn.name {
+				return g.resolve_generic_param_type_from_params(name, generic_fn.params,
+					generic_fn.generic_names)
+			}
+		}
+		return g.resolve_generic_param_type_from_params(name, g.cur_fn.params,
+			g.cur_fn.generic_names)
+	}
+	if func := g.table.find_fn(g.cur_fn.name) {
+		if func.generic_names.len > 0 {
+			return g.resolve_generic_param_type_from_params(name, func.params, func.generic_names)
+		}
+		return g.resolve_generic_param_type_from_params(name, func.params, g.cur_fn.generic_names)
+	} else if g.cur_fn.mod != '' && !g.cur_fn.name.contains('.') {
+		if func := g.table.find_fn('${g.cur_fn.mod}.${g.cur_fn.name}') {
+			if func.generic_names.len > 0 {
+				return g.resolve_generic_param_type_from_params(name, func.params,
+					func.generic_names)
+			}
+			return g.resolve_generic_param_type_from_params(name, func.params,
+				g.cur_fn.generic_names)
+		}
+	}
+	return g.resolve_generic_param_type_from_params(name, g.cur_fn.params, g.cur_fn.generic_names)
 }
 
 fn (mut g Gen) resolve_current_fn_generic_param_value_type(name string) ast.Type {
@@ -6239,26 +6297,19 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 		}
 		if i < expected_types.len {
 			if param := g.call_arg_param(node, i) {
-				concrete_param_type :=
-					g.resolve_active_call_concrete_type(param.typ.set_flag(.generic))
-				if concrete_param_type != 0 && concrete_param_type != expected_types[i]
-					&& !concrete_param_type.has_flag(.generic)
-					&& !g.type_has_unresolved_generic_parts(concrete_param_type)
-					&& ((expected_types[i] == 0 || expected_types[i].has_flag(.generic)
-					|| g.type_has_unresolved_generic_parts(expected_types[i]))
-					|| node.concrete_types.len > 0 || g.cur_concrete_types.len > 0) {
-					expected_types[i] = concrete_param_type
-				}
-				should_refresh_expected_type :=
-					(param.typ.has_flag(.generic) || g.type_has_unresolved_generic_parts(param.typ))
-					&& ((expected_types[i] == 0 || expected_types[i].has_flag(.generic)
-					|| g.type_has_unresolved_generic_parts(expected_types[i]))
-					|| (g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0))
-				if should_refresh_expected_type {
+				param_needs_generic_resolution := g.type_needs_generic_resolution(param.typ)
+					|| g.has_active_call_generic_context()
+				expected_needs_generic_resolution := expected_types[i] == 0
+					|| g.type_needs_generic_resolution(expected_types[i])
+				if param_needs_generic_resolution || expected_needs_generic_resolution
+					|| node.concrete_types.len > 0 || g.cur_concrete_types.len > 0 {
 					resolved_expected_type :=
 						g.resolve_active_call_concrete_type(param.typ.set_flag(.generic))
-					if resolved_expected_type != 0 && !resolved_expected_type.has_flag(.generic)
-						&& !g.type_has_unresolved_generic_parts(resolved_expected_type) {
+					if resolved_expected_type != 0 && resolved_expected_type != expected_types[i]
+						&& !g.type_needs_generic_resolution(resolved_expected_type)
+						&& (expected_needs_generic_resolution
+						|| node.concrete_types.len > 0
+						|| g.cur_concrete_types.len > 0) {
 						expected_types[i] =
 							g.unwrap_generic(g.recheck_concrete_type(resolved_expected_type))
 					}
@@ -6620,10 +6671,10 @@ fn (mut g Gen) ref_or_deref_arg_ex(arg ast.CallArg, expected_type_ ast.Type, lan
 	} else {
 		g.unwrap_generic(arg.typ)
 	}
+	in_generic_context := g.has_current_generic_context()
 	if arg.expr is ast.Ident {
-		needs_resolved_ident_type := arg_typ == 0 || arg_typ.has_flag(.generic)
-			|| g.type_has_unresolved_generic_parts(arg_typ)
-			|| (arg.expr.obj is ast.Var
+		needs_resolved_ident_type := arg_typ == 0
+			|| g.type_needs_generic_resolution(arg_typ) || (arg.expr.obj is ast.Var
 			&& (arg.expr.obj.ct_type_var in [.generic_param, .generic_var]
 			|| arg.expr.obj.is_inherited))
 		if needs_resolved_ident_type {
@@ -6639,7 +6690,7 @@ fn (mut g Gen) ref_or_deref_arg_ex(arg ast.CallArg, expected_type_ ast.Type, lan
 			}
 		}
 		if arg.expr.obj is ast.Var && arg.expr.obj.is_arg && arg.expr.obj.is_mut && !arg.is_mut
-			&& arg_typ.is_ptr() && !expected_type.is_any_kind_of_pointer() {
+			&& arg_typ.is_ptr() && !expected_type.is_any_kind_of_pointer() && in_generic_context {
 			resolved_param_type := g.resolve_current_fn_generic_param_type(arg.expr.name)
 			if resolved_param_type != 0 && !resolved_param_type.is_ptr() {
 				arg_typ = resolved_param_type
@@ -6648,12 +6699,15 @@ fn (mut g Gen) ref_or_deref_arg_ex(arg ast.CallArg, expected_type_ ast.Type, lan
 	}
 	needs_resolved_expr_type := arg.expr is ast.SelectorExpr
 		|| arg.expr is ast.IndexExpr || arg.expr is ast.ComptimeSelector
-		|| (arg.expr is ast.Ident && g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0)
+		|| (arg.expr is ast.Ident && in_generic_context && (arg_typ == 0
+		|| g.type_needs_generic_resolution(arg_typ) || (arg.expr.obj is ast.Var
+		&& (arg.expr.obj.ct_type_var != .no_comptime || arg.expr.obj.generic_typ != 0
+		|| arg.expr.obj.is_inherited || arg.expr.obj.smartcasts.len > 0
+		|| arg.expr.obj.is_unwrapped))))
 	if needs_resolved_expr_type {
 		resolved_arg_typ := g.resolved_expr_type(arg.expr, arg_typ)
-		if resolved_arg_typ != 0 && (arg_typ == 0 || arg_typ.has_flag(.generic)
-			|| g.type_has_unresolved_generic_parts(arg_typ)
-			|| (g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0)
+		if resolved_arg_typ != 0 && (arg_typ == 0 || g.type_needs_generic_resolution(arg_typ)
+			|| in_generic_context
 			|| g.unwrap_generic(resolved_arg_typ) != g.unwrap_generic(arg_typ)) {
 			arg_typ = g.unwrap_generic(g.recheck_concrete_type(resolved_arg_typ))
 		}

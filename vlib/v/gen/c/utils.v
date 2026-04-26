@@ -5,49 +5,108 @@ module c
 
 import v.ast
 
+const cgen_resolution_hash_prime = u64(1099511628211)
+const cgen_resolution_hash_seed = u64(14695981039346656037)
+const cgen_unwrap_generic_cache_salt = u64(0x9e3779b185ebca87)
+const cgen_scope_var_type_cache_salt = u64(0xc2b2ae3d27d4eb4f)
+
+@[inline]
+fn cgen_resolution_hash_mix(key u64, value u64) u64 {
+	return (key ^ value) * cgen_resolution_hash_prime
+}
+
+fn (mut g Gen) clear_type_resolution_caches() {
+	g.unwrap_generic_cache.clear()
+	g.resolved_scope_var_type_cache.clear()
+}
+
+fn (g &Gen) type_resolution_context_key() u64 {
+	mut key := cgen_resolution_hash_seed
+	if g.inside_struct_init {
+		key = cgen_resolution_hash_mix(key, 1)
+	}
+	key = cgen_resolution_hash_mix(key, u64(g.cur_struct_init_typ))
+	key = cgen_resolution_hash_mix(key, u64(g.cur_concrete_types.len))
+	for concrete_type in g.cur_concrete_types {
+		key = cgen_resolution_hash_mix(key, u64(concrete_type))
+	}
+	key = cgen_resolution_hash_mix(key, u64(g.active_call_concrete_types.len))
+	for concrete_type in g.active_call_concrete_types {
+		key = cgen_resolution_hash_mix(key, u64(concrete_type))
+	}
+	if g.comptime != unsafe { nil } {
+		key = cgen_resolution_hash_mix(key, u64(g.comptime.comptime_loop_id))
+		key = cgen_resolution_hash_mix(key, u64(g.comptime.comptime_for_field_type))
+		key = cgen_resolution_hash_mix(key, u64(g.comptime.comptime_for_method_ret_type))
+	}
+	return key
+}
+
+@[inline]
+fn (g &Gen) type_resolution_cache_key(typ ast.Type, salt u64) u64 {
+	return cgen_resolution_hash_mix(g.type_resolution_context_key(), u64(typ)) ^ salt
+}
+
+@[inline]
+fn (g &Gen) expr_resolution_cache_key(pos int, default_typ ast.Type, salt u64) u64 {
+	if pos <= 0 {
+		return 0
+	}
+	mut key := g.type_resolution_context_key()
+	key = cgen_resolution_hash_mix(key, u64(g.fid + 2))
+	key = cgen_resolution_hash_mix(key, u64(pos))
+	key = cgen_resolution_hash_mix(key, u64(default_typ))
+	return key ^ salt
+}
+
 fn (mut g Gen) unwrap_generic(typ ast.Type) ast.Type {
+	if typ == 0 {
+		return typ
+	}
+	if !typ.has_flag(.generic) {
+		idx := typ.idx()
+		if idx <= ast.nil_type_idx
+			|| (idx < g.generic_parts_cache.len && g.generic_parts_cache[idx] == 1) {
+			return typ
+		}
+	}
+	cache_key := g.type_resolution_cache_key(typ, cgen_unwrap_generic_cache_salt)
+	if cached := g.unwrap_generic_cache[cache_key] {
+		return cached
+	}
 	mut resolved_typ := g.recheck_concrete_type(typ)
 	if resolved_typ == 0 {
 		resolved_typ = typ
 	}
-	if resolved_typ.has_flag(.generic) || g.type_has_unresolved_generic_parts(resolved_typ) {
-		// NOTE: `convert_generic_type` should not mutate the table.
-		//
-		// It mutates if the generic type is for example `[]T` and the concrete
-		// type is an array type that has not been registered yet.
-		//
-		// This should have already happened in the checker, since it also calls
-		// `convert_generic_type`. `g.table` is made non-mut to make sure
-		// no one else can accidentally mutates the table.
-		current_generic_names := g.current_fn_generic_names()
-		if current_generic_names.len > 0 && current_generic_names.len == g.cur_concrete_types.len {
-			if t_typ := g.table.convert_generic_type(resolved_typ, current_generic_names,
-				g.cur_concrete_types)
-			{
-				return t_typ
-			}
-		} else if g.inside_struct_init {
-			if g.cur_struct_init_typ != 0 {
-				sym := g.table.sym(g.cur_struct_init_typ)
-				if sym.info is ast.Struct {
-					if sym.info.generic_types.len > 0 {
-						generic_names := sym.info.generic_types.map(g.table.sym(it).name)
-						mut concrete_types := sym.info.concrete_types.clone()
-						if concrete_types.len == 0 && sym.generic_types.len == generic_names.len
-							&& sym.generic_types != sym.info.generic_types {
-							concrete_types = sym.generic_types.clone()
-						}
-						if t_typ := g.table.convert_generic_type(resolved_typ, generic_names,
-							concrete_types)
-						{
-							return t_typ
-						}
-					}
-				}
-			}
-		} else if resolved_typ != 0 && g.table.sym(resolved_typ).kind == .struct {
-			// resolve selector `a.foo` where `a` is struct[T] on non generic function
-			sym := g.table.sym(resolved_typ)
+	if !resolved_typ.has_flag(.generic) {
+		resolved_idx := resolved_typ.idx()
+		if resolved_idx <= ast.nil_type_idx
+			|| (resolved_idx < g.generic_parts_cache.len
+			&& g.generic_parts_cache[resolved_idx] == 1)
+			|| !g.type_has_unresolved_generic_parts(resolved_typ) {
+			g.unwrap_generic_cache[cache_key] = resolved_typ
+			return resolved_typ
+		}
+	}
+	// NOTE: `convert_generic_type` should not mutate the table.
+	//
+	// It mutates if the generic type is for example `[]T` and the concrete
+	// type is an array type that has not been registered yet.
+	//
+	// This should have already happened in the checker, since it also calls
+	// `convert_generic_type`. `g.table` is made non-mut to make sure
+	// no one else can accidentally mutates the table.
+	current_generic_names := g.current_fn_generic_names()
+	if current_generic_names.len > 0 && current_generic_names.len == g.cur_concrete_types.len {
+		if t_typ := g.table.convert_generic_type(resolved_typ, current_generic_names,
+			g.cur_concrete_types)
+		{
+			g.unwrap_generic_cache[cache_key] = t_typ
+			return t_typ
+		}
+	} else if g.inside_struct_init {
+		if g.cur_struct_init_typ != 0 {
+			sym := g.table.sym(g.cur_struct_init_typ)
 			if sym.info is ast.Struct {
 				if sym.info.generic_types.len > 0 {
 					generic_names := sym.info.generic_types.map(g.table.sym(it).name)
@@ -59,21 +118,46 @@ fn (mut g Gen) unwrap_generic(typ ast.Type) ast.Type {
 					if t_typ := g.table.convert_generic_type(resolved_typ, generic_names,
 						concrete_types)
 					{
-						return t_typ
-					}
-
-					if t_typ := g.table.convert_generic_type(resolved_typ, generic_names,
-						g.cur_concrete_types)
-					{
+						g.unwrap_generic_cache[cache_key] = t_typ
 						return t_typ
 					}
 				}
 			}
 		}
+	} else if resolved_typ != 0 && g.table.sym(resolved_typ).kind == .struct {
+		// resolve selector `a.foo` where `a` is struct[T] on non generic function
+		sym := g.table.sym(resolved_typ)
+		if sym.info is ast.Struct {
+			if sym.info.generic_types.len > 0 {
+				generic_names := sym.info.generic_types.map(g.table.sym(it).name)
+				mut concrete_types := sym.info.concrete_types.clone()
+				if concrete_types.len == 0 && sym.generic_types.len == generic_names.len
+					&& sym.generic_types != sym.info.generic_types {
+					concrete_types = sym.generic_types.clone()
+				}
+				if t_typ := g.table.convert_generic_type(resolved_typ, generic_names,
+					concrete_types)
+				{
+					g.unwrap_generic_cache[cache_key] = t_typ
+					return t_typ
+				}
+
+				if t_typ := g.table.convert_generic_type(resolved_typ, generic_names,
+					g.cur_concrete_types)
+				{
+					g.unwrap_generic_cache[cache_key] = t_typ
+					return t_typ
+				}
+			}
+		}
+	}
+	if typ.has_flag(.generic) {
 		if t_typ := g.type_resolver.resolve_bound_generic_type(typ) {
+			g.unwrap_generic_cache[cache_key] = t_typ
 			return t_typ
 		}
 	}
+	g.unwrap_generic_cache[cache_key] = resolved_typ
 	return resolved_typ
 }
 
@@ -204,6 +288,14 @@ fn (mut g Gen) recheck_concrete_type(typ ast.Type) ast.Type {
 	if typ == 0 {
 		return typ
 	}
+	if g.cur_fn == unsafe { nil } || g.cur_concrete_types.len == 0 {
+		return typ
+	}
+	idx := typ.idx()
+	if idx <= ast.nil_type_idx || (!typ.has_flag(.generic) && idx < g.generic_parts_cache.len
+		&& g.generic_parts_cache[idx] == 1) {
+		return typ
+	}
 	sym := g.table.sym(typ)
 	match sym.info {
 		ast.Struct, ast.Interface, ast.SumType {
@@ -231,7 +323,7 @@ fn (mut g Gen) recheck_concrete_type(typ ast.Type) ast.Type {
 	if generic_names.len == 0 || generic_names.len != g.cur_concrete_types.len {
 		return typ
 	}
-	concrete_types := g.cur_concrete_types.clone()
+	concrete_types := g.cur_concrete_types
 	if resolved_typ := g.table.convert_generic_type(typ, generic_names, concrete_types) {
 		return resolved_typ
 	}
@@ -241,6 +333,34 @@ fn (mut g Gen) recheck_concrete_type(typ ast.Type) ast.Type {
 		return unwrapped_typ
 	}
 	return typ
+}
+
+@[inline]
+fn (g &Gen) has_current_generic_context() bool {
+	return g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0
+}
+
+@[inline]
+fn (mut g Gen) type_needs_generic_resolution(typ ast.Type) bool {
+	if typ == 0 {
+		return false
+	}
+	if typ.has_flag(.generic) {
+		return true
+	}
+	if typ.idx() <= ast.nil_type_idx {
+		return false
+	}
+	if (g.cur_fn == unsafe { nil } || g.cur_concrete_types.len == 0)
+		&& !g.has_active_call_generic_context() {
+		return false
+	}
+	idx := typ.idx()
+	if idx <= ast.nil_type_idx
+		|| (idx < g.generic_parts_cache.len && g.generic_parts_cache[idx] == 1) {
+		return false
+	}
+	return g.type_has_unresolved_generic_parts(typ)
 }
 
 // is_expr_smartcast_to_sumtype checks if expr is a smartcast variable/field
@@ -308,6 +428,23 @@ fn (g &Gen) auto_deref_source_type_is_pointer(expr ast.Expr) bool {
 }
 
 fn (mut g Gen) resolved_scope_var_type(expr ast.Ident) ast.Type {
+	if g.has_active_call_generic_context() {
+		return g.resolved_scope_var_type_uncached(expr)
+	}
+	cache_key := g.expr_resolution_cache_key(expr.pos.pos, 0, cgen_scope_var_type_cache_salt)
+	if cache_key != 0 {
+		if cached := g.resolved_scope_var_type_cache[cache_key] {
+			return cached
+		}
+	}
+	resolved := g.resolved_scope_var_type_uncached(expr)
+	if cache_key != 0 && resolved != 0 {
+		g.resolved_scope_var_type_cache[cache_key] = resolved
+	}
+	return resolved
+}
+
+fn (mut g Gen) resolved_scope_var_type_uncached(expr ast.Ident) ast.Type {
 	mut scope := if expr.scope != unsafe { nil } {
 		expr.scope.innermost(expr.pos.pos)
 	} else {
@@ -975,9 +1112,12 @@ fn (mut g Gen) resolved_expr_type(expr ast.Expr, default_typ ast.Type) ast.Type 
 					}
 				}
 			}
-			resolved := g.resolve_current_fn_generic_param_type(expr.name)
-			if resolved != 0 {
-				return g.unwrap_generic(g.recheck_concrete_type(resolved))
+			if g.cur_fn != unsafe { nil } && g.cur_fn.generic_names.len > 0
+				&& g.cur_concrete_types.len > 0 {
+				resolved := g.resolve_current_fn_generic_param_type(expr.name)
+				if resolved != 0 {
+					return g.unwrap_generic(g.recheck_concrete_type(resolved))
+				}
 			}
 			if expr.obj is ast.Var && expr.obj.typ != 0 {
 				resolved_obj_type := g.unwrap_generic(g.recheck_concrete_type(expr.obj.typ))

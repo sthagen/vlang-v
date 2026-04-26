@@ -13,8 +13,33 @@ import v.type_resolver
 import v.errors
 import strings
 
+@[ignore_overflow]
 fn comptime_power_i64(base i64, exponent i64) i64 {
-	return math.powi(base, exponent)
+	mut exp := exponent
+	mut power := base
+	mut value := i64(1)
+	if exp < 0 {
+		if base == 0 {
+			return -1
+		}
+		return if base * base != 1 {
+			0
+		} else {
+			if exp & 1 > 0 {
+				base
+			} else {
+				1
+			}
+		}
+	}
+	for exp > 0 {
+		if exp & 1 > 0 {
+			value *= power
+		}
+		power *= power
+		exp >>= 1
+	}
+	return value
 }
 
 fn comptime_power_f64(base f64, exponent f64) f64 {
