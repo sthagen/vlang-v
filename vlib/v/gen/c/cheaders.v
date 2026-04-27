@@ -373,7 +373,10 @@ typedef int (*qsort_callback_func)(const void*, const void*);
 	#define V_CRT_LINKAGE
 	#define V_CRT_CALL
 #endif
-#if defined(_MSC_VER) && !defined(__clang__)
+#if (defined(_MSC_VER) && !defined(__clang__)) || defined(__cplusplus)
+// Under C++ (g++/clang++), let libc declare FILE/stdio/string/stdlib to keep
+// noexcept specifiers consistent — the manual extern "C" prototypes below
+// would otherwise conflict with system headers under -std=c++NN.
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -476,7 +479,12 @@ typedef __builtin_va_list va_list;
 	#define va_copy(dest, src) __builtin_va_copy(dest, src)
 #endif
 #endif
-#if !defined(_MSC_VER) || defined(__clang__)
+#if (!defined(_MSC_VER) || defined(__clang__)) && !defined(__cplusplus)
+// mingw-w64 stdio.h declares these as static __mingw_ovr inline overrides
+// when __USE_MINGW_ANSI_STDIO is on. Skip them under gcc+mingw to avoid
+// static-after-extern conflicts; clang+mingw needs them because it builds
+// with -Werror=implicit-function-declaration and does not hit the conflict.
+#if !((defined(__MINGW32__) || defined(__MINGW64__)) && !defined(__clang__))
 V_CRT_LINKAGE int V_CRT_CALL vfprintf(FILE *stream, const char *format, va_list ap);
 V_CRT_LINKAGE int V_CRT_CALL vsnprintf(char *str, size_t size, const char *format, va_list ap);
 V_CRT_LINKAGE int V_CRT_CALL fprintf(FILE *stream, const char *format, ...);
@@ -485,6 +493,7 @@ V_CRT_LINKAGE int V_CRT_CALL snprintf(char *str, size_t size, const char *format
 V_CRT_LINKAGE int V_CRT_CALL sprintf(char *str, const char *format, ...);
 V_CRT_LINKAGE int V_CRT_CALL sscanf(const char *str, const char *format, ...);
 V_CRT_LINKAGE int V_CRT_CALL scanf(const char *format, ...);
+#endif
 V_CRT_LINKAGE int V_CRT_CALL puts(const char *str);
 V_CRT_LINKAGE void V_CRT_CALL perror(const char *str);
 V_CRT_LINKAGE int V_CRT_CALL fputs(const char *str, FILE *stream);
@@ -546,6 +555,11 @@ V_CRT_LINKAGE isize V_CRT_CALL getline(char **lineptr, size_t *n, FILE *stream);
 V_CRT_LINKAGE int V_CRT_CALL _fileno(FILE *stream);
 V_CRT_LINKAGE FILE * V_CRT_CALL _wfopen(const unsigned short *filename, const unsigned short *mode);
 V_CRT_LINKAGE int V_CRT_CALL _wremove(const unsigned short *path);
+V_CRT_LINKAGE void * V_CRT_CALL _aligned_malloc(size_t size, size_t alignment);
+V_CRT_LINKAGE void * V_CRT_CALL _aligned_realloc(void *memory, size_t size, size_t alignment);
+V_CRT_LINKAGE void V_CRT_CALL _aligned_free(void *memory);
+V_CRT_LINKAGE unsigned short * V_CRT_CALL _wgetenv(const unsigned short *varname);
+V_CRT_LINKAGE int V_CRT_CALL _wputenv(const unsigned short *envstring);
 #endif
 #if defined(_MSC_VER) && !defined(__clang__)
 #ifndef _TRUNCATE
@@ -553,8 +567,6 @@ V_CRT_LINKAGE int V_CRT_CALL _wremove(const unsigned short *path);
 #endif
 V_CRT_LINKAGE int V_CRT_CALL _vscprintf(const char *format, va_list ap);
 V_CRT_LINKAGE int V_CRT_CALL _vsnprintf_s(char *buffer, size_t size, size_t count, const char *format, va_list ap);
-V_CRT_LINKAGE unsigned short * V_CRT_CALL _wgetenv(const unsigned short *varname);
-V_CRT_LINKAGE int V_CRT_CALL _wputenv(const unsigned short *envstring);
 #endif
 #endif
 #ifndef _IOFBF
