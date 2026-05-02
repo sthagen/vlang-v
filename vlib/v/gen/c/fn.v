@@ -58,6 +58,7 @@ const c_manual_prelude_decl_names = [
 	'srand',
 	'atexit',
 	'exit',
+	'abs',
 	'atoi',
 	'atof',
 	'getenv',
@@ -70,6 +71,10 @@ const c_manual_prelude_decl_names = [
 	'mkstemp',
 	'qsort',
 	'strcmp',
+	'strncmp',
+	'strdup',
+	'strcasecmp',
+	'strncasecmp',
 	'strlen',
 	'strerror',
 	'memcpy',
@@ -82,6 +87,20 @@ const c_manual_prelude_decl_names = [
 	'fseek',
 	'getline',
 	'__ctype_b_loc',
+]
+
+const vinix_c_linker_symbol_names = [
+	'text_start',
+	'text_end',
+	'rodata_start',
+	'rodata_end',
+	'data_start',
+	'data_end',
+	'interrupt_thunks',
+]
+
+const c_compiler_builtin_decl_names = [
+	'__builtin_return_address',
 ]
 
 fn collect_function_defer_stmts(node &ast.FnDecl) []ast.DeferStmt {
@@ -813,6 +832,9 @@ fn modules_with_c_includes(files []&ast.File) map[string]bool {
 	for file in files {
 		if file_has_c_includes(file) {
 			mods[file.mod.name] = true
+			if file.mod.name.ends_with('.c') {
+				mods[file.mod.name.all_before_last('.')] = true
+			}
 		}
 	}
 	return mods
@@ -852,6 +874,12 @@ fn (g &Gen) c_prelude_provides_decl(c_sym_name string) bool {
 
 fn (g &Gen) should_emit_c_fallback_decl(node ast.FnDecl) bool {
 	c_sym_name := node.name.all_after_first('C__').all_after_first('C.')
+	if c_sym_name in c_compiler_builtin_decl_names {
+		return false
+	}
+	if g.pref.os == .vinix && c_sym_name in vinix_c_linker_symbol_names {
+		return false
+	}
 	if node.language != .c || node.is_c_extern || file_has_c_includes(node.source_file)
 		|| node.mod in g.mods_with_c_includes || g.module_has_c_header_module(node.source_file)
 		|| g.c_prelude_provides_decl(c_sym_name) {
@@ -864,6 +892,73 @@ fn (g &Gen) should_emit_c_fallback_decl(node ast.FnDecl) bool {
 		return true
 	}
 	return node.mod == 'main' || node.source_file.is_test
+}
+
+fn (g &Gen) should_emit_c_signature_type_decls(node ast.FnDecl) bool {
+	return node.is_c_extern || g.should_emit_c_fallback_decl(node)
+		|| (node.no_body && node.attrs.contains('c'))
+}
+
+fn (mut g Gen) ensure_c_extern_signature_type_decls(node ast.FnDecl) {
+	if !g.pref.skip_unused || !g.should_emit_c_signature_type_decls(node) {
+		return
+	}
+	g.ensure_c_extern_signature_type_decl(node.return_type)
+	for param in node.params {
+		g.ensure_c_extern_signature_type_decl(param.typ)
+	}
+}
+
+fn (mut g Gen) ensure_c_extern_signature_type_decl(typ_ ast.Type) {
+	if typ_ == 0 {
+		return
+	}
+	typ := typ_.clear_option_and_result().set_nr_muls(0).clear_flags(.generic, .variadic)
+	if typ == 0 {
+		return
+	}
+	sym := g.table.sym(typ)
+	if sym.is_builtin || sym.name in ['byte', 'i32', 'C.FILE'] {
+		return
+	}
+	if sym.idx in g.table.used_features.used_syms {
+		return
+	}
+	if sym.cname in g.c_extern_signature_types {
+		return
+	}
+	g.c_extern_signature_types[sym.cname] = true
+	match sym.info {
+		ast.Alias {
+			g.ensure_c_extern_signature_type_decl(sym.info.parent_type)
+			g.write_alias_typesymbol_declaration(sym)
+		}
+		ast.FnType {
+			for param in sym.info.func.params {
+				g.ensure_c_extern_signature_type_decl(param.typ)
+			}
+			g.ensure_c_extern_signature_type_decl(sym.info.func.return_type)
+		}
+		ast.Struct {
+			if sym.language == .c && sym.cname.starts_with('C__') && !sym.info.is_anon {
+				c_struct_name := sym.cname[3..]
+				if sym.info.is_typedef {
+					g.typedefs.writeln('typedef struct ${c_struct_name} ${c_struct_name};')
+				} else {
+					g.typedefs.writeln('struct ${c_struct_name};')
+				}
+			} else {
+				g.typedefs.writeln('typedef struct ${sym.cname} ${sym.cname};')
+			}
+		}
+		ast.Array {
+			g.ensure_c_extern_signature_type_decl(sym.info.elem_type)
+		}
+		ast.ArrayFixed {
+			g.ensure_c_extern_signature_type_decl(sym.info.elem_type)
+		}
+		else {}
+	}
 }
 
 fn (mut g Gen) fn_decl(node ast.FnDecl) {
@@ -887,6 +982,7 @@ fn (mut g Gen) fn_decl(node ast.FnDecl) {
 	if !g.is_used_by_main(node) {
 		return
 	}
+	g.ensure_c_extern_signature_type_decls(node)
 	if g.is_builtin_mod && g.pref.gc_mode == .boehm_leak && node.kind == .malloc {
 		g.definitions.write_string('#define builtin___v_malloc GC_MALLOC\n')
 		return
@@ -1353,8 +1449,9 @@ fn (mut g Gen) gen_fn_decl(node &ast.FnDecl, skip bool) {
 		g.write(fn_header)
 	}
 	arg_start_pos := g.out.len
+	is_c_variadic := node.is_c_variadic || (node.language == .c && node.is_variadic)
 	fargs, fargtypes, heap_promoted := g.fn_decl_params(node.params, node.scope, node.is_variadic,
-		node.is_c_variadic)
+		is_c_variadic)
 	if is_closure {
 		g.nr_closures++
 		if g.pref.no_closures {
@@ -1609,8 +1706,10 @@ fn (mut g Gen) gen_closure_fn_name(node ast.AnonFn) string {
 fn (mut g Gen) c_call_alias_signature(node ast.CallExpr, name string) string {
 	ret_styp := g.styp(node.return_type)
 	mut sig := '${ret_styp} (*${name})('
-	if node.args.len == 0 && !node.is_c_variadic {
-		sig += 'void'
+	if node.args.len == 0 {
+		if !node.is_c_variadic {
+			sig += 'void'
+		}
 	} else {
 		for i, arg in node.args {
 			arg_typ := if arg.typ != 0 {
@@ -1800,7 +1899,8 @@ fn (mut g Gen) gen_anon_fn(mut node ast.AnonFn) {
 				if obj := node.decl.scope.parent.find(var.name) {
 					if obj is ast.Var {
 						is_auto_heap = !obj.is_stack_obj && obj.is_auto_heap
-						is_auto_deref_capture = obj.is_auto_deref && !var.is_mut && is_ptr
+						is_auto_deref_capture = obj.is_auto_deref && !var.is_mut
+							&& (is_ptr || obj.typ.is_ptr())
 						if obj.smartcasts.len > 0 {
 							if g.table.type_kind(obj.typ) == .sum_type {
 								cast_sym := g.table.sym(obj.smartcasts.last())
@@ -1902,13 +2002,22 @@ fn (mut g Gen) fn_decl_params(params []ast.Param, scope &ast.Scope, is_variadic 
 	mut fparams := []string{}
 	mut fparamtypes := []string{}
 	mut heap_promoted := []bool{}
-	if params.len == 0 {
+	param_count := if is_c_variadic && is_variadic && params.len > 0
+		&& params.last().typ.has_flag(.variadic) {
+		params.len - 1
+	} else {
+		params.len
+	}
+	if param_count == 0 {
 		// in C, `()` is untyped, unlike `(void)`
-		if !g.inside_c_extern {
+		if !g.inside_c_extern && !is_c_variadic {
 			g.write('void')
 		}
 	}
 	for i, param in params {
+		if i >= param_count {
+			break
+		}
 		mut typ := g.unwrap_generic(param.typ)
 		if g.pref.translated && g.file.is_translated && param.typ.has_flag(.variadic) {
 			typ = g.table.sym(typ).array_info().elem_type.set_flag(.variadic)
@@ -1995,18 +2104,24 @@ fn (mut g Gen) fn_decl_params(params []ast.Param, scope &ast.Scope, is_variadic 
 			fparamtypes << param_type_name
 			heap_promoted << heap_prom
 		}
-		if i < params.len - 1 {
+		if i < param_count - 1 {
 			if !g.inside_c_extern {
 				g.write(', ')
 			}
 			g.definitions.write_string(', ')
 		}
 	}
-	if (g.pref.translated && is_variadic) || is_c_variadic {
-		if !g.inside_c_extern {
-			g.write(', ... ')
+	if ((g.pref.translated && is_variadic) || is_c_variadic) && (!is_c_variadic || param_count > 0) {
+		if param_count > 0 {
+			if !g.inside_c_extern {
+				g.write(', ')
+			}
+			g.definitions.write_string(', ')
 		}
-		g.definitions.write_string(', ... ')
+		if !g.inside_c_extern {
+			g.write('... ')
+		}
+		g.definitions.write_string('... ')
 	}
 	return fparams, fparamtypes, heap_promoted
 }
@@ -2865,6 +2980,28 @@ fn (mut g Gen) resolve_return_type(node ast.CallExpr) ast.Type {
 				return_type
 			} else {
 				return_type.clear_option_and_result()
+			}
+		}
+		if node.is_field {
+			selector := ast.SelectorExpr{
+				expr:       node.left
+				expr_type:  left_type
+				field_name: node.name
+			}
+			fn_typ := g.resolved_selector_field_type(selector, left_type)
+			if fn_typ != 0 {
+				fn_sym := g.table.final_sym(fn_typ.clear_option_and_result())
+				if fn_sym.info is ast.FnType {
+					return_type :=
+						g.unwrap_generic(g.recheck_concrete_type(fn_sym.info.func.return_type))
+					if return_type != 0 {
+						return if node.or_block.kind == .absent {
+							return_type
+						} else {
+							return_type.clear_option_and_result()
+						}
+					}
+				}
 			}
 		}
 		func := left_sym.find_method_with_generic_parent(node.name) or {

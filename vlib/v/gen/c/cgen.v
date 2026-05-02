@@ -129,6 +129,7 @@ mut:
 	done_typedef_phase                   bool              // set after write_typedef_types() completes
 	late_chan_types                      shared []string   // concrete channel cnames discovered during file generation
 	emitted_chan_types                   map[string]bool   // concrete channel typedefs/helpers already emitted
+	c_extern_signature_types             map[string]bool   // C signature-only type decls already emitted
 	chan_pop_options                     map[string]string // types for `x := <-ch or {...}`
 	chan_push_options                    map[string]string // types for `ch <- x or {...}`
 	mtxs                                 string            // array of mutexes if the `lock` has multiple variables
@@ -412,6 +413,7 @@ pub fn gen(files []&ast.File, mut table ast.Table, pref_ &pref.Preferences) GenO
 		has_debugger:                  'v.debug' in table.modules
 		reflection_strings:            &reflection_strings
 		generated_map_key_fns:         map[ast.Type]bool{}
+		c_extern_signature_types:      map[string]bool{}
 		boehm_keep_decl:               map[string]bool{}
 		boehm_keep_gen:                map[string]bool{}
 		boehm_keep_busy:               map[string]bool{}
@@ -1056,6 +1058,7 @@ fn cgen_process_one_file_cb(mut p pool.PoolProcessor, idx int, wid int) voidptr 
 		has_debugger:                       'v.debug' in global_g.table.modules
 		reflection_strings:                 global_g.reflection_strings
 		generated_map_key_fns:              map[ast.Type]bool{}
+		c_extern_signature_types:           map[string]bool{}
 		boehm_keep_decl:                    map[string]bool{}
 		boehm_keep_gen:                     map[string]bool{}
 		boehm_keep_busy:                    map[string]bool{}
@@ -4512,9 +4515,17 @@ fn (mut g Gen) gen_interface_to_interface_conversion(expr ast.Expr, expr_type as
 }
 
 fn (g &Gen) interface_conversion_variants(left_variants []ast.Type, right_variants []ast.Type) []ast.Type {
-	return left_variants.filter(fn [right_variants] (left_variant ast.Type) bool {
-		return right_variants.any(it.idx() == left_variant.idx())
-	})
+	mut variants := []ast.Type{cap: left_variants.len}
+	for left_variant in left_variants {
+		left_idx := left_variant.idx()
+		for right_variant in right_variants {
+			if right_variant.idx() == left_idx {
+				variants << left_variant
+				break
+			}
+		}
+	}
+	return variants
 }
 
 // expr_with_array_element_upcast materializes an array whose elements are boxed into
@@ -4874,8 +4885,8 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 		}
 	}
 	// Generic dereferencing logic
-	neither_void := ast.voidptr_type !in [got_type, expected_type]
-		&& ast.nil_type !in [got_type, expected_type]
+	neither_void := ast.voidptr_type !in [got_type.idx_type(), expected_type.idx_type()]
+		&& ast.nil_type !in [got_type.idx_type(), expected_type.idx_type()]
 	if expected_type.has_flag(.shared_f) && !got_type_raw.has_flag(.shared_f)
 		&& !expected_type.has_option_or_result() {
 		shared_styp := exp_styp[0..exp_styp.len - 1] // `shared` implies ptr, so eat one `*`
@@ -5956,11 +5967,31 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 			}
 			is_safe_inc := g.do_int_overflow_checks && node.op == .inc
 			is_safe_dec := g.do_int_overflow_checks && node.op == .dec
+			is_atomic_postfix := node.typ.has_flag(.atomic_f) && node.op in [.inc, .dec]
+				&& g.pref.ccompiler_type != .msvc
 			g.inside_map_postfix = true
-			if node.is_c2v_prefix {
+			if is_atomic_postfix {
+				atomic_op := if node.op == .inc {
+					'__atomic_fetch_add'
+				} else {
+					'__atomic_fetch_sub'
+				}
+				atomic_value_styp := g.styp(node.typ.clear_flag(.atomic_f))
+				g.write('${atomic_op}((${atomic_value_styp}*)&(')
+				if node.expr.is_auto_deref_var() {
+					g.write('*')
+				}
+				g.expr(node.expr)
+				if node.typ.has_flag(.shared_f) {
+					g.write('->val')
+				}
+				g.write('), 1, 5)')
+			} else if node.is_c2v_prefix {
 				g.write(node.op.str())
 			}
-			if node.expr.is_auto_deref_var() {
+			if is_atomic_postfix {
+				// already emitted above
+			} else if node.expr.is_auto_deref_var() {
 				g.write('(*')
 				g.expr(node.expr)
 				g.write(')')
@@ -6015,7 +6046,9 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 				}
 			}
 			g.inside_map_postfix = false
-			if !node.is_c2v_prefix && node.op != .question && !is_safe_inc && !is_safe_dec {
+			if is_atomic_postfix {
+				// already emitted above
+			} else if !node.is_c2v_prefix && node.op != .question && !is_safe_inc && !is_safe_dec {
 				g.write(node.op.str())
 			} else if is_safe_inc || is_safe_dec {
 				overflow_styp := g.styp(get_overflow_fn_type(node.typ))
@@ -7198,7 +7231,19 @@ fn (mut g Gen) selector_expr(node ast.SelectorExpr) {
 		|| (is_interface_smartcast_expr
 		&& g.table.final_sym(g.unwrap_generic(smartcast_expr_var.smartcasts.last())).kind != .interface
 		&& exposed_interface_smartcast_type.is_ptr())
+	// Interface→interface smartcast: the conversion `I_X_as_I_Y(parent)` returns
+	// a struct value, not a pointer, so field access must use `.`, not `->`.
+	is_option_unwrapped_interface_ptr := is_interface_smartcast_expr
+		&& smartcast_expr_var.orig_type.has_option_or_result()
+		&& smartcast_expr_var.orig_type.clear_option_and_result().is_ptr()
+	is_interface_to_interface_smartcast := is_interface_smartcast_expr
+		&& g.table.final_sym(g.unwrap_generic(smartcast_expr_var.smartcasts.last())).kind == .interface
+		&& !is_option_unwrapped_interface_ptr
+	unwrapped_autoheap_option_payload_is_ptr := expr_is_unwrapped_autoheap_option
+		&& expr_autoheap_option_type.clear_option_and_result().is_ptr()
 	left_is_ptr := if expr_is_unwrapped_autoheap_option {
+		unwrapped_autoheap_option_payload_is_ptr
+	} else if is_interface_to_interface_smartcast {
 		false
 	} else {
 		field_is_opt || expr_is_auto_heap || interface_smartcast_selector_emits_ptr
@@ -7573,6 +7618,13 @@ fn (mut g Gen) boehm_collect_keep_alive_helper_name(typ ast.Type) string {
 				mut field_typ := g.unwrap_generic(g.recheck_concrete_type(field.typ))
 				if field_typ == 0 {
 					field_typ = g.unwrap_generic(field.typ)
+				}
+				// Option/Result-wrapped pointers are stored inside a struct wrapper,
+				// not as raw pointers, so the simple `it->field != 0` keepalive code
+				// would generate invalid C. Skip them; Boehm conservative scanning
+				// will still find the wrapped pointer.
+				if field_typ.has_option_or_result() {
+					continue
 				}
 				if !field_typ.is_any_kind_of_pointer() && !g.contains_ptr(field_typ) {
 					continue
@@ -12716,6 +12768,22 @@ return ${cast_shared_struct_str};
 					// a method that is not part of the interface should be just skipped
 					continue
 				}
+				// Skip generic methods whose generic parameters have not been concretized.
+				// This happens when a struct has a generic method (e.g. `write[T]`) sharing
+				// a name with an interface method but is not actually implementing it; without
+				// this guard, cgen would emit literal `T` types in the adapter signature.
+				if method.generic_names.len > 0 {
+					mut has_unresolved_generic := method.return_type.has_flag(.generic)
+					for p in method.params {
+						if p.typ.has_flag(.generic) {
+							has_unresolved_generic = true
+							break
+						}
+					}
+					if has_unresolved_generic {
+						continue
+					}
+				}
 				// Concrete generic receiver methods keep their generic suffix in C names.
 				if st_sym.info is ast.Struct {
 					if method.generic_names.len > 0 && st_sym.info.parent_type.has_flag(.generic)
@@ -12878,7 +12946,7 @@ return ${cast_shared_struct_str};
 			}
 			iin_idx := already_generated_mwrappers[interface_index_name] - iinidx_minimum_base + 1
 			if g.pref.build_mode != .build_module {
-				sb.writeln('${g.static_modifier}const u32 ${interface_index_name} = ${iin_idx};')
+				sb.writeln('enum { ${interface_index_name} = ${iin_idx} };')
 			} else {
 				sb.writeln('extern const u32 ${interface_index_name};')
 			}
@@ -12985,6 +13053,8 @@ fn (mut g Gen) panic_debug_info(pos token.Pos) (int, string, string, string) {
 	return paline, pafile, pamod, pafn
 }
 
+// get_guarded_include_text returns C preprocessor code that includes `iname`
+// when available, or emits `imessage` through a C error otherwise.
 pub fn get_guarded_include_text(iname string, imessage string) string {
 	res := '
 	|#if defined(__has_include)
@@ -13000,6 +13070,8 @@ pub fn get_guarded_include_text(iname string, imessage string) string {
 	return res
 }
 
+// get_inttypes_or_stdint_include_text returns C preprocessor code that includes
+// the best available integer types header, or emits `imessage` otherwise.
 pub fn get_inttypes_or_stdint_include_text(imessage string) string {
 	res := '
 	|#if defined(__has_include)

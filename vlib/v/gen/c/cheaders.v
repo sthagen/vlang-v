@@ -214,7 +214,11 @@ const c_common_macros = '
 		#endif
 	#else
 		#define VV_EXP extern
-		#define VV_LOC static
+		#ifdef _VPARALLELCC
+			#define VV_LOC
+		#else
+			#define VV_LOC static
+		#endif
 	#endif
 #endif
 #ifdef __cplusplus
@@ -423,6 +427,27 @@ extern FILE (*_imp___iob)[];
 #define stdin (&__iob_func()[0])
 #define stdout (&__iob_func()[1])
 #define stderr (&__iob_func()[2])
+#elif defined(__vinix__)
+typedef struct __file FILE;
+extern FILE* stdin;
+extern FILE* stdout;
+extern FILE* stderr;
+struct __thread_data;
+struct __threadattr;
+typedef struct __thread_data *pthread_t;
+typedef __builtin_va_list va_list;
+#ifndef va_start
+	#define va_start(ap, v) __builtin_va_start(ap, v)
+#endif
+#ifndef va_arg
+	#define va_arg(ap, t) __builtin_va_arg(ap, t)
+#endif
+#ifndef va_end
+	#define va_end(ap) __builtin_va_end(ap)
+#endif
+#ifndef va_copy
+	#define va_copy(dest, src) __builtin_va_copy(dest, src)
+#endif
 #else
 	#if defined(__APPLE__) || defined(__FreeBSD__)
 typedef struct __sFILE FILE;
@@ -452,6 +477,12 @@ extern struct __sFstub __stderr[];
 #define stdin ((struct __sFILE *)__stdin)
 #define stdout ((struct __sFILE *)__stdout)
 #define stderr ((struct __sFILE *)__stderr)
+	#elif defined(__BIONIC__)
+struct __sFILE;
+typedef struct __sFILE FILE;
+extern FILE* stdin;
+extern FILE* stdout;
+extern FILE* stderr;
 	#elif defined(__linux__) && !defined(__GLIBC__) && !defined(__GNU_LIBRARY__) && !defined(__BIONIC__) && !defined(__UCLIBC__)
 typedef struct _IO_FILE FILE;
 // musl exposes the stdio streams as `FILE *const`, so match that to stay
@@ -515,9 +546,17 @@ V_CRT_LINKAGE FILE * V_CRT_CALL freopen(const char *filename, const char *mode, 
 V_CRT_LINKAGE int V_CRT_CALL fileno(FILE *stream);
 V_CRT_LINKAGE size_t V_CRT_CALL fread(void *ptr, size_t size, size_t items, FILE *stream);
 V_CRT_LINKAGE size_t V_CRT_CALL fwrite(const void *ptr, size_t size, size_t items, FILE *stream);
+#if defined(__vinix__)
+V_CRT_LINKAGE char * V_CRT_CALL fgets(char *str, size_t size, FILE *stream);
+#else
 V_CRT_LINKAGE char * V_CRT_CALL fgets(char *str, int size, FILE *stream);
+#endif
 V_CRT_LINKAGE int V_CRT_CALL fclose(FILE *stream);
+#if defined(__vinix__)
+V_CRT_LINKAGE FILE * V_CRT_CALL popen(char *command, char *mode);
+#else
 V_CRT_LINKAGE FILE * V_CRT_CALL popen(const char *command, const char *mode);
+#endif
 V_CRT_LINKAGE int V_CRT_CALL pclose(FILE *stream);
 V_CRT_LINKAGE void * V_CRT_CALL malloc(size_t size);
 V_CRT_LINKAGE void * V_CRT_CALL calloc(size_t nitems, size_t size);
@@ -528,6 +567,7 @@ V_CRT_LINKAGE int V_CRT_CALL rand(void);
 V_CRT_LINKAGE void V_CRT_CALL srand(unsigned int seed);
 V_CRT_LINKAGE int V_CRT_CALL atexit(void (*cb)(void));
 V_CRT_LINKAGE void V_CRT_CALL exit(int status);
+V_CRT_LINKAGE int V_CRT_CALL abs(int n);
 V_CRT_LINKAGE int V_CRT_CALL atoi(const char *str);
 V_CRT_LINKAGE double V_CRT_CALL atof(const char *str);
 V_CRT_LINKAGE char * V_CRT_CALL getenv(const char *name);
@@ -539,8 +579,25 @@ V_CRT_LINKAGE int V_CRT_CALL rename(const char *old_path, const char *new_path);
 V_CRT_LINKAGE char * V_CRT_CALL realpath(const char *path, char *resolved_path);
 V_CRT_LINKAGE int V_CRT_CALL mkstemp(char *stemplate);
 V_CRT_LINKAGE void V_CRT_CALL qsort(void *base, size_t items, size_t item_size, qsort_callback_func cb);
+#if defined(__vinix__)
+V_CRT_LINKAGE int V_CRT_CALL strcmp(char *left, char *right);
+V_CRT_LINKAGE int V_CRT_CALL strncmp(char *left, char *right, size_t n);
+#else
 V_CRT_LINKAGE int V_CRT_CALL strcmp(const char *left, const char *right);
+V_CRT_LINKAGE int V_CRT_CALL strncmp(const char *left, const char *right, size_t n);
+#endif
+#if !defined(_WIN32) && !defined(_WIN64) && !defined(__BIONIC__)
+V_CRT_LINKAGE char * V_CRT_CALL strdup(const char *str);
+#endif
+#if !defined(_WIN32) && !defined(_WIN64)
+V_CRT_LINKAGE int V_CRT_CALL strcasecmp(const char *left, const char *right);
+V_CRT_LINKAGE int V_CRT_CALL strncasecmp(const char *left, const char *right, size_t n);
+#endif
+#if defined(__vinix__)
+V_CRT_LINKAGE size_t V_CRT_CALL strlen(char *str);
+#else
 V_CRT_LINKAGE size_t V_CRT_CALL strlen(const char *str);
+#endif
 V_CRT_LINKAGE char * V_CRT_CALL strerror(int errnum);
 V_CRT_LINKAGE void * V_CRT_CALL memcpy(void *dest, const void *src, size_t n);
 V_CRT_LINKAGE void * V_CRT_CALL memmove(void *dest, const void *src, size_t n);
@@ -751,7 +808,7 @@ void _vcleanup(void);
 #else
 	#error "Unknown architecture endianness"
 #endif
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__vinix__)
 	#include <ctype.h>
 	#include <locale.h> // tolower
 	#include <sys/time.h>
@@ -763,7 +820,7 @@ void _vcleanup(void);
 		#define pthread_rwlockattr_setkind_np(a, b)
 	#endif
 #endif
-#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__DragonFly__) || defined(__vinix__) || defined(__serenity__) || defined(__sun) || defined(__plan9__) || defined(__OpenBSD__)
+#if (defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__DragonFly__) || defined(__serenity__) || defined(__sun) || defined(__plan9__) || defined(__OpenBSD__)) && !defined(__vinix__)
 	#include <sys/types.h>
 	#include <sys/wait.h> // for os__wait
 #endif

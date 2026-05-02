@@ -23,7 +23,7 @@ const tiny_bad_request_response = 'HTTP/1.1 400 Bad Request\r\nContent-Length: 0
 const status_444_response = 'HTTP/1.1 444 No Response\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'.bytes()
 const status_413_response = 'HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'.bytes()
 
-fn C.socket(domain net.AddrFamily, typ net.SocketType, protocol i32) i32
+fn C.socket(domain i32, typ i32, protocol i32) i32
 
 fn C.bind(sockfd i32, addr &net.Addr, addrlen u32) i32
 
@@ -63,12 +63,18 @@ pub mut:
 	user_data      voidptr // User-defined context data
 }
 
+pub enum ResponseTakeoverMode {
+	none
+	manual
+	reusable
+}
+
 pub struct HttpResponse {
 pub:
-	content      []u8
-	file_path    string
-	takeover     bool // if true, the connection fd is handed off to the caller and must not be closed by fasthttp
-	should_close bool // if true, close the connection after sending (Connection: close)
+	content       []u8
+	file_path     string
+	takeover_mode ResponseTakeoverMode
+	should_close  bool // if true, close the connection after sending (Connection: close)
 }
 
 // ServerConfig bundles the parameters needed to start a fasthttp server.
