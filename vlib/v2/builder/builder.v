@@ -6,6 +6,7 @@ module builder
 import os
 import v2.ast
 import v2.abi
+import v2.autofix
 import v2.eval
 import v2.gen.arm64
 import v2.gen.c
@@ -427,6 +428,29 @@ pub fn (mut b Builder) build(files []string) {
 		b.parsed_vh_files)
 	if b.pref.stats {
 		// b.print_flat_ast_summary()
+	}
+
+	// -autofix: rewrite source files to fix simple mistakes (missing `mut`, ...)
+	// before any further analysis. Only consider user-provided files so we never
+	// touch files in vlib/builtin or other system modules.
+	if b.pref.autofix {
+		mut user_set := map[string]bool{}
+		for u in b.user_files {
+			user_set[u] = true
+			abs := os.real_path(u)
+			user_set[abs] = true
+		}
+		mut user_ast_files := []ast.File{}
+		for f in b.files {
+			if user_set[f.name] || user_set[os.real_path(f.name)] {
+				user_ast_files << f
+			}
+		}
+		fixed := autofix.run(user_ast_files, b.file_set)
+		if fixed > 0 {
+			eprintln('autofix: rewrote ${fixed} location(s); re-run the compiler to use the updated source.')
+			exit(0)
+		}
 	}
 
 	if b.pref.skip_type_check {

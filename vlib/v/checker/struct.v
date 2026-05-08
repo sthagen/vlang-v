@@ -131,7 +131,10 @@ fn (mut c Checker) struct_decl(mut node ast.StructDecl) {
 				// Overwrite the previously unresolved type symbol so that earlier
 				// expressions which captured its idx (e.g. IndexExpr.left_type from
 				// another file checked first) observe the resolved size. See #27078.
-				if old_typ.idx() != field.typ.idx() {
+				// Skip for generic structs: the size expression may reference a generic
+				// type parameter (e.g. `sizeof(T)`), which resolves to a placeholder size
+				// here; the correct per-instantiation size is computed later in struct_init.
+				if old_typ.idx() != field.typ.idx() && struct_sym.info.generic_types.len == 0 {
 					new_sym := c.table.sym(field.typ)
 					mut old_sym := c.table.type_symbols[old_typ.idx()]
 					old_sym.name = new_sym.name

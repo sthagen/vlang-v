@@ -52,6 +52,7 @@ pub mut:
 	no_optimize           bool                  // -O0: skip SSA optimization (mem2reg, phi elimination)
 	is_prod               bool                  // -prod: use -O3 optimization for C compiler
 	prealloc              bool                  // -prealloc: use arena allocation (bump-pointer, not thread-safe)
+	autofix               bool                  // -autofix: rewrite source files to fix simple mistakes (e.g. add `mut`)
 	gc_mode               GarbageCollectionMode // Garbage collection mode (-gc flag)
 	backend               Backend
 	arch                  Arch = .auto
@@ -306,7 +307,7 @@ pub fn new_preferences_from_args(args []string) Preferences {
 		'-nomarkused', '--nomarkused', '-showcc', '--showcc', '-stats', '--stats',
 		'-print-parsed-files', '--print-parsed-files', '-keepc', '--profile-alloc', '-profile-alloc',
 		'-enable-globals', '--enable-globals', '-shared', '--shared', '-O0', '--single-backend',
-		'-single-backend', '-prod', '-prealloc', '-eval', '--eval']
+		'-single-backend', '-prod', '-prealloc', '-eval', '--eval', '-autofix', '--autofix']
 	$if ownership ? {
 		known_boolean_flags << '-ownership'
 	}
@@ -331,6 +332,7 @@ pub fn new_preferences_from_args(args []string) Preferences {
 			eprintln('  -prod                  Production build: optimize with -O3 -flto')
 			eprintln('  -prealloc              Use arena allocation (faster, not thread-safe)')
 			eprintln('  -O0                    Skip SSA optimization (faster compile, slower code)')
+			eprintln('  -autofix               Rewrite source files to fix simple mistakes (e.g. add missing `mut`)')
 			$if ownership ? {
 				eprintln('  -ownership             Enable ownership checking for strings')
 			}
@@ -365,6 +367,7 @@ pub fn new_preferences_from_args(args []string) Preferences {
 		is_prod:               '-prod' in options
 		prealloc:              '-prealloc' in options
 		single_backend:        '--single-backend' in options || '-single-backend' in options
+		autofix:               '-autofix' in options || '--autofix' in options
 		ownership:             ownership
 		gc_mode:               gc_mode
 		backend:               backend
@@ -425,6 +428,7 @@ pub fn new_preferences_using_options(options []string) Preferences {
 		is_prod:               '-prod' in options
 		prealloc:              '-prealloc' in options
 		single_backend:        '--single-backend' in options || '-single-backend' in options
+		autofix:               '-autofix' in options || '--autofix' in options
 		backend:               backend
 		arch:                  arch
 	}

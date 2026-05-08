@@ -1,9 +1,31 @@
 #if defined(__ANDROID__) && (!defined(__ANDROID_API__) || __ANDROID_API__ < 28)
+// Android API levels below 28 do not provide posix_spawn(). Fall back to
+// fork()/execvp() with a pipe; this is what popen() does internally and
+// is sufficient for capturing the merged stdout+stderr of a shell command.
 static int v_os_execute_capture_start(const char *cmd, int *child_pid, int *read_fd) {
-	(void)cmd;
-	(void)child_pid;
-	(void)read_fd;
-	return -1;
+	int pipefd[2];
+	if (pipe(pipefd) != 0) {
+		return -1;
+	}
+	pid_t pid = fork();
+	if (pid < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return -1;
+	}
+	if (pid == 0) {
+		// child: redirect stdout+stderr to the pipe, then exec the shell
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[0]);
+		close(pipefd[1]);
+		execlp("sh", "sh", "-c", cmd, (char *)NULL);
+		_exit(127);
+	}
+	close(pipefd[1]);
+	*child_pid = (int)pid;
+	*read_fd = pipefd[0];
+	return 0;
 }
 #else
 #if defined(__has_include) && __has_include(<spawn.h>)

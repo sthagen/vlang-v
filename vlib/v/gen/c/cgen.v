@@ -13082,6 +13082,9 @@ fn (mut g Gen) panic_debug_info(pos token.Pos) (int, string, string, string) {
 // when available, or emits `imessage` through a C error otherwise.
 pub fn get_guarded_include_text(iname string, imessage string) string {
 	res := '
+	|#ifdef __TINYC__
+	|#include ${iname}
+	|#else
 	|#if defined(__has_include)
 	|#if __has_include(${iname})
 	|#include ${iname}
@@ -13091,6 +13094,7 @@ pub fn get_guarded_include_text(iname string, imessage string) string {
 	|#else
 	|#include ${iname}
 	|#endif
+	|#endif
 	'.strip_margin()
 	return res
 }
@@ -13099,6 +13103,9 @@ pub fn get_guarded_include_text(iname string, imessage string) string {
 // the best available integer types header, or emits `imessage` otherwise.
 pub fn get_inttypes_or_stdint_include_text(imessage string) string {
 	res := '
+	|#ifdef __TINYC__
+	|#include <inttypes.h>
+	|#else
 	|#if defined(__has_include)
 	|#if __has_include(<inttypes.h>)
 	|#include <inttypes.h>
@@ -13109,6 +13116,7 @@ pub fn get_inttypes_or_stdint_include_text(imessage string) string {
 	|#endif
 	|#else
 	|#include <stdint.h>
+	|#endif
 	|#endif
 	'.strip_margin()
 	return res

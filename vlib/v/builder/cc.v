@@ -2174,7 +2174,8 @@ fn (v &Builder) fixup_tcc_macos_comma_path_flags(mut ccoptions CcompilerOptions)
 	src_mtime := os.file_last_mod_unix(src_dylib)
 	if !os.exists(cache_dylib) || os.file_last_mod_unix(cache_dylib) < src_mtime {
 		os.cp(src_dylib, cache_dylib) or { return }
-		idres := os.execute('install_name_tool -id ${os.quoted_path(cache_dylib)} ${os.quoted_path(cache_dylib)}')
+		idres :=
+			os.execute('install_name_tool -id ${os.quoted_path(cache_dylib)} ${os.quoted_path(cache_dylib)}')
 		if idres.exit_code != 0 {
 			if v.pref.is_verbose {
 				eprintln('install_name_tool -id for ${cache_dylib} failed: ${idres.output.trim_space()}')
