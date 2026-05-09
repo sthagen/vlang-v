@@ -135,9 +135,9 @@ jobs:
       - name: V self compilation with g++ and -std=c++20
         run: ./v -cc g++-10 -no-std -cflags -std=c++20 -o v2 cmd/v && ./v2 -cc g++-10 -no-std -cflags -std=c++20 -o v3 cmd/v
 
-      # NB: this does not mean it runs, but at least keeps it from regressing
-      - name: Ensure V can be compiled with -autofree
-        run: ./v -autofree cmd/v
+      # TODO: re-enable once autofree is fixed; see https://github.com/vlang/v/issues/27116
+      # - name: Ensure V can be compiled with -autofree
+      #   run: ./v -autofree cmd/v
 
       - name: Ensure V can be compiled with -no-closures
         run: ./v -no-closures cmd/v

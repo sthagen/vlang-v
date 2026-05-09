@@ -899,7 +899,7 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 	], false))
 	cflags := v.get_os_cflags()
 
-	if v.pref.build_mode != .build_module {
+	if v.pref.build_mode != .build_module && !v.pref.is_o {
 		only_o_files := cflags.c_options_only_object_files()
 		ccoptions.o_args << only_o_files
 	}

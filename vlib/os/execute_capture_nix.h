@@ -1,3 +1,18 @@
+// v_os_execute_set_cloexec marks an fd as close-on-exec. When multiple threads
+// each call os.execute, every pipe() they create is briefly visible to all of
+// them; without FD_CLOEXEC, one thread's spawned child can inherit another
+// thread's pipe write end, keeping that pipe open after the intended writer
+// exits. The reader then never observes EOF and the captured output ends up
+// empty (seen on macOS arm64 in CI). Setting CLOEXEC closes the fd
+// automatically across exec, which fixes the race for both fork/execvp and
+// posix_spawn paths.
+static void v_os_execute_set_cloexec(int fd) {
+	int flags = fcntl(fd, F_GETFD, 0);
+	if (flags >= 0) {
+		fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+	}
+}
+
 #if defined(__ANDROID__) && (!defined(__ANDROID_API__) || __ANDROID_API__ < 28)
 // Android API levels below 28 do not provide posix_spawn(). Fall back to
 // fork()/execvp() with a pipe; this is what popen() does internally and
@@ -7,6 +22,8 @@ static int v_os_execute_capture_start(const char *cmd, int *child_pid, int *read
 	if (pipe(pipefd) != 0) {
 		return -1;
 	}
+	v_os_execute_set_cloexec(pipefd[0]);
+	v_os_execute_set_cloexec(pipefd[1]);
 	pid_t pid = fork();
 	if (pid < 0) {
 		close(pipefd[0]);
@@ -14,7 +31,9 @@ static int v_os_execute_capture_start(const char *cmd, int *child_pid, int *read
 		return -1;
 	}
 	if (pid == 0) {
-		// child: redirect stdout+stderr to the pipe, then exec the shell
+		// child: redirect stdout+stderr to the pipe, then exec the shell.
+		// dup2 clears FD_CLOEXEC on the destination, so STDOUT/STDERR stay
+		// open across exec while the original pipe fds are auto-closed.
 		dup2(pipefd[1], STDOUT_FILENO);
 		dup2(pipefd[1], STDERR_FILENO);
 		close(pipefd[0]);
@@ -49,6 +68,8 @@ static int v_os_execute_capture_start(const char *cmd, int *child_pid, int *read
 	if (pipe(pipefd) != 0) {
 		return -1;
 	}
+	v_os_execute_set_cloexec(pipefd[0]);
+	v_os_execute_set_cloexec(pipefd[1]);
 	posix_spawn_file_actions_t actions;
 	if (posix_spawn_file_actions_init(&actions) != 0) {
 		close(pipefd[0]);
