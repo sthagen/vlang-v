@@ -331,7 +331,10 @@ pub fn mkdir(path string, params MkdirParams) ! {
 pub fn execute(cmd string) Result {
 	mut pid := 0
 	mut read_fd := -1
-	if C.v_os_execute_capture_start(&char(cmd.str), &pid, &read_fd) != 0 {
+	v_os_execute_lock()
+	rc := C.v_os_execute_capture_start(&char(cmd.str), &pid, &read_fd)
+	v_os_execute_unlock()
+	if rc != 0 {
 		return Result{
 			exit_code: -1
 			output:    'exec("${cmd}") failed'
@@ -340,7 +343,14 @@ pub fn execute(cmd string) Result {
 	soutput := fd_slurp(read_fd).join('')
 	fd_close(read_fd)
 	mut status := 0
-	if C.waitpid(pid, &status, 0) == -1 {
+	for {
+		C.errno = 0
+		if C.waitpid(pid, &status, 0) != -1 {
+			break
+		}
+		if C.errno == C.EINTR {
+			continue
+		}
 		return Result{
 			exit_code: -1
 			output:    soutput
