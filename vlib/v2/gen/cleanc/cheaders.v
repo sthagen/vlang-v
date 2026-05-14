@@ -473,28 +473,12 @@ fn (mut g Gen) emit_runtime_aliases() {
 	mut option_names := g.option_aliases.keys()
 	option_names.sort()
 	for name in option_names {
-		val_type := option_value_type(name)
-		if g.option_result_payload_invalid(val_type) {
-			continue
-		}
-		if val_type != '' && val_type != 'void' {
-			g.sb.writeln('typedef struct ${name} ${name};')
-		} else {
-			g.sb.writeln('typedef _option ${name};')
-		}
+		g.emit_option_result_forward_typedef(name)
 	}
 	mut result_names := g.result_aliases.keys()
 	result_names.sort()
 	for name in result_names {
-		val_type := g.result_value_type(name)
-		if g.option_result_payload_invalid(val_type) {
-			continue
-		}
-		if val_type != '' && val_type != 'void' {
-			g.sb.writeln('typedef struct ${name} ${name};')
-		} else {
-			g.sb.writeln('typedef _result ${name};')
-		}
+		g.emit_option_result_forward_typedef(name)
 	}
 }
 
@@ -563,7 +547,7 @@ fn (mut g Gen) gen_enum_decl(node ast.EnumDecl) {
 	g.sb.writeln('} ${name};')
 	g.sb.writeln('')
 	enum_str_fn := '${name}__str'
-	if enum_str_fn !in g.fn_return_types {
+	if 'fn_${enum_str_fn}' !in g.fn_owner_file {
 		// Emit a macro so the expression is type-checked only at use sites,
 		// where `string` is fully defined.
 		mut enum_str_expr := c_static_v_string_expr('unknown enum value')
@@ -574,7 +558,7 @@ fn (mut g Gen) gen_enum_decl(node ast.EnumDecl) {
 		g.sb.writeln('#define ${name}__str(v) ({ ${name} _e = (v); ${enum_str_expr}; })')
 	}
 	enum_short_str_fn := '${name}_str'
-	if enum_short_str_fn !in g.fn_return_types {
+	if 'fn_${enum_short_str_fn}' !in g.fn_owner_file {
 		g.sb.writeln('#define ${name}_str(v) ${name}__str(v)')
 	}
 	option_name := '_option_' + mangle_alias_component(name)
@@ -645,6 +629,51 @@ fn (mut g Gen) add_force_emit_str_fn(type_name string) {
 	}
 }
 
+fn (mut g Gen) emit_known_str_fn_decl(str_fn string, fallback_arg_type string) {
+	if 'macro_${str_fn}' in g.emitted_types {
+		return
+	}
+	key := 'known_str_decl_${str_fn}'
+	if key in g.emitted_types {
+		return
+	}
+	ret_type := g.fn_return_types[str_fn] or { 'string' }
+	if ret_type != 'string' {
+		return
+	}
+	mut param_types := g.fn_param_types[str_fn] or { []string{} }
+	if param_types.len == 0 && fallback_arg_type != '' {
+		param_types = [fallback_arg_type]
+	}
+	if param_types.len == 0 {
+		return
+	}
+	mut params := []string{cap: param_types.len}
+	for i, param_type in param_types {
+		params << '${param_type} arg${i}'
+	}
+	g.sb.writeln('${ret_type} ${str_fn}(${params.join(', ')});')
+	g.emitted_types[key] = true
+}
+
+fn (mut g Gen) emit_map_str_dependency_decls(type_name string) {
+	if type_name in ['string', 'int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32',
+		'f64', 'bool', 'rune', 'voidptr', 'intptr', 'u8ptr', 'charptr', 'byteptr'] {
+		return
+	}
+	if type_name.ends_with('*') {
+		return
+	}
+	if type_name.starts_with('Array_fixed_') {
+		elem_type, _ := g.parse_fixed_array_type(type_name)
+		g.emit_map_str_dependency_decls(elem_type)
+		return
+	}
+	if str_fn := g.get_str_fn_for_type(type_name) {
+		g.emit_known_str_fn_decl(str_fn, type_name)
+	}
+}
+
 // emit_map_str_functions generates Map_K_V_str functions for all map types.
 fn (mut g Gen) emit_map_str_functions() {
 	mut map_names := g.map_aliases.keys()
@@ -673,6 +702,8 @@ fn (mut g Gen) emit_map_str_functions() {
 			g.sb.writeln('}')
 			continue
 		}
+		g.emit_map_str_dependency_decls(key_type)
+		g.emit_map_str_dependency_decls(value_type)
 		g.sb.writeln('')
 		g.sb.writeln('string ${name}_str(${name} m) {')
 		g.sb.writeln('\tstrings__Builder sb = strings__new_builder(2 + m.key_values.len * 10);')

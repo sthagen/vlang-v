@@ -46,6 +46,36 @@ static int v_os_execute_capture_start(const char *cmd, int *child_pid, int *read
 	*read_fd = pipefd[0];
 	return 0;
 }
+
+static int v_os_exec_capture_start(char *const argv[], int *child_pid, int *read_fd) {
+	if (argv == NULL || argv[0] == NULL) {
+		return -1;
+	}
+	int pipefd[2];
+	if (pipe(pipefd) != 0) {
+		return -1;
+	}
+	v_os_execute_set_cloexec(pipefd[0]);
+	v_os_execute_set_cloexec(pipefd[1]);
+	pid_t pid = fork();
+	if (pid < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return -1;
+	}
+	if (pid == 0) {
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[0]);
+		close(pipefd[1]);
+		execvp(argv[0], argv);
+		_exit(127);
+	}
+	close(pipefd[1]);
+	*child_pid = (int)pid;
+	*read_fd = pipefd[0];
+	return 0;
+}
 #else
 // Use opaque void* declarations for posix_spawn instead of #include <spawn.h>.
 // Including <spawn.h> transitively pulls in <features.h>/<sys/cdefs.h>, which
@@ -58,6 +88,7 @@ static int v_os_execute_capture_start(const char *cmd, int *child_pid, int *read
 // are passed identically regardless of pointee type.
 typedef struct { unsigned char _opaque[128]; } v_posix_spawn_file_actions_t;
 extern int posix_spawn(pid_t *, const char *, const void *, const void *, char *const [], char *const []);
+extern int posix_spawnp(pid_t *, const char *, const void *, const void *, char *const [], char *const []);
 extern int posix_spawn_file_actions_init(void *);
 extern int posix_spawn_file_actions_destroy(void *);
 extern int posix_spawn_file_actions_adddup2(void *, int, int);
@@ -90,6 +121,44 @@ static int v_os_execute_capture_start(const char *cmd, int *child_pid, int *read
 	}
 	char *const argv[] = {(char *)"/bin/sh", (char *)"-c", (char *)cmd, NULL};
 	err = posix_spawn(child_pid, "/bin/sh", &actions, NULL, argv, environ);
+	posix_spawn_file_actions_destroy(&actions);
+	if (err != 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return -1;
+	}
+	close(pipefd[1]);
+	*read_fd = pipefd[0];
+	return 0;
+}
+
+static int v_os_exec_capture_start(char *const argv[], int *child_pid, int *read_fd) {
+	if (argv == NULL || argv[0] == NULL) {
+		return -1;
+	}
+	int pipefd[2];
+	if (pipe(pipefd) != 0) {
+		return -1;
+	}
+	v_os_execute_set_cloexec(pipefd[0]);
+	v_os_execute_set_cloexec(pipefd[1]);
+	v_posix_spawn_file_actions_t actions;
+	if (posix_spawn_file_actions_init(&actions) != 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return -1;
+	}
+	int err = 0;
+	if ((err = posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO)) != 0
+		|| (err = posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDERR_FILENO)) != 0
+		|| (err = posix_spawn_file_actions_addclose(&actions, pipefd[0])) != 0
+		|| (err = posix_spawn_file_actions_addclose(&actions, pipefd[1])) != 0) {
+		posix_spawn_file_actions_destroy(&actions);
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return -1;
+	}
+	err = posix_spawnp(child_pid, argv[0], &actions, NULL, argv, environ);
 	posix_spawn_file_actions_destroy(&actions);
 	if (err != 0) {
 		close(pipefd[0]);

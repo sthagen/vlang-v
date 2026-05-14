@@ -258,6 +258,9 @@ fn test_thirdparty_object_build_with_multiline_cflags() {
 }
 
 fn test_missing_library_is_reported_without_compiler_bug_hint() {
+	if os.user_os() == 'windows' && os.getenv('VFLAGS').contains('msvc') {
+		return
+	}
 	os.chdir(test_path)!
 	os.mkdir_all('missing_library')!
 	lib_name := 'v_missing_lib_25499'

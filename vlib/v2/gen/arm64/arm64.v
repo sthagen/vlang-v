@@ -5122,9 +5122,6 @@ fn (g &Gen) alloca_slot_stores_pointer_like_values_inner(alloca_id int, param_el
 		return false
 	}
 	seen_allocas[alloca_id] = true
-	defer {
-		seen_allocas.delete(alloca_id)
-	}
 	if alloca_id <= 0 || alloca_id >= g.mod.values.len {
 		return false
 	}
@@ -7435,9 +7432,6 @@ fn (mut g Gen) pointer_carried_aggregate_size_bytes(ptr_id int, depth int, mut s
 		return 0
 	}
 	seen[ptr_id] = true
-	defer {
-		seen.delete(ptr_id)
-	}
 	ptr_val := g.mod.values[ptr_id]
 	if ptr_val.typ > 0 && ptr_val.typ < g.mod.type_store.types.len {
 		ptr_typ := g.mod.type_store.types[ptr_val.typ]
@@ -7601,9 +7595,6 @@ fn (mut g Gen) inferred_aggregate_carried_size_bytes(val_id int, depth int, mut 
 		return 0
 	}
 	seen[val_id] = true
-	defer {
-		seen.delete(val_id)
-	}
 	val := g.mod.values[val_id]
 	if val.typ > 0 && val.typ < g.mod.type_store.types.len {
 		typ := g.mod.type_store.types[val.typ]
@@ -8944,9 +8935,12 @@ fn (mut g Gen) allocate_registers(func mir.Function) {
 		iv_has_call[sj + 1] = key_call
 	}
 
-	// Active list as parallel arrays (end time, assigned register)
-	mut act_ends := []int{cap: 32}
-	mut act_regs := []int{cap: 32}
+	// Active list as parallel arrays (end time, assigned register). Track the
+	// logical length manually; array.delete() is unreliable in ARM64 self-hosted
+	// binaries and can see corrupt indexes in this hot path.
+	mut act_ends := []int{len: intervals.len}
+	mut act_regs := []int{len: intervals.len}
+	mut active_len := 0
 
 	// Registers
 	// Caller-saved (Temporaries): x9..x15
@@ -8969,10 +8963,13 @@ fn (mut g Gen) allocate_registers(func mir.Function) {
 
 		// Remove expired intervals from active list
 		mut j := 0
-		for j < act_ends.len {
+		for j < active_len {
 			if act_ends[j] < cur_start {
-				act_ends.delete(j)
-				act_regs.delete(j)
+				active_len--
+				if j < active_len {
+					act_ends[j] = act_ends[active_len]
+					act_regs[j] = act_regs[active_len]
+				}
 			} else {
 				j++
 			}
@@ -8982,8 +8979,11 @@ fn (mut g Gen) allocate_registers(func mir.Function) {
 		for k in 0 .. 32 {
 			used[k] = false
 		}
-		for ar in act_regs {
-			used[ar] = true
+		for ai in 0 .. active_len {
+			ar := act_regs[ai]
+			if ar >= 0 && ar < used.len {
+				used[ar] = true
+			}
 		}
 
 		// Decide which pool to use
@@ -8992,8 +8992,11 @@ fn (mut g Gen) allocate_registers(func mir.Function) {
 		for r in pool {
 			if !used[r] {
 				g.reg_map[cur_vid] = r
-				act_ends << cur_end
-				act_regs << r
+				if active_len < act_ends.len {
+					act_ends[active_len] = cur_end
+					act_regs[active_len] = r
+					active_len++
+				}
 				// Only track used callee-saved regs for prologue saving
 				if r >= 19 && r <= 28 && !used_regs_set[r] {
 					used_regs_set[r] = true

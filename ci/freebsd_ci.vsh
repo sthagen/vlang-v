@@ -31,7 +31,9 @@ fn build_v_with_prealloc() {
 		println('### Build v with prealloc')
 	}
 	exec('v -cg -cstrict -o vstrict1 cmd/v')
-	exec('./vstrict1 -o vprealloc -prealloc cmd/v')
+	// -prealloc uses _Thread_local for g_memory_block; bundled tcc does not support it.
+	prealloc_cc_flag := if os.getenv('VFLAGS').contains('-cc tcc') { ' -cc cc' } else { '' }
+	exec('./vstrict1${prealloc_cc_flag} -o vprealloc -prealloc cmd/v')
 	exec('./vprealloc run examples/hello_world.v')
 	exec('./vprealloc -o v3 cmd/v')
 	exec('./v3 -o v4 cmd/v')

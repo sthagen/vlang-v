@@ -1465,7 +1465,7 @@ fn (mut p Parser) expr_or_type(min_bp token.BindingPower) ast.Expr {
 	// TODO: is there a better way to do this? see uses of `p.exp_pt`
 	exp_pt := p.exp_pt
 	p.exp_pt = true
-	expr := p.expr(min_bp)
+	expr := if p.tok == .xor { p.expect_type() } else { p.expr(min_bp) }
 	p.exp_pt = exp_pt
 	return expr
 }
@@ -2537,13 +2537,29 @@ fn (mut p Parser) interface_decl(is_public bool, attributes []ast.Attribute) ast
 		mut field_type := p.expect_type()
 		// `field type`
 		if p.tok != .semicolon {
+			mut method_generic_params := []ast.Expr{}
 			if mut field_type is ast.Ident {
 				field_name = field_type.name
+			} else if field_type is ast.Type && field_type is ast.GenericType {
+				generic_type := field_type as ast.GenericType
+				if generic_type.name is ast.Ident {
+					field_name = generic_type.name.name
+					method_generic_params = generic_type.params.clone()
+				} else {
+					p.error('expecting field name')
+				}
 			} else {
 				p.error('expecting field name')
 			}
 			field_typ := if p.tok == .lpar {
-				ast.Expr(ast.Type(p.fn_type()))
+				mut typ := p.fn_type()
+				if method_generic_params.len > 0 {
+					typ = ast.FnType{
+						...typ
+						generic_params: method_generic_params
+					}
+				}
+				ast.Expr(ast.Type(typ))
 			} else {
 				p.expect_type()
 			}

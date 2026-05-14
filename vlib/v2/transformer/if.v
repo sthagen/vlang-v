@@ -518,7 +518,7 @@ fn (mut t Transformer) try_expand_if_guard_stmt(stmt ast.ExprStmt) ?[]ast.Stmt {
 	// Transform to: if (i < arr.len) { x := arr[i]; use(x) }
 	if rhs_is_map_index {
 		rhs_idx := map_index_expr
-		if map_expr_typ := t.get_expr_type(rhs_idx.lhs) {
+		if map_expr_typ := t.resolve_expr_type(rhs_idx.lhs) {
 			if map_type := t.unwrap_map_type(map_expr_typ) {
 				// This is a map lookup - use map__get_check pattern
 				temp_name := t.gen_temp_name()

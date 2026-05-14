@@ -5,6 +5,7 @@
 module types
 
 import os
+import v2.ast
 import v2.parser
 import v2.pref
 import v2.token
@@ -92,6 +93,246 @@ fn test_basic_literal_char() {
 fn test_basic_literal_string() {
 	env := check_code('fn main() { x := "hello" }')
 	assert has_type(env, 'string'), 'string literal should have string type'
+}
+
+fn test_chained_string_split_filter_uses_array_receiver_type_for_it() {
+	env := check_code('
+fn main() {
+	lhs := "a b"
+	tokens := lhs.split(" ").filter(it.len > 0)
+	_ = tokens
+}
+')
+	assert has_type_matching(env, fn (t Type) bool {
+		return t is Array && t.elem_type.name() == 'string'
+	}), 'split().filter(it...) should type as []string'
+}
+
+fn test_selector_array_map_string_interpolation_uses_receiver_type_for_it() {
+	code :=
+		'
+struct CallFrame {
+	module_name string
+	fn_name string
+}
+
+struct Eval {
+	call_stack []CallFrame
+}
+
+fn (e &Eval) trace() string {
+	mapped := e.call_stack.map("' +
+		'$' + '{it.module_name}.' + '$' + '{it.fn_name}")
+	_ = mapped
+	return ""
+}
+'
+	env := check_code(code)
+	assert has_type_matching(env, fn (t Type) bool {
+		return t is Array && t.elem_type.name() == 'string'
+	}), 'selector array map interpolation should type as []string'
+}
+
+fn test_struct_init_prefers_field_when_method_has_same_name() {
+	env := check_code('
+struct Time {
+	unix i64
+}
+
+fn (t Time) unix() i64 {
+	return t.unix
+}
+
+fn main() {
+	t := Time{
+		unix: 1
+	}
+	_ = t
+}
+')
+	assert has_type(env, 'i64'), 'struct init should use the unix field, not Time.unix()'
+}
+
+fn test_struct_update_prefers_field_when_method_has_same_name() {
+	env := check_code('
+struct Time {
+	unix i64
+}
+
+fn (t Time) unix() i64 {
+	return t.unix
+}
+
+fn calc(t Time) i64 {
+	return t.unix
+}
+
+fn main() {
+	base := Time{
+		unix: 1
+	}
+	t := Time{
+		...base
+		unix: calc(base)
+	}
+	_ = t
+}
+')
+	assert has_type(env, 'i64'), 'struct update should use the unix field, not Time.unix()'
+}
+
+fn test_unsafe_expr_returns_last_expression_type() {
+	env := check_code('
+struct FileSet {}
+
+fn (mut fs FileSet) file() int {
+	return 1
+}
+
+struct Holder {
+	file_set &FileSet
+}
+
+fn main() {
+	h := &Holder{
+		file_set: &FileSet{}
+	}
+	mut fs := unsafe { h.file_set }
+	x := fs.file()
+	_ = x
+}
+')
+	assert has_type(env, 'int'), 'unsafe block should return the last expression type'
+}
+
+fn test_if_branch_trailing_expr_is_not_rechecked() {
+	env := check_code('
+struct Builder {}
+
+fn (mut b Builder) writeln(s string) {}
+
+struct Gen {
+	link_builtin bool
+mut:
+	sb Builder
+}
+
+fn (mut g Gen) helper() {}
+
+fn (mut g Gen) gen() {
+	if !g.link_builtin {
+		g.helper()
+		g.sb.writeln("")
+	}
+}
+')
+	assert has_type(env, 'Builder'), 'if branch trailing method call should type-check once'
+}
+
+fn test_if_guard_branch_trailing_expr_is_not_rechecked() {
+	env := check_code('
+struct Builder {}
+
+fn (mut b Builder) writeln(s string) {}
+
+struct Embedded {
+	wrapper_base string
+	owner string
+}
+
+struct Gen {
+	fn_return_types []string
+mut:
+	sb Builder
+}
+
+fn (mut g Gen) helper(base string) ?Embedded {
+	if base == "" {
+		return none
+	}
+	return Embedded{}
+}
+
+fn (mut g Gen) gen(base string) {
+	msg_fn := base + "__msg"
+	if msg_fn in g.fn_return_types {
+		g.sb.writeln("")
+	} else if embedded := g.helper(base) {
+		g.sb.writeln(embedded.wrapper_base + "__msg(" + embedded.owner + ")")
+	} else {
+		g.sb.writeln("")
+	}
+}
+')
+	assert has_type(env, 'Builder'), 'if guard branch trailing method call should type-check once'
+}
+
+fn test_or_block_with_return_keeps_receiver_type() {
+	code :=
+		'
+import strings
+import v2.types
+
+struct Gen {
+	active_generic_types map[string]types.Type
+mut:
+	sb strings.Builder
+}
+
+fn (mut g Gen) write_indent() {}
+
+fn (mut g Gen) gen(type_name string) {
+	concrete := g.active_generic_types[type_name] or {
+		g.write_indent()
+		g.sb.writeln("/* [TODO] ComptimeFor unknown type ' +
+		'$' + '{type_name} */")
+		return
+	}
+	_ = concrete
+}
+'
+	env := check_code(code)
+	assert has_type(env, 'strings__Builder'), 'or block should keep strings.Builder receiver fields typed before return'
+}
+
+fn test_os_execute_warning_detection() {
+	os_execute_selector := ast.Expr(ast.SelectorExpr{
+		lhs: ast.Ident{
+			name: 'os'
+		}
+		rhs: ast.Ident{
+			name: 'execute'
+		}
+	})
+	assert is_os_execute_selector(os_execute_selector)
+
+	literal := ast.Expr(ast.StringLiteral{
+		value: 'echo ok'
+	})
+	assert !os_execute_arg_uses_composed_string(literal)
+
+	interpolation := ast.Expr(ast.StringInterLiteral{
+		values: ['echo ', '']
+		inters: [
+			ast.StringInter{
+				expr: ast.Ident{
+					name: 'name'
+				}
+			},
+		]
+	})
+	assert os_execute_arg_uses_composed_string(interpolation)
+
+	concat := ast.Expr(ast.InfixExpr{
+		op:  .plus
+		lhs: ast.Ident{
+			name: 's1'
+		}
+		rhs: ast.Ident{
+			name: 's2'
+		}
+	})
+	assert os_execute_arg_uses_composed_string(concat)
 }
 
 fn test_iclone_struct_clone_returns_self_type() {
@@ -204,6 +445,22 @@ fn main() {
 '
 	env := check_code(code)
 	assert has_type(env, 'bool'), 'generic body field lookup should use the active concrete type'
+}
+
+fn test_generic_identity_inference_does_not_recurse_selector_lookup() {
+	p := &pref.Preferences{}
+	mut file_set := token.FileSet.new()
+	mut env := Environment.new()
+	env.cur_generic_types << {
+		'M': Type(NamedType('M'))
+	}
+	mut checker := Checker.new(p, file_set, env)
+	mut type_map := map[string]Type{}
+	checker.add_inferred_generic_type(mut type_map, 'M', Type(NamedType('M'))) or { panic(err) }
+	assert 'M' !in type_map
+	assert checker.resolve_active_generic_named_type(NamedType('M')) == none
+	typ := checker.find_field_or_method(Type(NamedType('M')), 'find_at') or { panic(err) }
+	assert typ is Void
 }
 
 fn test_interface_field_alias_to_function_type_resolves() {
@@ -440,6 +697,38 @@ fn main() {
 		}
 		return false
 	}), 'generic []&T return should substitute T inside pointer and array wrappers'
+}
+
+fn test_generic_method_receiver_option_return_uses_concrete_receiver_type() {
+	code := '
+struct Item {}
+
+struct Match[T] {
+	value T
+	has_value bool
+}
+
+fn (m Match[T]) inner() ?T {
+	if !m.has_value {
+		return none
+	}
+	return m.value
+}
+
+fn use(m Match[Item]) {
+	value := m.inner()
+	_ = value
+}
+'
+	env := check_code(code)
+	assert has_type_matching(env, fn (t Type) bool {
+		if t is OptionType {
+			if t.base_type is Struct {
+				return t.base_type.name == 'Item'
+			}
+		}
+		return false
+	}), 'generic method option return should substitute T from the concrete receiver type'
 }
 
 fn test_nested_sumtype_variants_in_in_array_literal() {
@@ -1053,4 +1342,75 @@ fn test_scope_insert_replaces_module_placeholder_with_function() {
 	})
 	obj := scope.lookup_parent('optimize', 0) or { panic('missing optimize') }
 	assert obj is Fn
+}
+
+fn test_explicit_lifetime_syntax_in_fn_types_and_generic_args() {
+	code := '
+struct Ignore {}
+
+struct IgnoreMatch[^a] {}
+
+fn matched_dir_entry[^a](self &^a Ignore) IgnoreMatch[^a] {
+	return IgnoreMatch[^a]{}
+}
+'
+	env := check_code(code)
+	fn_type := env.lookup_fn('main', 'matched_dir_entry') or { panic('missing matched_dir_entry') }
+	assert '^a' in fn_type.generic_params
+	assert fn_type.params.len == 1
+	assert fn_type.params[0].typ is Pointer
+	ptr := fn_type.params[0].typ as Pointer
+	assert ptr.lifetime == 'a'
+	assert ptr.base_type.name() == 'Ignore'
+	assert has_type_matching(env, fn (t Type) bool {
+		return t is Struct && t.name == 'IgnoreMatch' && t.generic_params == ['^a']
+	})
+}
+
+fn test_explicit_lifetime_method_receiver_and_nested_generic_return_type() {
+	code := '
+struct Ignore {}
+
+struct DirEntry {}
+
+struct Match[T] {
+	value T
+}
+
+struct IgnoreMatch[^a] {
+	ig &^a Ignore
+}
+
+fn (ig &^a Ignore) matched_dir_entry[^a](dent &DirEntry) Match[IgnoreMatch[^a]] {
+	return Match[IgnoreMatch[^a]]{
+		value: IgnoreMatch[^a]{
+			ig: ig
+		}
+	}
+}
+
+fn main() {
+	ig := Ignore{}
+	dent := DirEntry{}
+	ig.matched_dir_entry(&dent)
+}
+'
+	env := check_code(code)
+	method := env.lookup_method('Ignore', 'matched_dir_entry') or {
+		panic('missing Ignore.matched_dir_entry')
+	}
+	assert '^a' in method.generic_params
+	assert method.params.len == 1
+	assert method.params[0].typ is Pointer
+	dent_param := method.params[0].typ as Pointer
+	assert dent_param.lifetime == ''
+	assert dent_param.base_type.name() == 'DirEntry'
+	return_type := method.get_return_type() or { panic('missing matched_dir_entry return type') }
+	assert return_type.name() == 'Match'
+	assert has_type_matching(env, fn (t Type) bool {
+		return t is Struct && t.name == 'IgnoreMatch' && t.generic_params == ['^a']
+	})
+	assert has_type_matching(env, fn (t Type) bool {
+		return t is Struct && t.name == 'Match'
+	})
 }

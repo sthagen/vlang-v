@@ -11,15 +11,27 @@ fn should_expand_single_file_input(input string) bool {
 	if os.file_name(input).ends_with('_test.v') {
 		return true
 	}
-	module_name := file_module_name(input) or { return false }
-	return module_name != 'main'
+	module_name := file_module_name(input)
+	return module_name.len > 0 && !string_bytes_eq(module_name, 'main')
 }
 
-fn file_module_name(path string) ?string {
-	content := os.read_file(path) or { return none }
+fn string_bytes_eq(a string, b string) bool {
+	if a.len != b.len {
+		return false
+	}
+	for i in 0 .. a.len {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+fn file_module_name(path string) string {
+	content := os.read_file(path) or { return '' }
 	for raw_line in content.split_into_lines() {
 		line := raw_line.trim_space()
-		if line == '' || line.starts_with('//') {
+		if line.len == 0 || line.starts_with('//') {
 			continue
 		}
 		if line.starts_with('module ') {
@@ -27,7 +39,7 @@ fn file_module_name(path string) ?string {
 		}
 		break
 	}
-	return none
+	return ''
 }
 
 fn (mut b Builder) parse_files(files []string) []ast.File {
@@ -61,7 +73,7 @@ fn (mut b Builder) parse_files(files []string) []ast.File {
 	mut expanded_user_files := []string{}
 	mut seen_user_files := map[string]bool{}
 	for input in files {
-		if input == '' {
+		if input.len == 0 {
 			continue
 		}
 		if os.is_dir(input) {

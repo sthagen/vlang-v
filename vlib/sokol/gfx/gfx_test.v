@@ -1,3 +1,4 @@
+// vtest build: !msvc
 module gfx
 
 import os

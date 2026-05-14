@@ -3,6 +3,10 @@ module cbor
 import math
 import time
 
+const i32_min_i64 = -i64(2_147_483_647) - 1
+const i32_max_i64 = i64(2_147_483_647)
+const u32_max_i64 = i64(4_294_967_295)
+
 // Generic comptime-driven encoder/decoder. The pack[T] / unpack[T]
 // methods below dispatch on T at compile time, so each call site
 // monomorphises into straight-line code with no runtime type tests.
@@ -254,13 +258,13 @@ pub fn (mut u Unpacker) unpack[T]() !T {
 		return i16(v)
 	} $else $if T is int {
 		v := u.unpack_int()!
-		if v < -2_147_483_648 || v > 2_147_483_647 {
+		if v < i32_min_i64 || v > i32_max_i64 {
 			return int_range(u.pos, 'int', v.str())
 		}
 		return int(v)
 	} $else $if T is i32 {
 		v := u.unpack_int()!
-		if v < -2_147_483_648 || v > 2_147_483_647 {
+		if v < i32_min_i64 || v > i32_max_i64 {
 			return int_range(u.pos, 'i32', v.str())
 		}
 		return i32(v)
@@ -280,7 +284,7 @@ pub fn (mut u Unpacker) unpack[T]() !T {
 		return u16(v)
 	} $else $if T is u32 {
 		v := u.unpack_int()!
-		if v < 0 || v > 4_294_967_295 {
+		if v < 0 || v > u32_max_i64 {
 			return int_range(u.pos, 'u32', v.str())
 		}
 		return u32(v)

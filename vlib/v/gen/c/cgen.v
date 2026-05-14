@@ -147,6 +147,7 @@ mut:
 	inside_ternary                       int  // ?: comma separated statements on a single line
 	inside_map_postfix                   bool // inside map++/-- postfix expr
 	inside_map_infix                     bool // inside map<</+=/-= infix expr
+	wrote_windows_tcc_atomic_include     bool
 	inside_left_shift                    bool // generating the left operand of `<<`
 	inside_assign                        bool
 	inside_map_index                     bool
@@ -1987,13 +1988,21 @@ fn (mut g Gen) register_thread_wait_call(eltyp string) {
 		g.gowrappers.writeln('\tif (stat != WAIT_OBJECT_0) { builtin___v_panic(_S("error waiting thread")); }')
 		g.gowrappers.writeln('\tCloseHandle(thread.handle);')
 		g.gowrappers.writeln('\tres = *(${eltyp}*)(thread.ret_ptr);')
-		g.gowrappers.writeln('\tbuiltin___v_free(thread.ret_ptr);')
+		if g.pref.prealloc {
+			g.gowrappers.writeln('\tfree(thread.ret_ptr);')
+		} else {
+			g.gowrappers.writeln('\tbuiltin___v_free(thread.ret_ptr);')
+		}
 	} else {
 		g.gowrappers.writeln('\tvoid* ret_val;')
 		g.gowrappers.writeln('\tint stat = pthread_join(thread, &ret_val);')
 		g.gowrappers.writeln('\tif (stat != 0) { builtin___v_panic(_S("error waiting thread")); }')
 		g.gowrappers.writeln('\tres = *(${eltyp}*)ret_val;')
-		g.gowrappers.writeln('\tbuiltin___v_free(ret_val);')
+		if g.pref.prealloc {
+			g.gowrappers.writeln('\tfree(ret_val);')
+		} else {
+			g.gowrappers.writeln('\tbuiltin___v_free(ret_val);')
+		}
 	}
 	g.gowrappers.writeln('\treturn res;')
 	g.gowrappers.writeln('}')
@@ -5671,6 +5680,75 @@ fn (mut g Gen) write_map_key_arg(expr ast.Expr, key_type ast.Type) {
 	g.write('}')
 }
 
+fn (mut g Gen) write_atomic_postfix_target(node ast.PostfixExpr) {
+	if node.expr.is_auto_deref_var() {
+		g.write('*')
+	}
+	g.expr(node.expr)
+	if node.typ.has_flag(.shared_f) {
+		g.write('->val')
+	}
+}
+
+fn (g &Gen) is_windows_tcc() bool {
+	return g.pref.os == .windows
+		&& (g.pref.ccompiler_type == .tinyc || pref.cc_from_string(g.pref.ccompiler) == .tinyc)
+}
+
+fn (mut g Gen) write_atomic_postfix_expr(node ast.PostfixExpr) {
+	atomic_value_styp := g.styp(node.typ.clear_flag(.atomic_f))
+	if g.is_windows_tcc() {
+		g.write_windows_tcc_atomic_postfix_expr(node, atomic_value_styp)
+		return
+	}
+	atomic_op := if node.op == .inc {
+		'__atomic_fetch_add'
+	} else {
+		'__atomic_fetch_sub'
+	}
+	g.write('${atomic_op}((${atomic_value_styp}*)&(')
+	g.write_atomic_postfix_target(node)
+	g.write('), 1, 5)')
+}
+
+fn (mut g Gen) write_windows_tcc_atomic_postfix_expr(node ast.PostfixExpr, atomic_value_styp string) {
+	if !g.wrote_windows_tcc_atomic_include {
+		atomic_h_path :=
+			os.join_path(@VEXEROOT, 'thirdparty', 'stdatomic', 'win', 'atomic.h').replace('\\', '/')
+		g.includes.writeln('#include "${atomic_h_path}"')
+		g.wrote_windows_tcc_atomic_include = true
+	}
+	base_typ := g.table.unaliased_type(g.unwrap_generic(node.typ.clear_flags(.shared_f, .atomic_f)))
+	mut atomic_fn := 'InterlockedExchangeAdd'
+	mut atomic_ptr_styp := 'LONG'
+	match base_typ.idx() {
+		ast.i8_type_idx, ast.u8_type_idx, ast.char_type_idx {
+			atomic_fn = 'InterlockedExchangeAdd8'
+			atomic_ptr_styp = 'char'
+		}
+		ast.i16_type_idx, ast.u16_type_idx {
+			atomic_fn = 'InterlockedExchangeAdd16'
+			atomic_ptr_styp = 'short'
+		}
+		ast.i64_type_idx, ast.u64_type_idx {
+			atomic_fn = 'InterlockedExchangeAdd64'
+			atomic_ptr_styp = 'LONG64'
+		}
+		ast.isize_type_idx, ast.usize_type_idx {
+			if g.pref.arch != .i386 {
+				atomic_fn = 'InterlockedExchangeAdd64'
+				atomic_ptr_styp = 'LONG64'
+			}
+		}
+		else {}
+	}
+
+	delta := if node.op == .inc { '1' } else { '-1' }
+	g.write('((${atomic_value_styp})${atomic_fn}((${atomic_ptr_styp} volatile*)&(')
+	g.write_atomic_postfix_target(node)
+	g.write('), ${delta}))')
+}
+
 fn (mut g Gen) expr(node_ ast.Expr) {
 	old_discard_or_result := g.discard_or_result
 	old_is_void_expr_stmt := g.is_void_expr_stmt
@@ -5983,21 +6061,7 @@ fn (mut g Gen) expr(node_ ast.Expr) {
 				&& g.pref.ccompiler_type != .msvc
 			g.inside_map_postfix = true
 			if is_atomic_postfix {
-				atomic_op := if node.op == .inc {
-					'__atomic_fetch_add'
-				} else {
-					'__atomic_fetch_sub'
-				}
-				atomic_value_styp := g.styp(node.typ.clear_flag(.atomic_f))
-				g.write('${atomic_op}((${atomic_value_styp}*)&(')
-				if node.expr.is_auto_deref_var() {
-					g.write('*')
-				}
-				g.expr(node.expr)
-				if node.typ.has_flag(.shared_f) {
-					g.write('->val')
-				}
-				g.write('), 1, 5)')
+				g.write_atomic_postfix_expr(node)
 			} else if node.is_c2v_prefix {
 				g.write(node.op.str())
 			}
@@ -7725,6 +7789,11 @@ fn (mut g Gen) scope_gc_pin_pregen(node_pos int) []ScopeGcPin {
 		|| g.pref.gc_mode !in [.boehm_full, .boehm_incr, .boehm_full_opt, .boehm_incr_opt] {
 		return []ScopeGcPin{}
 	}
+	if g.inside_veb_tmpl {
+		// Veb template statements are inlined into the route body; their AST scopes
+		// do not always match the generated C block scopes for template locals.
+		return []ScopeGcPin{}
+	}
 	if g.inside_defer_generation {
 		return []ScopeGcPin{}
 	}
@@ -7830,6 +7899,10 @@ fn (mut g Gen) scope_var_needs_gc_pin(obj ast.Var) bool {
 
 fn (mut g Gen) write_scope_gc_pins(pos token.Pos) {
 	if g.pref.gc_mode !in [.boehm_full, .boehm_incr, .boehm_full_opt, .boehm_incr_opt] {
+		return
+	}
+	if g.inside_veb_tmpl {
+		// See scope_gc_pin_pregen for why template code skips these pins.
 		return
 	}
 	if g.fn_decl == unsafe { nil } || g.fn_decl.scope == unsafe { nil } {

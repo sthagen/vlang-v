@@ -27,9 +27,11 @@ mut:
 	fn_param_is_ptr        map[string][]bool
 	fn_param_types         map[string][]string
 	fn_return_types        map[string]string
+	declared_fn_names      map[string]bool
 	runtime_local_types    map[string]string
 	cur_fn_returned_idents map[string]bool
 	active_generic_types   map[string]types.Type
+	active_generic_c_names map[string]string
 	// Comptime $for field iteration state
 	comptime_field_var      string // variable name (e.g., 'field')
 	comptime_field_name     string // current field name (e.g., 'id')
@@ -37,8 +39,9 @@ mut:
 	comptime_field_raw_type types.Type = types.Struct{} // raw types.Type for comptime checks
 	comptime_field_attrs    []string // current field attributes
 	comptime_field_idx      int      // current field index
-	comptime_val_var        string   // the struct variable being decoded (e.g., 'val')
-	comptime_val_type       string   // C type of val (e.g., 'Slack')
+	comptime_continue_label string
+	comptime_val_var        string // the struct variable being decoded (e.g., 'val')
+	comptime_val_type       string // C type of val (e.g., 'Slack')
 
 	fixed_array_fields          map[string]bool
 	fixed_array_field_elem      map[string]string
@@ -69,6 +72,7 @@ mut:
 	ierror_wrapper_bases        map[string]bool
 	needed_ierror_wrapper_bases map[string]bool
 	tmp_counter                 int
+	runtime_loop_depth          int
 	cur_fn_mut_params           map[string]bool   // names of mut params in current function
 	global_var_modules          map[string]string // global var name → module name
 	global_var_types            map[string]string // global var name → C type string
@@ -104,6 +108,7 @@ mut:
 	late_generic_specs         map[string][]map[string]types.Type // additional comptime-discovered specs
 	anon_fn_defs               []string        // lifted anonymous function definitions
 	late_struct_defs           []string        // struct definitions discovered during pass 5 codegen
+	late_fn_decls              []string        // function declarations discovered during pass 5 codegen
 	pending_late_body_keys     map[string]bool // body_keys in late_struct_defs but not yet flushed to g.sb
 	late_generic_str_instances []string        // c_names of late generic struct instances needing str macro check
 	pass5_start_pos            int             // position in sb where pass 5 starts
@@ -133,6 +138,7 @@ mut:
 struct GenericStructInstance {
 	params_key string                // e.g. "json2__ValueInfo" — unique key per instantiation
 	bindings   map[string]types.Type // e.g. {T: ValueInfo}
+	c_bindings map[string]string     // e.g. {T: "json2__ValueInfo"}
 	c_name     string                // full C struct name, e.g. "json2__Node_T_json2__StructFieldInfo"
 }
 
@@ -232,9 +238,11 @@ pub fn Gen.new_with_env_and_pref(files []ast.File, env &types.Environment, p &pr
 		fn_param_is_ptr:           map[string][]bool{}
 		fn_param_types:            map[string][]string{}
 		fn_return_types:           map[string]string{}
+		declared_fn_names:         map[string]bool{}
 		runtime_local_types:       map[string]string{}
 		cur_fn_returned_idents:    map[string]bool{}
 		active_generic_types:      map[string]types.Type{}
+		active_generic_c_names:    map[string]string{}
 		struct_field_lookup_cache: map[string]string{}
 		struct_field_lookup_miss:  map[string]bool{}
 		struct_type_lookup_cache:  map[string]types.Struct{}
@@ -263,6 +271,7 @@ pub fn Gen.new_with_env_and_pref(files []ast.File, env &types.Environment, p &pr
 		emit_modules:                map[string]bool{}
 		exported_const_seen:         map[string]bool{}
 		exported_const_symbols:      []ExportedConstSymbol{}
+		late_fn_decls:               []string{}
 		emitted_interface_bodies:    map[string]bool{}
 		interface_data_fields:       map[string][]InterfaceDataFieldInfo{}
 		interface_wrapper_specs:     map[string]InterfaceWrapperSpec{}
@@ -476,7 +485,8 @@ fn should_keep_builtin_map_decl(decl ast.FnDecl) bool {
 	base_keep := decl.name in ['new_map', 'move', 'clear', 'key_to_index', 'meta_less',
 		'meta_greater', 'ensure_extra_metas', 'ensure_extra_metas_grow', 'set', 'expand', 'rehash',
 		'reserve', 'cached_rehash', 'get_and_set', 'get', 'get_check', 'exists', 'delete', 'keys',
-		'values', 'clone', 'free', 'key', 'value', 'has_index', 'zeros_to_end', 'new_dense_array']
+		'values', 'clone', 'free', 'key', 'value', 'has_index', 'zeros_to_end', 'new_dense_array',
+		'reserve_metas', 'trim_deleted_tail']
 	return base_keep || decl.name.starts_with('map_eq_') || decl.name.starts_with('map_clone_')
 		|| decl.name.starts_with('map_free_')
 }
@@ -484,7 +494,10 @@ fn should_keep_builtin_map_decl(decl ast.FnDecl) bool {
 fn should_keep_builtin_string_decl(decl ast.FnDecl) bool {
 	return decl.name in ['eq', 'plus', 'plus_two', 'substr', 'substr_unsafe', 'repeat', 'free',
 		'vstring', 'vstring_with_len', 'vstring_literal', 'vstring_literal_with_len', 'runes',
-		'join']
+		'join', 'split', 'split_nth', 'trim', 'trim_left', 'trim_right', 'trim_space', 'trim_runes',
+		'replace', 'replace_each', 'data_to_hex_string', 'is_letter', 'is_pure_ascii',
+		'to_lower_ascii', 'to_lower', 'lt', '<', 'compare_strings', 'compare_lower_strings',
+		'compare_strings_by_len']
 }
 
 fn should_always_emit_for_markused(path string) bool {
@@ -592,11 +605,12 @@ pub fn (mut g Gen) gen_passes_1_to_4() {
 		'T': types.Type(types.f64_)
 	}
 	g.discover_comptime_generic_specs()
+	g.discover_nested_generic_specs()
+	g.build_generic_spec_index()
 	g.collect_fn_signatures()
 	g.collect_c_file_fn_keys()
 	g.collect_runtime_const_targets()
 	g.register_builder_methods()
-	g.build_generic_spec_index()
 	stage_start = g.mark_cgen_step(stats_enabled, stats_scope, mut stats_sw, stage_start, 'setup')
 
 	// Pre-collect all global variable names so they can be module-qualified
@@ -775,7 +789,7 @@ pub fn (mut g Gen) gen_passes_1_to_4() {
 	// Repeat until no more progress (simple topo sort with wrapper side-effects).
 	for info in all_structs {
 		g.cur_module = info.mod
-		if g.struct_is_leaf(info.decl) {
+		if g.struct_is_leaf(info.decl) && g.struct_fields_resolved(info.decl) {
 			g.gen_struct_decl(info.decl)
 		}
 	}
@@ -980,16 +994,21 @@ pub fn (mut g Gen) gen_passes_1_to_4() {
 					specs := g.generic_fn_specializations(stmt)
 					if specs.len > 0 {
 						prev_generic_types := g.active_generic_types.clone()
+						prev_generic_c_names := g.active_generic_c_names.clone()
 						for spec in specs {
 							g.active_generic_types = spec.generic_types.clone()
+							g.active_generic_c_names =
+								g.generic_c_names_for_bindings(spec.generic_types)
 							spec_key := 'fn_${spec.name}'
 							if spec_key !in g.fn_owner_file {
 								g.fn_owner_file[spec_key] = fi
 							}
+							g.undef_possible_str_macro(spec.name)
 							g.gen_fn_head_with_name(stmt, spec.name)
 							g.sb.writeln(';')
 						}
 						g.active_generic_types = prev_generic_types.clone()
+						g.active_generic_c_names = prev_generic_c_names.clone()
 					} else {
 						gfn_name := g.get_fn_name(stmt)
 						if gfn_name != '' {
@@ -997,6 +1016,50 @@ pub fn (mut g Gen) gen_passes_1_to_4() {
 						}
 					}
 					continue
+				}
+				recv_generic_params := receiver_generic_param_names(stmt)
+				if recv_generic_params.len > 0 {
+					all_bindings := g.get_all_receiver_generic_bindings(stmt)
+					if all_bindings.len > 0 {
+						prev_generic_types := g.active_generic_types.clone()
+						prev_generic_c_names := g.active_generic_c_names.clone()
+						for bindings in all_bindings {
+							g.active_generic_types = bindings.clone()
+							g.active_generic_c_names = g.generic_c_names_for_bindings(bindings)
+							fn_name := g.get_fn_name(stmt)
+							if fn_name == '' {
+								continue
+							}
+							fn_key := 'fn_${fn_name}'
+							if fn_key !in g.fn_owner_file {
+								g.fn_owner_file[fn_key] = fi
+							}
+							g.undef_possible_str_macro(fn_name)
+							g.gen_fn_head_with_name(stmt, fn_name)
+							g.sb.writeln(';')
+						}
+						g.active_generic_types = prev_generic_types.clone()
+						g.active_generic_c_names = prev_generic_c_names.clone()
+						continue
+					} else if bindings := g.get_receiver_generic_bindings(stmt) {
+						prev_generic_types := g.active_generic_types.clone()
+						prev_generic_c_names := g.active_generic_c_names.clone()
+						g.active_generic_types = bindings.clone()
+						g.active_generic_c_names = g.generic_c_names_for_bindings(bindings)
+						fn_name := g.get_fn_name(stmt)
+						if fn_name != '' {
+							fn_key := 'fn_${fn_name}'
+							if fn_key !in g.fn_owner_file {
+								g.fn_owner_file[fn_key] = fi
+							}
+							g.undef_possible_str_macro(fn_name)
+							g.gen_fn_head_with_name(stmt, fn_name)
+							g.sb.writeln(';')
+						}
+						g.active_generic_types = prev_generic_types.clone()
+						g.active_generic_c_names = prev_generic_c_names.clone()
+						continue
+					}
 				}
 				fn_name := g.get_fn_name(stmt)
 				if fn_name == '' {
@@ -1021,6 +1084,7 @@ pub fn (mut g Gen) gen_passes_1_to_4() {
 						g.cur_fn_scope = fn_scope
 					}
 				}
+				g.undef_possible_str_macro(fn_name)
 				g.gen_fn_head(stmt)
 				g.sb.writeln(';')
 			}
@@ -1100,6 +1164,21 @@ fn (g &Gen) should_skip_plain_v_fallback_fn(fn_key string) bool {
 		&& fn_key in g.c_file_fn_keys
 }
 
+fn generic_struct_depth_from_def(def string) int {
+	first_line := def.all_before('\n')
+	mut depth := 0
+	mut rest := first_line
+	for {
+		idx := rest.index('_T_') or { break }
+		depth++
+		if idx + 3 >= rest.len {
+			break
+		}
+		rest = rest[idx + 3..]
+	}
+	return depth
+}
+
 // gen_finalize runs post-pass-5 finalization and returns the complete C source string.
 pub fn (mut g Gen) gen_finalize() string {
 	stats_enabled := g.cgen_stats_enabled()
@@ -1176,14 +1255,32 @@ pub fn (mut g Gen) gen_finalize() string {
 	stage_start = g.mark_cgen_step(stats_enabled, stats_scope, mut stats_sw, stage_start,
 		'finalize late str macros')
 	if g.anon_fn_defs.len > 0 || g.spawn_wrapper_defs.len > 0 || g.trampoline_defs.len > 0
-		|| g.late_struct_defs.len > 0 || g.pending_late_body_keys.len > 0 {
+		|| g.late_fn_decls.len > 0 || g.late_struct_defs.len > 0 || g.pending_late_body_keys.len > 0 {
 		full := g.sb.str()
 		stage_start = g.mark_cgen_step(stats_enabled, stats_scope, mut stats_sw, stage_start,
 			'finalize snapshot')
 		mut out_sb := strings.new_builder(full.len + 4096)
 		unsafe { out_sb.write_ptr(full.str, g.pass5_start_pos) }
+		for decl in g.late_fn_decls {
+			out_sb.write_string(decl)
+		}
 		// Late-discovered generic struct definitions (discovered during setup/pass 4 codegen)
-		for def in g.late_struct_defs {
+		mut emitted_late_defs := map[int]bool{}
+		for depth in 0 .. 8 {
+			for i, def in g.late_struct_defs {
+				if i in emitted_late_defs {
+					continue
+				}
+				if generic_struct_depth_from_def(def) == depth {
+					out_sb.write_string(def)
+					emitted_late_defs[i] = true
+				}
+			}
+		}
+		for i, def in g.late_struct_defs {
+			if i in emitted_late_defs {
+				continue
+			}
 			out_sb.write_string(def)
 		}
 		// Mark pending late body keys as emitted now that they're in the output.
@@ -1347,6 +1444,7 @@ pub fn (g &Gen) new_pass5_worker(file_indices []int, worker_id int) &Gen {
 		fn_param_is_ptr:             g.fn_param_is_ptr.clone()
 		fn_param_types:              g.fn_param_types.clone()
 		fn_return_types:             g.fn_return_types.clone()
+		declared_fn_names:           g.declared_fn_names.clone()
 		struct_field_types:          g.struct_field_types.clone()
 		enum_value_to_enum:          g.enum_value_to_enum.clone()
 		enum_type_fields:            g.enum_type_fields.clone()
@@ -1386,6 +1484,7 @@ pub fn (g &Gen) new_pass5_worker(file_indices []int, worker_id int) &Gen {
 		late_generic_specs:          g.late_generic_specs.clone()
 		generic_struct_bindings:     g.generic_struct_bindings.clone()
 		generic_struct_instances:    g.generic_struct_instances.clone()
+		late_fn_decls:               []string{}
 		typedef_c_types:             g.typedef_c_types.clone()
 		// Per-worker mutable state (starts fresh).
 		// Each worker gets a unique tmp_counter offset to avoid name collisions
@@ -1396,6 +1495,7 @@ pub fn (g &Gen) new_pass5_worker(file_indices []int, worker_id int) &Gen {
 		runtime_local_types:         map[string]string{}
 		cur_fn_returned_idents:      map[string]bool{}
 		active_generic_types:        map[string]types.Type{}
+		active_generic_c_names:      map[string]string{}
 		is_module_ident_cache:       map[string]bool{}
 		not_local_var_cache:         map[string]bool{}
 		resolved_module_names:       map[string]string{}
@@ -1510,8 +1610,9 @@ fn (mut g Gen) emit_missing_runtime_fallbacks() {
 		g.sb.writeln('\t_write_buf_to_fd(fd, &lf, 1);')
 		g.sb.writeln('}')
 	}
-	if 'fn_Array_int_contains' !in g.emitted_types {
-		g.emitted_types['fn_Array_int_contains'] = true
+	if 'fn_Array_int_contains' !in g.emitted_types
+		&& 'fallback_Array_int_contains' !in g.emitted_types {
+		g.emitted_types['fallback_Array_int_contains'] = true
 		g.sb.writeln('')
 		g.sb.writeln('__attribute__((weak)) bool Array_int_contains(Array_int a, int v) {')
 		g.sb.writeln('\tfor (int i = 0; i < a.len; i += 1) {')
@@ -1522,8 +1623,9 @@ fn (mut g Gen) emit_missing_runtime_fallbacks() {
 		g.sb.writeln('\treturn false;')
 		g.sb.writeln('}')
 	}
-	if 'fn_Array_string_contains' !in g.emitted_types {
-		g.emitted_types['fn_Array_string_contains'] = true
+	if 'fn_Array_string_contains' !in g.emitted_types
+		&& 'fallback_Array_string_contains' !in g.emitted_types {
+		g.emitted_types['fallback_Array_string_contains'] = true
 		g.sb.writeln('')
 		g.sb.writeln('__attribute__((weak)) bool Array_string_contains(Array_string a, string v) {')
 		g.sb.writeln('\tfor (int i = 0; i < a.len; i += 1) {')
@@ -1595,6 +1697,7 @@ fn (mut g Gen) emit_missing_runtime_fallbacks() {
 	}
 	if 'fn___sort_cmp_int_asc' !in g.emitted_types {
 		g.emitted_types['fn___sort_cmp_int_asc'] = true
+		g.late_fn_decls << 'int __sort_cmp_int_asc(int* a, int* b);\n'
 		g.sb.writeln('')
 		g.sb.writeln('__attribute__((weak)) int __sort_cmp_int_asc(int* a, int* b) {')
 		g.sb.writeln('\tif (*a < *b) return -1;')
@@ -1604,6 +1707,7 @@ fn (mut g Gen) emit_missing_runtime_fallbacks() {
 	}
 	if 'fn___sort_cmp_RepIndex_by_idx_asc' !in g.emitted_types {
 		g.emitted_types['fn___sort_cmp_RepIndex_by_idx_asc'] = true
+		g.late_fn_decls << 'int __sort_cmp_RepIndex_by_idx_asc(RepIndex* a, RepIndex* b);\n'
 		g.sb.writeln('')
 		g.sb.writeln('__attribute__((weak)) int __sort_cmp_RepIndex_by_idx_asc(RepIndex* a, RepIndex* b) {')
 		g.sb.writeln('\tif (a->idx < b->idx) return -1;')
@@ -1613,6 +1717,7 @@ fn (mut g Gen) emit_missing_runtime_fallbacks() {
 	}
 	if 'fn_bits__leading_zeros_64' !in g.emitted_types {
 		g.emitted_types['fn_bits__leading_zeros_64'] = true
+		g.late_fn_decls << 'int bits__leading_zeros_64(u64 x);\n'
 		g.sb.writeln('')
 		g.sb.writeln('__attribute__((weak)) int bits__leading_zeros_64(u64 x) {')
 		g.sb.writeln('\tif (x == 0) {')
@@ -1623,6 +1728,7 @@ fn (mut g Gen) emit_missing_runtime_fallbacks() {
 	}
 	if 'fn_bits__trailing_zeros_32' !in g.emitted_types {
 		g.emitted_types['fn_bits__trailing_zeros_32'] = true
+		g.late_fn_decls << 'int bits__trailing_zeros_32(u32 x);\n'
 		g.sb.writeln('')
 		g.sb.writeln('__attribute__((weak)) int bits__trailing_zeros_32(u32 x) {')
 		g.sb.writeln('\tif (x == 0) {')
@@ -1633,6 +1739,7 @@ fn (mut g Gen) emit_missing_runtime_fallbacks() {
 	}
 	if 'fn_bits__trailing_zeros_64' !in g.emitted_types {
 		g.emitted_types['fn_bits__trailing_zeros_64'] = true
+		g.late_fn_decls << 'int bits__trailing_zeros_64(u64 x);\n'
 		g.sb.writeln('')
 		g.sb.writeln('__attribute__((weak)) int bits__trailing_zeros_64(u64 x) {')
 		g.sb.writeln('\tif (x == 0) {')

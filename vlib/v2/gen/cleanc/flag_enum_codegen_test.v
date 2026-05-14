@@ -9,7 +9,7 @@ import v2.transformer
 import v2.types
 
 fn generate_c_for_test(code string) string {
-	tmp_file := '/tmp/v2_flag_enum_codegen_test_${os.getpid()}.v'
+	tmp_file := os.join_path(os.temp_dir(), 'v2_flag_enum_codegen_test_${os.getpid()}.v')
 	os.write_file(tmp_file, code) or { panic('failed to write temp file') }
 	defer {
 		os.rm(tmp_file) or {}
@@ -91,4 +91,519 @@ fn test_generate_c_uses_concrete_map_method_name_in_generic_comptime_body() {
 	csrc := generate_c_for_test(code)
 	assert csrc.contains('Map_string_int__query_item(')
 	assert !csrc.contains('map__query_item(')
+}
+
+fn test_generate_c_filters_lifetime_params_from_generic_struct_binding() {
+	csrc := generate_c_for_test('
+struct Value {
+	n int
+}
+
+struct Ref[^a, T] {
+	value T
+}
+
+struct Holder[^a] {
+	item Ref[^a, Value]
+}
+')
+	assert csrc.contains('struct Ref {')
+	assert csrc.contains('Value value;')
+	assert !csrc.contains('T value;')
+}
+
+fn test_generate_c_lowers_pointer_type_params_receivers_fields_and_generics() {
+	csrc := generate_c_for_test('
+struct Foo {
+	value int
+}
+
+struct Node[T] {
+	value T
+}
+
+struct Holder {
+	item &Foo
+	node &Node[Foo]
+}
+
+fn ptr_value(foo &Foo) int {
+	return foo.value
+}
+
+fn (foo &Foo) method_value() int {
+	return foo.value
+}
+
+fn main() {
+	foo := Foo{}
+	_ := ptr_value(&foo)
+	_ := foo.method_value()
+}
+')
+	assert csrc.contains('Foo* item;')
+	assert csrc.contains('Node* node;')
+	assert csrc.contains('Foo value;')
+	assert csrc.contains('ptr_value(Foo* foo)')
+	assert csrc.contains('Foo__method_value(Foo* foo)')
+	assert !csrc.contains('int item;')
+	assert !csrc.contains('int ptr_value(int foo)')
+}
+
+fn test_generate_c_match_on_enum_does_not_constrain_branch_array_literals() {
+	csrc := generate_c_for_test('
+enum Choice {
+	color
+	none
+}
+
+fn choices(id Choice) []string {
+	return match id {
+		.color { ["never", "auto"] }
+		.none { []string{} }
+	}
+}
+')
+	assert csrc.contains('sizeof(string)')
+	assert !csrc.contains('&(Choice[')
+}
+
+fn test_generate_c_struct_eq_recurses_into_nested_string_fields() {
+	csrc := generate_c_for_test('
+struct Encoding {
+	label string
+}
+
+enum Kind {
+	auto
+	disabled
+	some
+}
+
+struct Mode {
+	kind     Kind = .auto
+	encoding Encoding
+}
+
+fn same(a Mode, b Mode) bool {
+	return a == b
+}
+')
+	assert csrc.contains('string__eq(')
+	assert csrc.contains('.encoding.label')
+}
+
+fn test_generate_c_emits_generic_method_helper_specialization_body() {
+	csrc := generate_c_for_test('
+struct Mapper {}
+
+struct Schema {}
+
+fn (mut m Mapper) helper[T]() int {
+	return 1
+}
+
+fn (mut m Mapper) parse[T]() int {
+	return m.helper[T]()
+}
+
+fn main() {
+	mut m := Mapper{}
+	_ = m.parse[Schema]()
+}
+')
+	assert csrc.contains('int Mapper__parse_T_Schema(Mapper* m) {')
+	assert csrc.contains('int Mapper__helper_T_Schema(Mapper* m) {')
+}
+
+fn test_generate_c_specializes_implicit_generic_function_calls_from_all_args() {
+	csrc := generate_c_for_test('
+struct Left {}
+struct RightA {}
+struct RightB {}
+
+fn pair[T, U](x T, y U) int {
+	_ = x
+	_ = y
+	return 1
+}
+
+fn main() {
+	left := Left{}
+	a := RightA{}
+	b := RightB{}
+	_ = pair(left, a)
+	_ = pair(left, b)
+}
+')
+	assert csrc.contains('int pair_T_Left_RightA(Left x, RightA y);')
+	assert csrc.contains('int pair_T_Left_RightB(Left x, RightB y);')
+	assert csrc.contains('pair_T_Left_RightA(left, a)')
+	assert csrc.contains('pair_T_Left_RightB(left, b)')
+	assert !csrc.contains('pair(left, a)')
+	assert !csrc.contains('pair(left, b)')
+}
+
+fn test_generate_c_does_not_specialize_plain_generic_function_for_struct_fields() {
+	csrc := generate_c_for_test('
+enum Pattern {
+	a
+}
+
+struct Thing {
+	pattern Pattern
+	named bool
+}
+
+fn (thing Thing) find_at() int {
+	_ = thing
+	return 1
+}
+
+fn find[M](matcher M) int {
+	return matcher.find_at()
+}
+
+fn main() {
+	thing := Thing{}
+	_ = find(thing)
+}
+')
+	assert csrc.contains('int find_T_Thing(Thing matcher) {')
+	assert csrc.contains('return Thing__find_at((matcher));')
+	assert !csrc.contains('find_T_Pattern')
+	assert !csrc.contains('find_T_bool')
+	assert !csrc.contains('Pattern__find_at')
+	assert !csrc.contains('bool__find_at')
+}
+
+fn test_generate_c_specializes_nested_generic_calls_from_active_bindings() {
+	csrc := generate_c_for_test('
+struct Matcher {}
+struct Captures {}
+
+fn outer[M, T](matcher M, mut caps T) {
+	inner(matcher, mut caps)
+}
+
+fn inner[M, T](matcher M, mut caps T) {
+	_ = matcher
+	_ = caps
+}
+
+fn main() {
+	matcher := Matcher{}
+	mut caps := Captures{}
+	outer(matcher, mut caps)
+}
+')
+	assert csrc.contains('void outer_T_Matcher_Captures(Matcher matcher, Captures* caps) {')
+	assert csrc.contains('inner_T_Matcher_Captures(matcher, caps);')
+	assert csrc.contains('void inner_T_Matcher_Captures(Matcher matcher, Captures* caps) {')
+	assert !csrc.contains('inner(matcher, caps)')
+}
+
+fn test_generate_c_emits_value_receiver_methods_used_by_interface_wrappers() {
+	csrc := generate_c_for_test('
+interface Counter {
+	len() int
+}
+
+struct Counts {}
+
+fn (counts Counts) len() int {
+	_ = counts
+	return 1
+}
+
+fn use_counter(counter Counter) int {
+	return counter.len()
+}
+
+fn main() {
+	counts := Counts{}
+	_ = use_counter(counts)
+}
+')
+	assert csrc.contains('int Counts__len(Counts counts) {')
+	assert csrc.contains('static int __iface_wrap_Counter_Counts_len(void* _obj) {')
+	assert csrc.contains('return Counts__len(*(((Counts*)_obj)));')
+}
+
+fn test_generate_c_preserves_void_result_or_block_side_effects() {
+	csrc := generate_c_for_test('
+fn may_fail() ? {
+	return none
+}
+
+fn main() {
+	mut saw_error := false
+	may_fail() or {
+		saw_error = true
+	}
+	_ = saw_error
+}
+')
+	assert csrc.contains('saw_error = true;')
+}
+
+fn test_generate_c_passes_mut_generic_param_address_as_existing_pointer() {
+	csrc := generate_c_for_test('
+struct Captures {}
+
+fn visit[T](mut value T, cb fn (&T)) {
+	cb(&value)
+}
+
+fn main() {
+	mut captures := Captures{}
+	visit(mut captures, fn (_captures &Captures) {})
+}
+')
+	assert csrc.contains('cb(value);')
+	assert !csrc.contains('cb(&value);')
+}
+
+fn test_generate_c_captures_mut_param_as_existing_pointer() {
+	csrc := generate_c_for_test('
+fn touch(mut dst []u8) {
+	dst << u8(1)
+}
+
+fn outer(mut dst []u8) {
+	cb := fn [mut dst] () {
+		touch(mut dst)
+	}
+	cb()
+}
+
+fn main() {
+	mut dst := []u8{}
+	outer(mut dst)
+}
+')
+	assert csrc.contains('_capture_0 = dst;')
+	assert !csrc.contains('_capture_0 = &dst;')
+}
+
+fn test_generate_c_rewrites_continue_in_generic_comptime_field_loop() {
+	code := [
+		'struct Schema {',
+		'	skip int',
+		'	keep int',
+		'}',
+		'',
+		'fn count_fields[T]() int {',
+		'	mut n := 0',
+		'	@DLR@for field in T.fields {',
+		'		if field.name == @SQ@skip@SQ@ {',
+		'			continue',
+		'		}',
+		'		n++',
+		'	}',
+		'	return n',
+		'}',
+		'',
+		'fn main() {',
+		'	_ = count_fields[Schema]()',
+		'}',
+	].join('\n').replace('@DLR@', '$').replace('@SQ@', "'")
+	csrc := generate_c_for_test(code)
+	assert csrc.contains('goto __v_ctf_continue_')
+	assert csrc.contains('__v_ctf_continue_')
+}
+
+fn test_generate_c_exposes_generic_comptime_field_attrs() {
+	code := [
+		'struct Schema {',
+		'	field int @[repeats; short: u]',
+		'}',
+		'',
+		'fn attrs[T]() []string {',
+		'	mut out := []string{}',
+		'	@DLR@for field in T.fields {',
+		'		out = field.attrs',
+		'	}',
+		'	return out',
+		'}',
+		'',
+		'fn main() {',
+		'	_ = attrs[Schema]()',
+		'}',
+	].join('\n').replace('@DLR@', '$')
+	csrc := generate_c_for_test(code)
+	assert csrc.contains('"repeats"')
+	assert csrc.contains('"short: u"')
+}
+
+fn test_generate_c_struct_default_does_not_write_string_value_to_pointer_field() {
+	csrc := generate_c_for_test('
+struct Builder[^a] {
+	glob &^a string
+}
+
+fn make[^a]() &Builder[^a] {
+	return &Builder[^a]{}
+}
+
+fn (mut b Builder[^a]) touch[^a]() &Builder[^a] {
+	return &b
+}
+')
+	assert csrc.contains('string* glob;')
+	assert !csrc.contains('.glob = (string)')
+}
+
+fn test_generate_c_specializes_plain_method_on_each_generic_receiver_instance() {
+	csrc := generate_c_for_test('
+enum MatchKind {
+	none
+	hit
+}
+
+struct ValueA {}
+struct ValueB {}
+
+struct Match[T] {
+	kind  MatchKind = .none
+	value T
+}
+
+fn first() Match[ValueA] {
+	return Match[ValueA]{
+		kind: .hit
+		value: ValueA{}
+	}
+}
+
+fn second() Match[ValueB] {
+	return Match[ValueB]{
+		kind: .hit
+		value: ValueB{}
+	}
+}
+
+fn (m Match[T]) is_hit() bool {
+	return m.kind == .hit
+}
+
+fn main() {
+	_ = first().is_hit()
+	_ = second().is_hit()
+}
+')
+	assert csrc.contains('bool Match__is_hit(Match m) {')
+	assert csrc.contains('bool Match_T_ValueB__is_hit(Match_T_ValueB m);')
+	assert csrc.contains('bool Match_T_ValueB__is_hit(Match_T_ValueB m) {')
+	assert csrc.contains('return ((Match_T_ValueB){.kind = MatchKind__hit')
+	assert csrc.contains('Match__is_hit(first())')
+	assert csrc.contains('Match_T_ValueB__is_hit(second())')
+	assert !csrc.contains('Match__is_hit(second())')
+}
+
+fn test_generate_c_declares_generic_struct_literal_with_specialized_type() {
+	csrc := generate_c_for_test('
+struct Other {}
+struct Value {}
+
+struct Match[T] {
+	value T
+}
+
+fn make_other() Match[Other] {
+	return Match[Other]{}
+}
+
+fn make_match() Match[Value] {
+	return Match[Value]{}
+}
+
+fn main() {
+	_ = make_other()
+	mut mat := Match[Value]{}
+	mat = make_match()
+}
+')
+	assert csrc.contains('Match_T_Value mat = ((Match_T_Value){0});')
+	assert csrc.contains('mat = make_match();')
+	assert !csrc.contains('Match mat = ((Match_T_Value){0});')
+}
+
+fn test_generate_c_declares_lifetime_generic_struct_literal_with_specialized_type() {
+	csrc := generate_c_for_test('
+struct Other {}
+struct IgnoreMatch[^a] {}
+
+struct Match[T] {
+	value T
+}
+
+fn make_other() Match[Other] {
+	return Match[Other]{}
+}
+
+fn matched[^a]() Match[IgnoreMatch[^a]] {
+	_ = make_other()
+	mut mat := Match[IgnoreMatch[^a]]{}
+	return mat
+}
+
+fn main() {
+	_ = matched()
+}
+')
+	assert csrc.contains('Match_T_IgnoreMatch matched()')
+	assert csrc.contains('Match_T_IgnoreMatch mat = ((Match_T_IgnoreMatch){0});')
+	assert !csrc.contains('\tMatch mat = ((Match_T_IgnoreMatch){0});')
+}
+
+fn test_generate_c_uses_specialized_lifetime_generic_type_for_if_expr_and_array_literal() {
+	csrc := generate_c_for_test('
+struct Other {}
+struct IgnoreMatch[^a] {}
+
+struct Match[T] {
+	value T
+}
+
+fn make_other() Match[Other] {
+	return Match[Other]{}
+}
+
+fn make_match[^a]() Match[IgnoreMatch[^a]] {
+	return Match[IgnoreMatch[^a]]{}
+}
+
+fn matched[^a](flag bool) Match[IgnoreMatch[^a]] {
+	_ = make_other()
+	a := make_match()
+	b := make_match()
+	mut selected := if flag {
+		make_match()
+	} else {
+		Match[IgnoreMatch[^a]]{}
+	}
+	for mat in [a, b, selected] {
+		return mat
+	}
+	return Match[IgnoreMatch[^a]]{}
+}
+')
+	assert csrc.contains('Match_T_IgnoreMatch selected = ({ Match_T_IgnoreMatch _if_expr_t')
+	assert csrc.contains('new_array_from_c_array(3, 3, sizeof(Match_T_IgnoreMatch)')
+	assert csrc.contains('Match_T_IgnoreMatch mat = ')
+	assert !csrc.contains('new_array_from_c_array(3, 3, sizeof(int)')
+}
+
+fn test_generate_c_fixed_array_index_expr_has_element_type() {
+	csrc := generate_c_for_test('
+const month_days = [31, 28, 31]!
+
+fn max_day(month int) int {
+	value := month_days[month - 1] + 1
+	return value
+}
+')
+	assert csrc.contains('int value = (month_days')
+	assert !csrc.contains('fixed_int_3 value')
 }

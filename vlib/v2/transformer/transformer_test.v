@@ -18,6 +18,8 @@ fn create_test_transformer() &Transformer {
 		pref:                        &vpref.Preferences{}
 		env:                         unsafe { env }
 		needed_clone_fns:            map[string]string{}
+		needed_sumtype_clone_fns:    map[string]types.SumType{}
+		needed_option_clone_fns:     map[string]types.OptionType{}
 		needed_array_contains_fns:   map[string]ArrayMethodInfo{}
 		needed_array_index_fns:      map[string]ArrayMethodInfo{}
 		needed_array_last_index_fns: map[string]ArrayMethodInfo{}
@@ -44,6 +46,8 @@ fn create_transformer_with_vars(vars map[string]types.Type) &Transformer {
 		env:                         unsafe { env }
 		scope:                       scope
 		needed_clone_fns:            map[string]string{}
+		needed_sumtype_clone_fns:    map[string]types.SumType{}
+		needed_option_clone_fns:     map[string]types.OptionType{}
 		needed_array_contains_fns:   map[string]ArrayMethodInfo{}
 		needed_array_index_fns:      map[string]ArrayMethodInfo{}
 		needed_array_last_index_fns: map[string]ArrayMethodInfo{}
@@ -302,6 +306,74 @@ fn test_transform_comptime_embed_file_chained_method_call() {
 	assert (init.fields[3].value as ast.StringLiteral).value == quote_v_string_literal(asset_path)
 }
 
+fn test_transform_comptime_embed_file_nested_chained_method_call() {
+	raw_dir := os.join_path(os.temp_dir(), 'v2_transformer_embed_file_nested_chain_${os.getpid()}')
+	os.mkdir_all(raw_dir) or { panic(err) }
+	tmp_dir := os.real_path(raw_dir)
+	defer {
+		os.rmdir_all(tmp_dir) or {}
+	}
+	source_path := os.join_path(tmp_dir, 'main.v')
+	asset_path := os.join_path(tmp_dir, 'asset.txt')
+	os.write_file(source_path, 'fn main() {}') or { panic(err) }
+	os.write_file(asset_path, 'hello') or { panic(err) }
+
+	mut t := create_test_transformer()
+	t.cur_file_name = source_path
+
+	result := t.transform_comptime_expr(ast.ComptimeExpr{
+		expr: ast.Expr(ast.CallOrCastExpr{
+			lhs:  ast.Expr(ast.SelectorExpr{
+				lhs: ast.Expr(ast.CallExpr{
+					lhs:  ast.Expr(ast.SelectorExpr{
+						lhs: ast.Expr(ast.CallOrCastExpr{
+							lhs:  ast.Expr(ast.Ident{
+								name: 'embed_file'
+							})
+							expr: ast.Expr(ast.StringLiteral{
+								kind:  .v
+								value: "'asset.txt'"
+							})
+						})
+						rhs: ast.Ident{
+							name: 'to_string'
+						}
+					})
+					args: []
+				})
+				rhs: ast.Ident{
+					name: 'trim_left'
+				}
+			})
+			expr: ast.Expr(ast.StringLiteral{
+				kind:  .v
+				value: "'\\n'"
+			})
+		})
+	})
+
+	assert t.needed_embed_file_helper
+	assert result is ast.CallOrCastExpr, 'expected CallOrCastExpr, got ${result.type_name()}'
+	outer := result as ast.CallOrCastExpr
+	assert outer.lhs is ast.SelectorExpr
+	outer_sel := outer.lhs as ast.SelectorExpr
+	assert outer_sel.rhs.name == 'trim_left'
+	assert outer_sel.lhs is ast.CallExpr
+	inner_call := outer_sel.lhs as ast.CallExpr
+	assert inner_call.lhs is ast.SelectorExpr
+	inner_sel := inner_call.lhs as ast.SelectorExpr
+	assert inner_sel.rhs.name == 'to_string'
+	assert inner_sel.lhs is ast.InitExpr
+	init := inner_sel.lhs as ast.InitExpr
+	assert init.typ is ast.Ident
+	assert (init.typ as ast.Ident).name == embed_file_helper_type_name
+	assert init.fields.len == 4
+	assert init.fields[0].value is ast.StringLiteral
+	assert (init.fields[0].value as ast.StringLiteral).value == "'hello'"
+	assert init.fields[3].value is ast.StringLiteral
+	assert (init.fields[3].value as ast.StringLiteral).value == quote_v_string_literal(asset_path)
+}
+
 fn test_inject_embed_file_helper_adds_builtin_helper_once() {
 	mut t := create_test_transformer()
 	mut files := [
@@ -429,6 +501,70 @@ fn use_clone(value Outer) Outer {
 	}
 	assert saw_lowered_call
 	assert saw_inner_clone
+	assert saw_outer_clone
+}
+
+fn test_transform_autogenerates_clone_helpers_for_sumtype_and_option_fields() {
+	files := transform_code_for_test('
+interface IClone {}
+
+struct Err implements IClone {
+	msg string
+}
+
+struct Leaf implements IClone {
+	name string
+}
+
+struct Empty {}
+
+type Choice = Empty | Leaf
+
+struct Outer implements IClone {
+	choice Choice
+	err    ?Err
+}
+
+fn use_clone(value Outer) Outer {
+	return value.clone()
+}
+')
+	assert files.len == 1
+	file := files[0]
+	mut saw_choice_clone := false
+	mut saw_option_clone := false
+	mut saw_outer_clone := false
+	for stmt in file.stmts {
+		if stmt is ast.FnDecl && stmt.name == 'Choice__clone' {
+			saw_choice_clone = true
+		}
+		if stmt is ast.FnDecl && stmt.name == 'Option_Err__clone' {
+			saw_option_clone = true
+		}
+		if stmt is ast.FnDecl && stmt.name == 'Outer__clone' {
+			saw_outer_clone = true
+			assert stmt.stmts.len == 1
+			ret := stmt.stmts[0] as ast.ReturnStmt
+			assert ret.exprs.len == 1
+			assert ret.exprs[0] is ast.InitExpr
+			init := ret.exprs[0] as ast.InitExpr
+			assert init.fields.len == 2
+			assert init.fields[0].name == 'choice'
+			assert init.fields[0].value is ast.CallExpr
+			choice_call := init.fields[0].value as ast.CallExpr
+			assert choice_call.lhs is ast.Ident
+			assert (choice_call.lhs as ast.Ident).name == 'Choice__clone'
+			assert init.fields[1].name == 'err'
+			assert init.fields[1].value is ast.CastExpr
+			err_cast := init.fields[1].value as ast.CastExpr
+			assert err_cast.expr is ast.CallExpr
+			err_call := err_cast.expr as ast.CallExpr
+			assert err_call.lhs is ast.Ident
+			assert (err_call.lhs as ast.Ident).name == 'Option_Err__clone'
+		}
+	}
+	assert saw_choice_clone
+	assert saw_option_clone
 	assert saw_outer_clone
 }
 
@@ -1365,6 +1501,37 @@ fn test_transform_init_expr_adds_nested_struct_defaults() {
 	assert inner_init.fields[0].name == 'min_len'
 	assert inner_init.fields[0].value is ast.BasicLiteral
 	assert (inner_init.fields[0].value as ast.BasicLiteral).value == '999999'
+}
+
+fn test_transform_init_expr_skips_missing_default_for_pointer_string_field() {
+	builder_type := types.Type(types.Struct{
+		name:   'Builder'
+		fields: [
+			types.Field{
+				name: 'glob'
+				typ:  types.Type(types.Pointer{
+					base_type: types.string_
+					lifetime:  'a'
+				})
+			},
+		]
+	})
+	mut scope := types.new_scope(unsafe { nil })
+	scope.insert('Builder', builder_type)
+	mut t := create_test_transformer()
+	t.cur_module = 'main'
+	t.scope = scope
+	t.cached_scopes = {
+		'main': scope
+	}
+	result := t.transform_init_expr(ast.InitExpr{
+		typ: ast.Expr(ast.Ident{
+			name: 'Builder'
+		})
+	})
+	assert result is ast.InitExpr
+	init := result as ast.InitExpr
+	assert init.fields.len == 0
 }
 
 fn test_transform_map_init_expr_non_empty_lowers_to_runtime_ctor() {
@@ -2561,6 +2728,52 @@ fn test_transform_if_expr_map_guard_uses_map_path() {
 	assert result is ast.IfExpr, 'expected map guard IfExpr, got ${result.type_name()}'
 	result_if := result as ast.IfExpr
 	assert result_if.cond !is ast.IfGuardExpr
+}
+
+fn test_transform_resolves_selector_map_for_membership_and_guard() {
+	store_type := types.Type(types.Struct{
+		name:   'Store'
+		fields: [
+			types.Field{
+				name: 'entries'
+				typ:  types.Type(types.Map{
+					key_type:   string_type()
+					value_type: types.Type(types.Array{
+						elem_type: types.Type(types.int_)
+					})
+				})
+			},
+		]
+	})
+	mut t := create_transformer_with_vars({
+		's':   store_type
+		'key': string_type()
+	})
+	entries := ast.Expr(ast.SelectorExpr{
+		lhs: ast.Ident{
+			name: 's'
+		}
+		rhs: ast.Ident{
+			name: 'entries'
+		}
+	})
+	map_type_name := t.get_map_type_for_expr(entries) or {
+		assert false, 'expected selector field to resolve as a map'
+		''
+	}
+	assert map_type_name == 'Map_string_Array_int'
+
+	result := t.transform_infix_expr(ast.InfixExpr{
+		op:  .key_in
+		lhs: ast.Ident{
+			name: 'key'
+		}
+		rhs: entries
+	})
+	assert result is ast.CallExpr, 'expected selector map membership to become map__exists, got ${result.type_name()}'
+	call := result as ast.CallExpr
+	assert call.lhs is ast.Ident
+	assert (call.lhs as ast.Ident).name == 'map__exists'
 }
 
 fn test_transform_for_in_stmt_lowers_to_for_stmt() {
@@ -4117,4 +4330,130 @@ fn test_else_if_result_guard_keeps_lowered_guard_in_else_branch() {
 		types.Type(types.voidptr_)
 	}
 	assert t.type_to_c_name(value_type) == 'ast__ComptTimeConstValue'
+}
+
+fn test_transformer_preserves_pointer_lifetime_in_v_syntax_but_not_c_names() {
+	mut t := create_test_transformer()
+	ptr_type := types.Type(types.Pointer{
+		base_type: types.Type(types.NamedType('Foo'))
+		lifetime:  'a'
+	})
+
+	ast_expr := t.type_to_ast_type_expr(ptr_type)
+	assert ast_expr is ast.Type
+	assert (ast_expr as ast.Type) is ast.PointerType
+	ptr_ast := (ast_expr as ast.Type) as ast.PointerType
+	assert ptr_ast.lifetime == 'a'
+	assert ptr_ast.base_type is ast.Ident
+	assert (ptr_ast.base_type as ast.Ident).name == 'Foo'
+
+	assert t.types_type_to_v(ptr_type) == '&^a Foo'
+	assert t.type_to_c_name(ptr_type) == 'Fooptr'
+}
+
+fn test_transformer_uses_pointer_type_receiver_name_for_scope_key() {
+	t := create_test_transformer()
+	receiver := ast.Expr(ast.Type(ast.PointerType{
+		base_type: ast.Expr(ast.Ident{
+			name: 'Ignore'
+		})
+		lifetime:  'a'
+	}))
+	assert t.get_receiver_type_name(receiver) == 'Ignore'
+}
+
+fn test_transformer_uses_pointer_type_for_generic_specialization_token() {
+	t := create_test_transformer()
+	foo_ptr := ast.Expr(ast.Type(ast.PointerType{
+		base_type: ast.Expr(ast.Ident{
+			name: 'Foo'
+		})
+	}))
+	bar_ptr := ast.Expr(ast.Type(ast.PointerType{
+		base_type: ast.Expr(ast.Ident{
+			name: 'Bar'
+		})
+	}))
+	assert t.generic_specialization_token(foo_ptr) == 'Fooptr'
+	assert t.generic_specialization_token(bar_ptr) == 'Barptr'
+	assert t.generic_specialization_suffix([foo_ptr]) == '_T_Fooptr'
+	assert t.generic_specialization_suffix([bar_ptr]) == '_T_Barptr'
+}
+
+fn test_transformer_preserves_lifetime_method_signature_and_nested_generic_return_type() {
+	files := transform_code_for_test('
+struct Ignore {}
+
+struct DirEntry {}
+
+struct Match[T] {
+	value T
+}
+
+struct IgnoreMatch[^a] {
+	ig &^a Ignore
+}
+
+fn (ig &^a Ignore) matched_dir_entry[^a](dent &DirEntry) Match[IgnoreMatch[^a]] {
+	return Match[IgnoreMatch[^a]]{
+		value: IgnoreMatch[^a]{
+			ig: ig
+		}
+	}
+}
+
+fn main() {
+	ig := Ignore{}
+	dent := DirEntry{}
+	ig.matched_dir_entry(&dent)
+}
+')
+	assert files.len == 1
+	file := files[0]
+	mut saw_method := false
+	mut saw_call := false
+	for stmt in file.stmts {
+		if stmt is ast.FnDecl && stmt.name == 'matched_dir_entry' {
+			saw_method = true
+			assert stmt.is_method
+			assert stmt.stmts.len > 0
+			assert stmt.receiver.typ is ast.Type
+			receiver_type := stmt.receiver.typ as ast.Type
+			assert receiver_type is ast.PointerType
+			receiver_ptr := receiver_type as ast.PointerType
+			assert receiver_ptr.lifetime == 'a'
+			assert stmt.typ.generic_params.len == 1
+			assert stmt.typ.generic_params[0] is ast.LifetimeExpr
+			assert (stmt.typ.generic_params[0] as ast.LifetimeExpr).name == 'a'
+			assert stmt.typ.return_type is ast.Type
+			return_type := stmt.typ.return_type as ast.Type
+			assert return_type is ast.GenericType
+			outer_generic := return_type as ast.GenericType
+			assert outer_generic.name is ast.Ident
+			assert (outer_generic.name as ast.Ident).name == 'Match'
+			assert outer_generic.params.len == 1
+			assert outer_generic.params[0] is ast.Type
+			inner_type := outer_generic.params[0] as ast.Type
+			assert inner_type is ast.GenericType
+			inner_generic := inner_type as ast.GenericType
+			assert inner_generic.name is ast.Ident
+			assert (inner_generic.name as ast.Ident).name == 'IgnoreMatch'
+			assert inner_generic.params.len == 1
+			assert inner_generic.params[0] is ast.LifetimeExpr
+			assert (inner_generic.params[0] as ast.LifetimeExpr).name == 'a'
+		}
+		if stmt is ast.FnDecl && stmt.name == 'main' {
+			assert stmt.stmts.len == 3
+			assert stmt.stmts[2] is ast.ExprStmt
+			expr_stmt := stmt.stmts[2] as ast.ExprStmt
+			assert expr_stmt.expr is ast.CallExpr
+			call := expr_stmt.expr as ast.CallExpr
+			assert call.lhs is ast.Ident
+			assert (call.lhs as ast.Ident).name == 'Ignore__matched_dir_entry'
+			assert call.args.len == 2
+			saw_call = true
+		}
+	}
+	assert saw_method
+	assert saw_call
 }

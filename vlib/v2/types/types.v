@@ -108,6 +108,30 @@ struct Parameter {
 	is_mut bool
 }
 
+fn optional_type_value(typ Type, has_value bool) ?Type {
+	if has_value {
+		return typ
+	}
+	return none
+}
+
+pub fn new_fn_type(param_types []Type, param_names []string, param_is_mut []bool, return_type Type, has_return_type bool) FnType {
+	mut params := []Parameter{cap: param_types.len}
+	for i, param_type in param_types {
+		name := if i < param_names.len { param_names[i] } else { '' }
+		is_mut := i < param_is_mut.len && param_is_mut[i]
+		params << Parameter{
+			name:   name
+			typ:    param_type
+			is_mut: is_mut
+		}
+	}
+	return FnType{
+		params:      params
+		return_type: optional_type_value(return_type, has_return_type)
+	}
+}
+
 pub struct ResultType {
 pub:
 	base_type Type
@@ -181,6 +205,11 @@ pub fn (f &FnType) is_noreturn() bool {
 	return f.attributes.has(.noreturn)
 }
 
+// get_generic_params returns this function's declared generic parameter names.
+pub fn (f &FnType) get_generic_params() []string {
+	return f.generic_params.clone()
+}
+
 // get_generic_types returns the concrete generic instantiations inferred for this function.
 pub fn (f &FnType) get_generic_types() []map[string]Type {
 	mut out := []map[string]Type{cap: f.generic_types.len}
@@ -208,6 +237,7 @@ pub:
 pub struct Pointer {
 pub:
 	base_type Type
+	lifetime  string
 }
 
 // struct String {
@@ -737,6 +767,9 @@ fn (t OptionType) name() string {
 }
 
 fn (t Pointer) name() string {
+	if t.lifetime != '' {
+		return '&^${t.lifetime} ' + t.base_type.name()
+	}
 	return '&' + t.base_type.name()
 }
 

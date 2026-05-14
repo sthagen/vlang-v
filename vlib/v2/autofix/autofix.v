@@ -424,6 +424,7 @@ fn (mut a Autofixer) walk_expr(expr ast.Expr) {
 			}
 		}
 		ast.EmptyExpr {}
+		ast.LifetimeExpr {}
 		ast.Type {}
 	}
 }

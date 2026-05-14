@@ -9,6 +9,33 @@ import v2.types
 
 // get_fn_type gets the signature for a function.
 fn (t &Transformer) get_fn_type(fn_name string) ?types.FnType {
+	if idx := fn_name.last_index('__') {
+		mod_prefix := fn_name[..idx]
+		short_name := fn_name[idx + 2..]
+		if mut scope := t.get_module_scope(mod_prefix) {
+			if obj := scope.lookup_parent(short_name, 0) {
+				if obj is types.Fn {
+					fn_typ := obj.get_typ()
+					if fn_typ is types.FnType {
+						return fn_typ
+					}
+				}
+			}
+		}
+		if mod_prefix.contains('__') {
+			dotted_mod := mod_prefix.replace('__', '.')
+			if mut scope := t.get_module_scope(dotted_mod) {
+				if obj := scope.lookup_parent(short_name, 0) {
+					if obj is types.Fn {
+						fn_typ := obj.get_typ()
+						if fn_typ is types.FnType {
+							return fn_typ
+						}
+					}
+				}
+			}
+		}
+	}
 	// First try the current module scope.
 	if mut scope := t.get_module_scope(t.cur_module) {
 		if obj := scope.lookup_parent(fn_name, 0) {
@@ -132,6 +159,13 @@ fn (t &Transformer) expr_wrapper_type_for_or(expr ast.Expr) ?types.Type {
 	if wrapper_type := t.channel_receive_wrapper_type(expr) {
 		return wrapper_type
 	}
+	if expr is ast.SelectorExpr {
+		if field_type := t.get_struct_field_type(expr) {
+			if field_type is types.OptionType || field_type is types.ResultType {
+				return field_type
+			}
+		}
+	}
 	if ret_type := t.resolve_call_return_type(expr) {
 		if ret_type is types.OptionType || ret_type is types.ResultType {
 			return ret_type
@@ -225,7 +259,167 @@ fn (t &Transformer) extract_type_name_from_expr(expr ast.Expr) string {
 // Returns the return type if found, none otherwise.
 fn (t &Transformer) get_method_return_type(expr ast.Expr) ?types.Type {
 	fn_type := t.get_method_fn_type(expr) or { return none }
-	return fn_type.get_return_type()
+	return_type := fn_type.get_return_type() or { return none }
+	sel_expr := t.get_method_selector(expr) or { return return_type }
+	bindings := t.infer_receiver_generic_bindings(sel_expr.lhs)
+	if bindings.len == 0 {
+		return return_type
+	}
+	return substitute_transformer_generic_type(return_type, bindings, 0)
+}
+
+fn (t &Transformer) infer_receiver_generic_bindings(receiver ast.Expr) map[string]types.Type {
+	mut bindings := map[string]types.Type{}
+	receiver_type := t.resolve_expr_type(receiver) or { return bindings }
+	actual_base := t.unwrap_alias_and_pointer_type(receiver_type)
+	if actual_base !is types.Struct {
+		return bindings
+	}
+	actual_struct := actual_base as types.Struct
+	if actual_struct.name == '' || actual_struct.fields.len == 0 {
+		return bindings
+	}
+	template_type := t.lookup_type(actual_struct.name) or { return bindings }
+	if template_type !is types.Struct {
+		return bindings
+	}
+	template_struct := template_type as types.Struct
+	if template_struct.generic_params.len == 0 || template_struct.fields.len == 0 {
+		return bindings
+	}
+	for template_field in template_struct.fields {
+		for actual_field in actual_struct.fields {
+			if template_field.name == actual_field.name {
+				infer_transformer_generic_bindings(template_field.typ, actual_field.typ, mut
+					bindings, 0)
+				break
+			}
+		}
+	}
+	return bindings
+}
+
+fn infer_transformer_generic_bindings(param_type types.Type, arg_type types.Type, mut bindings map[string]types.Type, depth int) {
+	if depth > 24 {
+		return
+	}
+	match param_type {
+		types.Alias {
+			infer_transformer_generic_bindings(param_type.base_type, arg_type, mut bindings,
+
+				depth + 1)
+		}
+		types.Array {
+			if arg_type is types.Array {
+				infer_transformer_generic_bindings(param_type.elem_type, arg_type.elem_type, mut
+					bindings, depth + 1)
+			}
+		}
+		types.ArrayFixed {
+			if arg_type is types.ArrayFixed {
+				infer_transformer_generic_bindings(param_type.elem_type, arg_type.elem_type, mut
+					bindings, depth + 1)
+			}
+		}
+		types.Map {
+			if arg_type is types.Map {
+				infer_transformer_generic_bindings(param_type.key_type, arg_type.key_type, mut
+					bindings, depth + 1)
+				infer_transformer_generic_bindings(param_type.value_type, arg_type.value_type, mut
+					bindings, depth + 1)
+			}
+		}
+		types.NamedType {
+			bindings[string(param_type)] = arg_type
+		}
+		types.OptionType {
+			if arg_type is types.OptionType {
+				infer_transformer_generic_bindings(param_type.base_type, arg_type.base_type, mut
+					bindings, depth + 1)
+			}
+		}
+		types.Pointer {
+			if arg_type is types.Pointer {
+				infer_transformer_generic_bindings(param_type.base_type, arg_type.base_type, mut
+					bindings, depth + 1)
+			} else {
+				infer_transformer_generic_bindings(param_type.base_type, arg_type, mut bindings,
+
+					depth + 1)
+			}
+		}
+		types.ResultType {
+			if arg_type is types.ResultType {
+				infer_transformer_generic_bindings(param_type.base_type, arg_type.base_type, mut
+					bindings, depth + 1)
+			}
+		}
+		else {}
+	}
+}
+
+fn substitute_transformer_generic_type(typ types.Type, bindings map[string]types.Type, depth int) types.Type {
+	if depth > 24 {
+		return typ
+	}
+	match typ {
+		types.Alias {
+			return types.Type(types.Alias{
+				name:      typ.name
+				base_type: substitute_transformer_generic_type(typ.base_type, bindings, depth + 1)
+			})
+		}
+		types.Array {
+			return types.Type(types.Array{
+				elem_type: substitute_transformer_generic_type(typ.elem_type, bindings, depth + 1)
+			})
+		}
+		types.ArrayFixed {
+			return types.Type(types.ArrayFixed{
+				len:       typ.len
+				elem_type: substitute_transformer_generic_type(typ.elem_type, bindings, depth + 1)
+			})
+		}
+		types.Channel {
+			if elem_type := typ.elem_type {
+				return types.Type(types.Channel{
+					elem_type: substitute_transformer_generic_type(elem_type, bindings, depth + 1)
+				})
+			}
+			return typ
+		}
+		types.Map {
+			return types.Type(types.Map{
+				key_type:   substitute_transformer_generic_type(typ.key_type, bindings, depth + 1)
+				value_type: substitute_transformer_generic_type(typ.value_type, bindings, depth + 1)
+			})
+		}
+		types.NamedType {
+			if concrete := bindings[string(typ)] {
+				return concrete
+			}
+			return typ
+		}
+		types.OptionType {
+			return types.Type(types.OptionType{
+				base_type: substitute_transformer_generic_type(typ.base_type, bindings, depth + 1)
+			})
+		}
+		types.Pointer {
+			return types.Type(types.Pointer{
+				base_type: substitute_transformer_generic_type(typ.base_type, bindings, depth + 1)
+				lifetime:  typ.lifetime
+			})
+		}
+		types.ResultType {
+			return types.Type(types.ResultType{
+				base_type: substitute_transformer_generic_type(typ.base_type, bindings, depth + 1)
+			})
+		}
+		else {
+			return typ
+		}
+	}
 }
 
 fn (t &Transformer) get_method_selector(expr ast.Expr) ?ast.SelectorExpr {
@@ -249,7 +443,11 @@ fn (t &Transformer) get_method_fn_type(expr ast.Expr) ?types.FnType {
 	method_name := sel_expr.rhs.name
 	mut lookup_type_names := []string{}
 	// Get the receiver type from the checker's stored types.
-	if receiver_type := t.resolve_expr_type(sel_expr.lhs) {
+	if receiver_type := t.method_receiver_override_type(sel_expr.lhs) {
+		t.append_method_lookup_type_name(mut lookup_type_names, receiver_type.name())
+		base_type := t.unwrap_alias_and_pointer_type(receiver_type)
+		t.append_method_lookup_type_name(mut lookup_type_names, base_type.name())
+	} else if receiver_type := t.resolve_expr_type(sel_expr.lhs) {
 		t.append_method_lookup_type_name(mut lookup_type_names, receiver_type.name())
 		base_type := t.unwrap_alias_and_pointer_type(receiver_type)
 		t.append_method_lookup_type_name(mut lookup_type_names, base_type.name())
@@ -264,6 +462,19 @@ fn (t &Transformer) get_method_fn_type(expr ast.Expr) ?types.FnType {
 		t.append_method_lookup_type_name(mut lookup_type_names, var_type_name)
 	}
 	return t.lookup_method_fn_type(lookup_type_names, method_name)
+}
+
+fn (t &Transformer) method_receiver_override_type(receiver ast.Expr) ?types.Type {
+	if receiver is ast.Ident {
+		if typ := t.decl_type_overrides[receiver.name] {
+			return typ
+		}
+	} else if receiver is ast.ModifierExpr {
+		return t.method_receiver_override_type(receiver.expr)
+	} else if receiver is ast.ParenExpr {
+		return t.method_receiver_override_type(receiver.expr)
+	}
+	return none
 }
 
 fn (t &Transformer) expr_can_be_call_target(expr ast.Expr) bool {
@@ -995,11 +1206,20 @@ fn normalize_blank_fn_parameters(decl ast.FnDecl) ast.FnDecl {
 	}
 }
 
+fn fn_decl_has_runtime_generic_params(decl ast.FnDecl) bool {
+	for param in decl.typ.generic_params {
+		if param !is ast.LifetimeExpr {
+			return true
+		}
+	}
+	return false
+}
+
 fn (mut t Transformer) transform_fn_decl(input_decl ast.FnDecl) ast.FnDecl {
 	decl := normalize_blank_fn_parameters(input_decl)
 	// Skip uninstantiated generic functions - their bodies were never type-checked
 	// and they will never be called, so emit an empty body.
-	if decl.typ.generic_params.len > 0 {
+	if fn_decl_has_runtime_generic_params(decl) {
 		mut has_generic_types := decl.name in t.env.generic_types
 		if !has_generic_types {
 			for key, _ in t.env.generic_types {
@@ -1607,10 +1827,18 @@ fn (mut t Transformer) transform_call_expr(expr ast.CallExpr) ast.Expr {
 		// Transform direct .str() calls on arrays/maps to specialized function calls
 		// e.g., a.str() where a is []int -> Array_int_str(a)
 		if method_name == 'str' && expr.args.len == 0 {
+			mut has_explicit_str_method := false
+			if resolved := t.resolve_method_call_name(sel.lhs, 'str') {
+				if !resolved.starts_with('Array_') && !resolved.starts_with('array__')
+					&& !resolved.starts_with('Map_') && !resolved.starts_with('map__') {
+					has_explicit_str_method = true
+				}
+			}
 			// Keep explicit user-defined/declared str() methods (e.g. strings.Builder).
 			// Only lower to helper calls when there is no real method on the receiver type.
 			str_fn_info := t.get_str_fn_info_for_expr(sel.lhs)
-			if str_fn_info.str_fn_name != '' && str_fn_info.str_fn_name != 'Array_u8_str' {
+			if !has_explicit_str_method && str_fn_info.str_fn_name != ''
+				&& str_fn_info.str_fn_name != 'Array_u8_str' {
 				is_array_or_map_str := str_fn_info.str_fn_name.starts_with('Array_')
 					|| str_fn_info.str_fn_name.starts_with('Array_fixed_')
 					|| str_fn_info.str_fn_name.starts_with('Map_')
@@ -1841,6 +2069,9 @@ fn (mut t Transformer) transform_call_expr(expr ast.CallExpr) ast.Expr {
 			}
 		}
 		if !is_module_call {
+			if t.receiver_method_has_runtime_generic_params(sel.lhs, sel.rhs.name) {
+				return t.keep_generic_receiver_method_call(sel, expr.args, expr.pos)
+			}
 			if resolved := t.resolve_method_call_name(sel.lhs, sel.rhs.name) {
 				// Guard against misresolution: if the receiver is known to be a string
 				// (e.g., tos2() returns string), ensure string methods aren't resolved to
@@ -2333,6 +2564,9 @@ fn (t &Transformer) lookup_call_param_types(lhs ast.Expr) []types.Type {
 // name prefix used in method name mangling. For containers (array, map, string)
 // it returns the generic prefix; for named types it returns the qualified C name.
 fn (t &Transformer) receiver_type_to_c_prefix(typ types.Type) string {
+	if !is_type_valid(typ) {
+		return ''
+	}
 	match typ {
 		types.Array, types.ArrayFixed {
 			return 'array'
@@ -2344,6 +2578,9 @@ fn (t &Transformer) receiver_type_to_c_prefix(typ types.Type) string {
 			return 'string'
 		}
 		types.Alias {
+			if !is_type_valid(typ.base_type) {
+				return t.type_to_c_name(typ)
+			}
 			// Check if alias over container
 			match typ.base_type {
 				types.Array, types.ArrayFixed {
@@ -2410,7 +2647,10 @@ fn (t &Transformer) is_static_method_call(receiver ast.Expr) bool {
 // none when the receiver type is unknown or the method is not registered
 // (e.g. function pointer field calls), which prevents false lowering.
 fn (t &Transformer) resolve_method_call_name(receiver ast.Expr, method_name string) ?string {
-	mut recv_type_opt := t.get_expr_type(receiver)
+	mut recv_type_opt := t.method_receiver_override_type(receiver)
+	if recv_type_opt == none {
+		recv_type_opt = t.get_expr_type(receiver)
+	}
 	if recv_type_opt == none && receiver is ast.SelectorExpr {
 		recv_type_opt = t.get_struct_field_type(receiver)
 	}
@@ -2559,6 +2799,51 @@ fn (t &Transformer) resolve_method_call_name(receiver ast.Expr, method_name stri
 		}
 	}
 	return none
+}
+
+fn (t &Transformer) receiver_method_has_runtime_generic_params(receiver ast.Expr, method_name string) bool {
+	mut recv_type_opt := t.get_expr_type(receiver)
+	if recv_type_opt == none && receiver is ast.SelectorExpr {
+		recv_type_opt = t.get_struct_field_type(receiver)
+	}
+	recv_type := recv_type_opt or { return false }
+	base_type := t.unwrap_alias_and_pointer_type(recv_type)
+	if base_type !is types.Struct {
+		return false
+	}
+	type_name := base_type.name()
+	mut lookup_names := []string{cap: 4}
+	lookup_names << type_name
+	if type_name.contains('__') {
+		lookup_names << type_name.all_after_last('__')
+	} else if t.cur_module != '' && t.cur_module != 'main' {
+		lookup_names << '${t.cur_module}__${type_name}'
+	}
+	for name in lookup_names {
+		if t.generic_receiver_methods['${name}__${method_name}'] {
+			return true
+		}
+	}
+	return false
+}
+
+fn (mut t Transformer) keep_generic_receiver_method_call(sel ast.SelectorExpr, args []ast.Expr, pos token.Pos) ast.Expr {
+	call_args := t.lower_missing_call_args(ast.Expr(sel), args)
+	fn_info := t.lookup_call_fn_info(ast.Expr(sel))
+	mut transformed_args := []ast.Expr{cap: call_args.len}
+	for i, arg in call_args {
+		transformed_args << t.transform_call_arg_with_sumtype_check(arg, fn_info, i)
+	}
+	transformed_args = t.lower_variadic_args(ast.Expr(sel), transformed_args)
+	return ast.CallExpr{
+		lhs:  ast.SelectorExpr{
+			lhs: t.transform_expr(sel.lhs)
+			rhs: sel.rhs
+			pos: sel.pos
+		}
+		args: transformed_args
+		pos:  pos
+	}
 }
 
 fn (t &Transformer) resolve_array_concrete_method_name(receiver ast.Expr, method_name string) ?string {

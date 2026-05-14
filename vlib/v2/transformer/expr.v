@@ -34,6 +34,37 @@ fn (mut t Transformer) transform_match_branch_stmts(stmts []ast.Stmt) []ast.Stmt
 	return transformed
 }
 
+fn (mut t Transformer) transform_fn_literal(expr ast.FnLiteral) ast.Expr {
+	old_decl_type_overrides := t.decl_type_overrides.clone()
+	old_cur_fn_mut_params := t.cur_fn_mut_params.clone()
+	for param in expr.typ.params {
+		if param.name == '' {
+			continue
+		}
+		if param_type := t.infer_decl_type_from_type_expr(param.typ) {
+			mut effective_type := param_type
+			if param.is_mut && param_type !is types.Pointer {
+				effective_type = types.Type(types.Pointer{
+					base_type: param_type
+				})
+			}
+			t.decl_type_overrides[param.name] = effective_type
+		}
+		if param.is_mut || param.typ is ast.ModifierExpr {
+			t.cur_fn_mut_params << param.name
+		}
+	}
+	stmts := t.transform_stmts(expr.stmts)
+	t.decl_type_overrides = old_decl_type_overrides.clone()
+	t.cur_fn_mut_params = old_cur_fn_mut_params.clone()
+	return ast.Expr(ast.FnLiteral{
+		typ:           expr.typ
+		captured_vars: expr.captured_vars
+		stmts:         stmts
+		pos:           expr.pos
+	})
+}
+
 fn (t &Transformer) enum_type_by_visible_name(name string) ?types.Type {
 	if typ := t.lookup_type(name) {
 		if typ is types.Enum {
@@ -581,12 +612,7 @@ fn (mut t Transformer) transform_expr(expr ast.Expr) ast.Expr {
 			})
 		}
 		ast.FnLiteral {
-			ast.Expr(ast.FnLiteral{
-				typ:           expr.typ
-				captured_vars: expr.captured_vars
-				stmts:         t.transform_stmts(expr.stmts)
-				pos:           expr.pos
-			})
+			t.transform_fn_literal(expr)
 		}
 		ast.LambdaExpr {
 			ast.Expr(ast.LambdaExpr{
@@ -2869,7 +2895,7 @@ fn (mut t Transformer) transform_infix_expr(expr ast.InfixExpr) ast.Expr {
 			return range_check
 		}
 		// Map membership: key in map -> map__exists(&map, &key)
-		if rhs_type := t.get_expr_type(expr.rhs) {
+		if rhs_type := t.resolve_expr_type(expr.rhs) {
 			if map_typ := t.unwrap_map_type(rhs_type) {
 				if t.is_eval_backend() {
 					return ast.InfixExpr{
@@ -3925,6 +3951,25 @@ fn (mut t Transformer) transform_embed_file_comptime_chain(expr ast.Expr, compti
 				})
 			}
 		}
+		ast.CallOrCastExpr {
+			mut transformed_lhs := ast.empty_expr
+			if expr.lhs is ast.SelectorExpr {
+				if transformed_base := t.transform_embed_file_chain_lhs(expr.lhs.lhs, comptime_pos) {
+					transformed_lhs = ast.Expr(ast.SelectorExpr{
+						lhs: transformed_base
+						rhs: expr.lhs.rhs
+						pos: expr.lhs.pos
+					})
+				}
+			}
+			if transformed_lhs !is ast.EmptyExpr {
+				return ast.Expr(ast.CallOrCastExpr{
+					lhs:  transformed_lhs
+					expr: t.transform_expr(expr.expr)
+					pos:  expr.pos
+				})
+			}
+		}
 		else {}
 	}
 
@@ -3940,6 +3985,9 @@ fn (mut t Transformer) transform_embed_file_chain_lhs(expr ast.Expr, comptime_po
 					pos:  comptime_pos
 				}, expr.args)
 			}
+			if transformed := t.transform_embed_file_comptime_chain(ast.Expr(expr), comptime_pos) {
+				return transformed
+			}
 		}
 		ast.CallOrCastExpr {
 			if expr.lhs is ast.Ident && expr.lhs.name == 'embed_file' {
@@ -3947,6 +3995,14 @@ fn (mut t Transformer) transform_embed_file_chain_lhs(expr ast.Expr, comptime_po
 					expr: ast.Expr(expr)
 					pos:  comptime_pos
 				}, [expr.expr])
+			}
+			if transformed := t.transform_embed_file_comptime_chain(ast.Expr(expr), comptime_pos) {
+				return transformed
+			}
+		}
+		ast.SelectorExpr {
+			if transformed := t.transform_embed_file_comptime_chain(ast.Expr(expr), comptime_pos) {
+				return transformed
 			}
 		}
 		else {}

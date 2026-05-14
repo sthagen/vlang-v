@@ -2,6 +2,45 @@
 module cleanc
 
 import v2.ast
+import v2.types
+
+fn test_should_emit_matcher_byte_set_contains_dependency() {
+	mut env := types.Environment.new()
+	mut gen := Gen.new_with_env([], env)
+	gen.set_used_fn_keys({
+		'main|f|main': true
+	})
+	assert gen.should_emit_fn_decl('matcher', ast.FnDecl{
+		name: 'byte_set_contains'
+		typ:  ast.FnType{}
+	})
+}
+
+fn test_should_emit_searcher_core_pos_dependency() {
+	mut env := types.Environment.new()
+	mut gen := Gen.new_with_env([], env)
+	gen.set_used_fn_keys({
+		'main|f|main': true
+	})
+	assert gen.should_emit_fn_decl('searcher', ast.FnDecl{
+		name:      'pos'
+		is_method: true
+		typ:       ast.FnType{}
+	})
+}
+
+fn test_should_emit_searcher_multi_line_dependency() {
+	mut env := types.Environment.new()
+	mut gen := Gen.new_with_env([], env)
+	gen.set_used_fn_keys({
+		'main|f|main': true
+	})
+	assert gen.should_emit_fn_decl('searcher', ast.FnDecl{
+		name:      'multi_line'
+		is_method: true
+		typ:       ast.FnType{}
+	})
+}
 
 fn test_c_string_literal_content_to_c_single_line() {
 	out := c_string_literal_content_to_c('hello')
@@ -31,6 +70,97 @@ fn test_c_string_literal_content_to_c_preserves_percent_placeholders() {
 fn test_c_string_literal_content_to_c_splits_hex_escape_before_hex_digit() {
 	out := c_string_literal_content_to_c(r'\x0c8')
 	assert out == '"\\x0c""8"'
+}
+
+fn test_struct_generic_params_need_bindings_returns_false_for_lifetime_only_params() {
+	params := [
+		ast.Expr(ast.LifetimeExpr{
+			name: 'a'
+		}),
+		ast.Expr(ast.LifetimeExpr{
+			name: 'b'
+		}),
+	]
+	assert !struct_generic_params_need_bindings(params)
+}
+
+fn test_struct_generic_params_need_bindings_returns_true_for_runtime_generic_params() {
+	params := [
+		ast.Expr(ast.LifetimeExpr{
+			name: 'a'
+		}),
+		ast.Expr(ast.Ident{
+			name: 'T'
+		}),
+	]
+	assert struct_generic_params_need_bindings(params)
+}
+
+fn test_runtime_generic_params_filter_lifetime_params() {
+	params := [
+		ast.Expr(ast.LifetimeExpr{
+			name: 'a'
+		}),
+		ast.Expr(ast.Ident{
+			name: 'T'
+		}),
+	]
+	args := [
+		ast.Expr(ast.LifetimeExpr{
+			name: 'a'
+		}),
+		ast.Expr(ast.Ident{
+			name: 'Value'
+		}),
+	]
+	filtered_args := runtime_generic_args(args)
+	assert runtime_generic_param_names(['^a', 'T']) == ['T']
+	assert generic_param_names(params) == ['T']
+	assert filtered_args.len == 1
+	assert filtered_args[0] is ast.Ident
+	assert (filtered_args[0] as ast.Ident).name == 'Value'
+}
+
+fn test_record_generic_struct_bindings_filters_lifetime_params() {
+	mut env := types.Environment.new()
+	mut scope := types.new_scope(unsafe { nil })
+	scope.insert('Ref', types.Object(types.Type(types.Struct{
+		name:           'Ref'
+		generic_params: ['^a', 'T']
+	})))
+	scope.insert('Value', types.Object(types.Type(types.Struct{
+		name: 'Value'
+	})))
+	lock env.scopes {
+		env.scopes['main'] = scope
+	}
+	mut g := Gen.new_with_env([], env)
+	g.record_generic_struct_bindings('Ref', 'Ref', [
+		ast.Expr(ast.LifetimeExpr{
+			name: 'a'
+		}),
+		ast.Expr(ast.Ident{
+			name: 'Value'
+		}),
+	])
+	bindings := (g.generic_struct_bindings['Ref'] or { panic('missing Ref binding') }).clone()
+	value_type := bindings['T'] or { panic('missing T binding') }
+	assert value_type.name() == 'Value'
+	instances := g.generic_struct_instances['Ref']
+	assert instances.len == 1
+	assert instances[0].params_key == 'Value'
+}
+
+fn test_expr_type_to_c_lowers_pointer_type() {
+	mut g := Gen.new([])
+	pointer_type := ast.Expr(ast.Type(ast.PointerType{
+		base_type: ast.Expr(ast.Ident{
+			name: 'Foo'
+		})
+	}))
+	assert g.expr_type_to_c(pointer_type) == 'Foo*'
+	assert g.is_pointer_type(pointer_type)
+	assert g.receiver_type_to_scope_name(pointer_type) == 'Foo'
 }
 
 fn test_fixed_array_elem_type_ready_accepts_primitive_alias() {

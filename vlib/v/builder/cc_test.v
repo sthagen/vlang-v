@@ -409,21 +409,21 @@ fn main() {
 }
 
 fn test_live_windows_main_linker_args_export_host_symbols() {
-	linker_args := builder_linker_args([
+	linker_args := builder_linker_args_with_cc([
 		'-os',
 		'windows',
 		'-cc',
 		'gcc',
 		'-live',
 		hot_reload_graph_example(),
-	])
+	], .gcc)
 	assert linker_args.contains('-Wl,--export-all-symbols')
 	assert linker_args.contains('-Wl,--out-implib,')
 	assert normalized_test_path(linker_args).contains(normalized_test_path(live_windows_import_lib_path(hot_reload_graph_example())))
 }
 
 fn test_live_windows_shared_linker_args_include_host_import_lib() {
-	linker_args := builder_linker_args([
+	linker_args := builder_linker_args_with_cc([
 		'-os',
 		'windows',
 		'-cc',
@@ -431,7 +431,7 @@ fn test_live_windows_shared_linker_args_include_host_import_lib() {
 		'-sharedlive',
 		'-shared',
 		hot_reload_graph_example(),
-	])
+	], .gcc)
 	assert normalized_test_path(linker_args).contains(normalized_test_path(live_windows_import_lib_path(hot_reload_graph_example())))
 }
 
@@ -529,6 +529,12 @@ fn builder_linker_args(args []string) string {
 	return builder.get_linker_args().join(' ')
 }
 
+fn builder_linker_args_with_cc(args []string, cc CC) string {
+	mut builder := new_test_builder(args)
+	builder.ccoptions.cc = cc
+	return builder.get_linker_args().join(' ')
+}
+
 fn new_test_builder(args []string) Builder {
 	mut full_args := ['']
 	full_args << args
@@ -560,7 +566,11 @@ fn hot_reload_graph_example() string {
 }
 
 fn normalized_test_path(path string) string {
-	return path.replace('\\', '/')
+	mut normalized := path.replace('\\', '/')
+	for normalized.contains('//') {
+		normalized = normalized.replace('//', '/')
+	}
+	return normalized
 }
 
 fn test_c_output_suggests_missing_typedef_for_c_struct_with_issue_19050_output() {

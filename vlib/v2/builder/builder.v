@@ -469,11 +469,9 @@ pub fn (mut b Builder) build(files []string) {
 	transform_start := sw.elapsed()
 	mut trans := transformer.Transformer.new_with_pref(b.files, b.env, b.pref)
 	trans.set_file_set(b.file_set)
-	b.files = if b.pref.no_parallel_transform {
-		trans.transform_files(b.files)
-	} else {
-		b.transform_files_parallel(mut trans)
-	}
+	// The parallel transformer still has shared-state merge races on larger
+	// ownership builds. Use the sequential transformer until that path is safe.
+	b.files = trans.transform_files(b.files)
 	transform_time := time.Duration(sw.elapsed() - transform_start)
 	print_time('Transform', transform_time)
 
@@ -536,10 +534,7 @@ fn (mut b Builder) gen_cleanc() {
 	// (including cmd/v2 self-host and directory-style user module builds).
 	// Force single-unit cleanc generation there.
 	force_no_cache := b.should_disable_cleanc_cache()
-	use_cache := !b.pref.no_cache && !force_no_cache
-	if os.getenv('V2_TRACE_CACHE') != '' {
-		eprintln('TRACE_CACHE use_cache=${use_cache} no_cache=${b.pref.no_cache} force_no_cache=${force_no_cache} self_build=${b.is_cmd_v2_self_build()} files=${b.user_files}')
-	}
+	mut use_cache := !b.pref.no_cache && !force_no_cache
 
 	// Determine output name
 	output_name := if b.pref.output_file != '' {
@@ -559,6 +554,15 @@ fn (mut b Builder) gen_cleanc() {
 	// Switch to system cc (gcc/clang) when the default compiler is TCC.
 	if b.pref.is_prod && cc.contains('tcc') {
 		cc = 'cc'
+	}
+	if cc.contains('tcc') {
+		// TCC fallback can recompile one C source with cc, but cached-core builds
+		// link prebuilt .o files. If TCC link fails, falling back to cc would mix
+		// incompatible object formats on platforms like macOS.
+		use_cache = false
+	}
+	if os.getenv('V2_TRACE_CACHE') != '' {
+		eprintln('TRACE_CACHE use_cache=${use_cache} no_cache=${b.pref.no_cache} force_no_cache=${force_no_cache} self_build=${b.is_cmd_v2_self_build()} files=${b.user_files}')
 	}
 	directive_flags := b.collect_cflags_from_sources()
 	// Separate directive flags into compile-only and link-only flags.
@@ -1647,6 +1651,9 @@ fn comptime_cond_matches(cond string, target_os string) bool {
 }
 
 fn default_cc(vroot string) string {
+	$if macos {
+		return 'cc'
+	}
 	// Try to use tcc by default, like v1 does.
 	tcc_path := os.join_path(vroot, 'thirdparty', 'tcc', 'tcc.exe')
 	if os.exists(tcc_path) {

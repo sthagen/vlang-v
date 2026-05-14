@@ -20,6 +20,11 @@ struct InterfaceWrapperSpec {
 	method        InterfaceMethodInfo
 }
 
+struct IErrorEmbeddedWrapperInfo {
+	owner        string
+	wrapper_base string
+}
+
 struct InterfaceDataFieldInfo {
 	name   string
 	c_type string
@@ -274,6 +279,9 @@ fn (mut g Gen) emit_interface_clone_body(iface_name string) {
 	g.sb.writeln('\t}')
 	data_fields := g.interface_data_fields[iface_name] or { []InterfaceDataFieldInfo{} }
 	for ctype in g.find_concrete_types_for_interface(iface_name) {
+		if !g.c_type_complete_for_sizeof(ctype) {
+			continue
+		}
 		type_short := if ctype.contains('__') {
 			ctype.all_after_last('__')
 		} else {
@@ -323,6 +331,23 @@ fn (mut g Gen) collect_ierror_wrapper_bases() {
 		}
 		g.ierror_wrapper_bases[base] = true
 	}
+	if g.env != unsafe { nil } {
+		scopes := g.env.snapshot_scopes()
+		for _, scope in scopes {
+			for _, obj in scope.objects {
+				typ := obj.typ()
+				if typ is types.Struct {
+					base := g.types_type_to_c(typ)
+					if base == '' || !is_c_identifier_like(base) {
+						continue
+					}
+					if _ := g.ierror_embedded_error_wrapper(base) {
+						g.ierror_wrapper_bases[base] = true
+					}
+				}
+			}
+		}
+	}
 }
 
 fn (mut g Gen) mark_needed_ierror_wrapper_from_ident(name string) {
@@ -365,20 +390,42 @@ fn (mut g Gen) emit_ierror_wrapper_body(base string) {
 	g.sb.writeln('\treturn ${c_static_v_string_expr(type_label)};')
 	g.sb.writeln('}')
 	g.sb.writeln('static string IError_${base}_msg_wrapper(void* _obj) {')
-	g.sb.writeln('\treturn ${base}__msg(*(${base}*)_obj);')
+	msg_fn := '${base}__msg'
+	if msg_fn in g.fn_return_types {
+		g.sb.writeln('\treturn ${base}__msg(*(${base}*)_obj);')
+	} else if embedded := g.ierror_embedded_error_wrapper(base) {
+		g.sb.writeln('\treturn ${embedded.wrapper_base}__msg(((${base}*)_obj)->${embedded.owner});')
+	} else {
+		g.sb.writeln('\t(void)_obj;')
+		g.sb.writeln('\treturn (string){0};')
+	}
 	g.sb.writeln('}')
 	g.sb.writeln('static int IError_${base}_code_wrapper(void* _obj) {')
 	code_fn := '${base}__code'
-	error_code_fn := 'Error__code'
 	if code_fn in g.fn_return_types {
 		g.sb.writeln('\treturn ${base}__code(*(${base}*)_obj);')
-	} else if error_code_fn in g.fn_return_types {
-		g.sb.writeln('\treturn Error__code(*(Error*)_obj);')
+	} else if embedded := g.ierror_embedded_error_wrapper(base) {
+		g.sb.writeln('\treturn ${embedded.wrapper_base}__code(((${base}*)_obj)->${embedded.owner});')
 	} else {
 		g.sb.writeln('\t(void)_obj;')
 		g.sb.writeln('\treturn 1;')
 	}
 	g.sb.writeln('}')
+}
+
+fn (mut g Gen) ierror_embedded_error_wrapper(base string) ?IErrorEmbeddedWrapperInfo {
+	struct_type := g.lookup_struct_type_by_c_name(base)
+	for embedded in struct_type.embedded {
+		embedded_c_type := g.types_type_to_c(embedded).trim_right('*')
+		embedded_short := short_type_name(embedded_c_type)
+		if embedded_short == 'Error' || embedded_short == 'MessageError' {
+			return IErrorEmbeddedWrapperInfo{
+				owner:        embedded_owner_field_name(embedded_c_type)
+				wrapper_base: embedded_c_type
+			}
+		}
+	}
+	return none
 }
 
 fn (mut g Gen) emit_needed_ierror_wrappers() {

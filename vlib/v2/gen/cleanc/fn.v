@@ -44,6 +44,51 @@ fn (mut g Gen) is_error_call_expr(expr ast.Expr) bool {
 	return false
 }
 
+fn (mut g Gen) ierror_concrete_base_for_expr(expr ast.Expr) string {
+	mut expr_type := g.get_expr_type(expr)
+	if (expr_type == '' || expr_type == 'int') && expr is ast.Ident {
+		expr_type = g.get_local_var_c_type(expr.name) or { expr_type }
+	}
+	if expr_type == '' || expr_type == 'IError' || expr_type == 'builtin__IError' {
+		return ''
+	}
+	base := expr_type.trim_right('*')
+	if base == '' || base == 'IError' || base == 'builtin__IError' {
+		return ''
+	}
+	if '${base}__msg' in g.fn_return_types {
+		return base
+	}
+	return ''
+}
+
+fn (mut g Gen) gen_ierror_boxed_expr(expr ast.Expr, base string) bool {
+	if base == '' {
+		return false
+	}
+	g.needed_ierror_wrapper_bases[base] = true
+	expr_type := g.get_expr_type(expr)
+	type_short := if base.contains('__') {
+		base.all_after_last('__')
+	} else {
+		base
+	}
+	type_id := interface_type_id_for_name(type_short)
+	g.sb.write_string('({ ')
+	if expr_type.ends_with('*') {
+		g.sb.write_string('IError _ierr = (IError){._object = (void*)(')
+		g.expr(expr)
+		g.sb.write_string('), ._type_id = ${type_id}, .type_name = IError_${base}_type_name_wrapper, .msg = IError_${base}_msg_wrapper, .code = IError_${base}_code_wrapper}; _ierr; })')
+		return true
+	}
+	tmp_name := '_ierr_obj${g.tmp_counter}'
+	g.tmp_counter++
+	g.sb.write_string('${base}* ${tmp_name} = (${base}*)malloc(sizeof(${base})); *${tmp_name} = ')
+	g.expr(expr)
+	g.sb.write_string('; IError _ierr = (IError){._object = (void*)${tmp_name}, ._type_id = ${type_id}, .type_name = IError_${base}_type_name_wrapper, .msg = IError_${base}_msg_wrapper, .code = IError_${base}_code_wrapper}; _ierr; })')
+	return true
+}
+
 pub fn (mut g Gen) set_cached_init_calls(calls []string) {
 	g.cached_init_calls = calls.clone()
 }
@@ -52,10 +97,7 @@ pub fn (mut g Gen) set_used_fn_keys(used map[string]bool) {
 	g.used_fn_keys = used.clone()
 }
 
-fn (g &Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
-	if g.cached_init_calls.len == 0 {
-		return true
-	}
+fn (mut g Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
 	if g.cached_init_calls.len > 0 && !g.should_emit_module(module_name) {
 		return true
 	}
@@ -72,6 +114,62 @@ fn (g &Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
 		return true
 	}
 	if is_builtin_array_file(g.cur_file_name) && should_keep_builtin_array_decl(decl) {
+		return true
+	}
+	if module_name == 'builtin'
+		&& decl.name in ['abs64', 'fabs32', 'fabs64', 'print', 'is_digit', 'tos3', 'cstring_to_vstring', 'is_space', 'flush_stdout', 'flush_stderr'] {
+		return true
+	}
+	if module_name == 'strconv' {
+		return true
+	}
+	if module_name == 'os'
+		&& decl.name in ['write', 'is_abs_path', 'abs_path', 'env_value_from_entries', 'norm_path', 'error_failed_to_find_executable', 'find_abs_path_of_executable_in_path_env', 'win_volume_len', 'clean_path', 'is_file', 'is_executable', 'join_path_single', 'is_slash', 'is_curr_dir_ref', 'has_drive_letter', 'starts_w_slash_slash', 'exists', 'is_dir', 'normalize_path_in_builder', 'error_file_not_opened', 'seek', 'fread', 'posix_get_error_msg', 'getenv_opt', 'stat', 'get_filetype', 'error_posix', 'msg', 'code'] {
+		return true
+	}
+	if module_name == 'os' && decl.is_method
+		&& g.receiver_type_to_scope_name(decl.receiver.typ) == 'File'
+		&& decl.name in ['close', 'write_ptr', 'flush'] {
+		return true
+	}
+	if module_name == 'textscanner'
+		&& decl.name in ['new', 'next', 'current', 'skip_n', 'peek', 'peek_n'] {
+		return true
+	}
+	if module_name == 'time'
+		&& decl.name in ['sleep', 'now', 'since', 'seconds', 'minus', '-', 'darwin_now', 'linux_now', 'format_rfc3339_micro', 'format_ss_micro', 'format', 'format_ss', 'format_ss_milli', 'format_ss_nano', 'format_rfc3339', 'format_rfc3339_nano', 'hhmm', 'hhmmss', 'hhmm12', 'ymmdd', 'ddmmy', 'md', 'custom_format', 'int_to_byte_array_no_pad', 'get_fmt_time_str', 'iclamp', 'ordinal_suffix', 'get_fmt_date_str', 'year_day', 'day_of_week', 'week_of_year', 'smonth', 'offset', 'add_days', 'add', 'time_with_unix', 'unix_nanosecond', 'is_leap_year'] {
+		return true
+	}
+	if module_name == 'term' && decl.name in ['format', 'red', 'yellow', 'white', 'magenta'] {
+		return true
+	}
+	if module_name == 'binary' {
+		return true
+	}
+	if module_name == 'bits' {
+		return true
+	}
+	if module_name == 'printer'
+		&& decl.name in ['new', 'default_summary_config', 'requires_stats', 'requires_path', 'path', 'inactive', 'begin', 'finish', 'find_iter_at_in_context', 'trim_line_terminator', 'add_matches', 'add_matched_lines', 'add_elapsed', 'add_searches', 'add_searches_with_match', 'add_bytes_searched', 'add_bytes_printed', 'quit_early', 'str', 'fractional_seconds', 'as_bytes', 'matches', 'merge_into', 'clear', 'set_fg', 'set_bg', 'set_bold', 'set_intense', 'set_underline', 'set_italic', 'host_value', 'wsl_prefix_value'] {
+		return true
+	}
+	if module_name == 'matcher'
+		&& decl.name in ['default', 'byte', 'as_bytes', 'start', 'end', 'with_end', 'is_suffix', 'is_crlf', 'as_byte', 'find_iter_at', 'byte_set_contains'] {
+		return true
+	}
+	if module_name == 'searcher'
+		&& decl.name in ['multi_line_with_matcher', 'multi_line', 'line_terminator', 'buffer', 'bytes_range_in_buffer', 'bytes', 'binary_byte_offset', 'byte_count', 'binary_detection', 'quit_byte', 'count', 'lines', 'new', 'pos'] {
+		return true
+	}
+	if module_name == 'log'
+		&& decl.name in ['debug', 'fatal', 'error', 'warn', 'info', 'get_level', 'set_level', 'set_always_flush', 'free', 'send_output', 'log_file', 'log_stream', 'time_format', 'tag_to_file', 'tag_to_console', 'flush'] {
+		return true
+	}
+	if module_name == 'sync'
+		&& decl.name in ['lock', 'unlock', 'try_lock', 'destroy', 'lazy_init', 'convert_t_to_voidptr', 'convert_voidptr_to_t'] {
+		return true
+	}
+	if module_name == 'sha256' {
 		return true
 	}
 	if decl.name.starts_with('__v_init_consts_') {
@@ -104,6 +202,25 @@ fn (g &Gen) should_emit_fn_decl(module_name string, decl ast.FnDecl) bool {
 		}
 		if c_name in g.force_emit_fn_names {
 			return true
+		}
+	}
+	if g.force_emit_fn_names.len > 0 && decl.is_method {
+		recv_name := g.receiver_type_to_scope_name(decl.receiver.typ)
+		if recv_name.len > 0 {
+			mut candidates := []string{}
+			candidates << '${recv_name}__${sanitize_fn_ident(decl.name)}'
+			if module_name.len > 0 && module_name != 'builtin' && module_name != 'main' {
+				candidates << '${module_name}__${recv_name}__${sanitize_fn_ident(decl.name)}'
+			}
+			recv_c_name := g.expr_type_to_c(decl.receiver.typ).trim_right('*')
+			if recv_c_name.len > 0 {
+				candidates << '${recv_c_name}__${sanitize_fn_ident(decl.name)}'
+			}
+			for c_name in candidates {
+				if c_name in g.force_emit_fn_names {
+					return true
+				}
+			}
 		}
 	}
 	// Check if this function was force-requested by generated code (e.g. map str functions).
@@ -367,11 +484,15 @@ fn (mut g Gen) collect_fn_signatures() {
 					}
 					if g.generic_fn_param_names(stmt).len > 0 {
 						prev_generic_types := g.active_generic_types.clone()
+						prev_generic_c_names := g.active_generic_c_names.clone()
 						for spec in g.generic_fn_specializations(stmt) {
 							g.active_generic_types = spec.generic_types.clone()
+							g.active_generic_c_names =
+								g.generic_c_names_for_bindings(spec.generic_types)
 							g.register_fn_signature(stmt, spec.name)
 						}
 						g.active_generic_types = prev_generic_types.clone()
+						g.active_generic_c_names = prev_generic_c_names.clone()
 						continue
 					}
 					// For methods on generic structs, resolve receiver generic
@@ -381,25 +502,32 @@ fn (mut g Gen) collect_fn_signatures() {
 						all_bindings := g.get_all_receiver_generic_bindings(stmt)
 						if all_bindings.len > 0 {
 							prev_gt := g.active_generic_types.clone()
+							prev_gc := g.active_generic_c_names.clone()
 							for bi in all_bindings {
 								g.active_generic_types = bi.clone()
+								g.active_generic_c_names = g.generic_c_names_for_bindings(bi)
 								gfn := g.get_fn_name(stmt)
 								if gfn != '' {
 									g.register_fn_signature(stmt, gfn)
 								}
 							}
 							g.active_generic_types = prev_gt.clone()
+							g.active_generic_c_names = prev_gc.clone()
 							continue
 						} else if bindings := g.get_receiver_generic_bindings(stmt) {
 							prev_gt := g.active_generic_types.clone()
+							prev_gc := g.active_generic_c_names.clone()
 							g.active_generic_types = bindings.clone()
+							g.active_generic_c_names = g.generic_c_names_for_bindings(bindings)
 							gfn := g.get_fn_name(stmt)
 							if gfn != '' {
 								g.register_fn_signature(stmt, gfn)
 							}
 							g.active_generic_types = prev_gt.clone()
+							g.active_generic_c_names = prev_gc.clone()
 							continue
 						}
+						continue
 					}
 					mut fn_name := ''
 					if stmt.stmts.len == 0 && stmt.language == .c {
@@ -420,6 +548,7 @@ fn (mut g Gen) register_fn_signature(node ast.FnDecl, fn_name string) {
 	if fn_name == '' {
 		return
 	}
+	g.declared_fn_names[fn_name] = true
 	// If this function has an @[export] attribute, map the V-qualified
 	// name to the export name so call sites resolve correctly.
 	for attr in node.attributes {
@@ -447,6 +576,9 @@ fn (mut g Gen) register_fn_signature(node ast.FnDecl, fn_name string) {
 		g.expr_type_to_c(node.typ.return_type)
 	} else {
 		'void'
+	}
+	if node.typ.return_type !is ast.EmptyExpr {
+		ret_type = g.specialized_generic_c_name_from_type_expr(node.typ.return_type, ret_type)
 	}
 	ret_type = normalize_signature_type_name(ret_type, 'void')
 	if ret_type == 'int' {
@@ -530,6 +662,9 @@ fn collect_generic_placeholder_names_from_expr(expr ast.Expr, mut seen map[strin
 					collect_generic_placeholder_names_from_expr(expr.key_type, mut seen, mut out)
 					collect_generic_placeholder_names_from_expr(expr.value_type, mut seen, mut out)
 				}
+				ast.PointerType {
+					collect_generic_placeholder_names_from_expr(expr.base_type, mut seen, mut out)
+				}
 				ast.OptionType {
 					collect_generic_placeholder_names_from_expr(expr.base_type, mut seen, mut out)
 				}
@@ -598,6 +733,61 @@ fn receiver_generic_param_names(node ast.FnDecl) []string {
 	return names
 }
 
+fn (mut g Gen) receiver_generic_base_c_name(node ast.FnDecl) string {
+	if node.receiver.typ is ast.Type {
+		receiver_type := node.receiver.typ as ast.Type
+		if receiver_type is ast.GenericType {
+			return g.expr_type_to_c(receiver_type.name)
+		}
+		if receiver_type is ast.PointerType {
+			if receiver_type.base_type is ast.Type {
+				base_type := receiver_type.base_type as ast.Type
+				if base_type is ast.GenericType {
+					return g.expr_type_to_c(base_type.name)
+				}
+			}
+		}
+	}
+	mut recv_c_name := g.expr_type_to_c(node.receiver.typ)
+	if recv_c_name.ends_with('*') {
+		recv_c_name = recv_c_name.all_before_last('*')
+	}
+	return recv_c_name
+}
+
+fn (mut g Gen) primary_generic_struct_instance(struct_c_name string, instances []GenericStructInstance) GenericStructInstance {
+	if instances.len == 0 {
+		return GenericStructInstance{}
+	}
+	struct_node := g.find_generic_struct_node(struct_c_name) or {
+		return instances[instances.len - 1]
+	}
+	mut best := instances[instances.len - 1]
+	mut best_score := -1
+	for inst in instances {
+		prev_active := g.active_generic_types.clone()
+		prev_active_c_names := g.active_generic_c_names.clone()
+		g.active_generic_types = inst.bindings.clone()
+		g.active_generic_c_names = inst.c_bindings.clone()
+		mut score := 0
+		for field in struct_node.fields {
+			field_name := if field.name.len > 0 { field.name } else { 'value' }
+			emitted_type := g.struct_field_types['${struct_c_name}.${field_name}'] or { continue }
+			inst_field_type := g.expr_type_to_c(field.typ)
+			if inst_field_type == emitted_type {
+				score++
+			}
+		}
+		g.active_generic_types = prev_active.clone()
+		g.active_generic_c_names = prev_active_c_names.clone()
+		if score > best_score {
+			best = inst
+			best_score = score
+		}
+	}
+	return best
+}
+
 // get_receiver_generic_bindings returns the concrete type bindings for a method
 // on a generic struct by looking up the struct's recorded bindings from
 // GenericType instantiations (e.g. LinkedList[ValueInfo] → {T: ValueInfo}).
@@ -606,23 +796,54 @@ fn (mut g Gen) get_receiver_generic_bindings(node ast.FnDecl) ?map[string]types.
 		return none
 	}
 	// Get the receiver's C type name (e.g. json2__LinkedList)
-	mut recv_c_name := g.expr_type_to_c(node.receiver.typ)
-	// Strip pointer suffix — pointer receivers (e.g. &LinkedList[T]) produce "Type*"
-	if recv_c_name.ends_with('*') {
-		recv_c_name = recv_c_name.all_before_last('*')
+	recv_c_name := g.receiver_generic_base_c_name(node)
+	if instances := g.generic_struct_instances[recv_c_name] {
+		if instances.len > 0 {
+			bindings := g.primary_generic_struct_instance(recv_c_name, instances).bindings
+			if g.generic_bindings_have_complete_c_types(bindings) {
+				return bindings
+			}
+		}
 	}
 	if recv_c_name in g.generic_struct_bindings {
-		return g.generic_struct_bindings[recv_c_name]
+		bindings := g.generic_struct_bindings[recv_c_name].clone()
+		if g.generic_bindings_have_complete_c_types(bindings) {
+			return bindings
+		}
 	}
 	// Also try with current module prefix
 	if !recv_c_name.contains('__') && g.cur_module != '' && g.cur_module != 'main'
 		&& g.cur_module != 'builtin' {
 		qualified := '${g.cur_module}__${recv_c_name}'
+		if instances := g.generic_struct_instances[qualified] {
+			if instances.len > 0 {
+				bindings := g.primary_generic_struct_instance(qualified, instances).bindings
+				if g.generic_bindings_have_complete_c_types(bindings) {
+					return bindings
+				}
+			}
+		}
 		if qualified in g.generic_struct_bindings {
-			return g.generic_struct_bindings[qualified]
+			bindings := g.generic_struct_bindings[qualified].clone()
+			if g.generic_bindings_have_complete_c_types(bindings) {
+				return bindings
+			}
 		}
 	}
 	return none
+}
+
+fn (mut g Gen) generic_bindings_have_complete_c_types(bindings map[string]types.Type) bool {
+	for _, typ in bindings {
+		c_name := g.types_type_to_c(typ)
+		if c_name == '' {
+			return false
+		}
+		if g.type_is_uninstantiated_generic_struct(typ) && !g.c_type_complete_for_sizeof(c_name) {
+			return false
+		}
+	}
+	return true
 }
 
 // get_all_receiver_generic_bindings returns ALL concrete type binding sets for a method
@@ -631,11 +852,7 @@ fn (mut g Gen) get_all_receiver_generic_bindings(node ast.FnDecl) []map[string]t
 	if !node.is_method {
 		return []
 	}
-	mut recv_c_name := g.expr_type_to_c(node.receiver.typ)
-	// Strip pointer suffix — pointer receivers (e.g. &LinkedList[T]) produce "Type*"
-	if recv_c_name.ends_with('*') {
-		recv_c_name = recv_c_name.all_before_last('*')
-	}
+	recv_c_name := g.receiver_generic_base_c_name(node)
 	mut struct_name := recv_c_name
 	if !struct_name.contains('__') && g.cur_module != '' && g.cur_module != 'main'
 		&& g.cur_module != 'builtin' {
@@ -643,10 +860,12 @@ fn (mut g Gen) get_all_receiver_generic_bindings(node ast.FnDecl) []map[string]t
 	}
 	// Check if there are multiple instances
 	if instances := g.generic_struct_instances[struct_name] {
-		if instances.len > 1 {
+		if instances.len > 0 {
 			mut all_bindings := []map[string]types.Type{cap: instances.len}
 			for inst in instances {
-				all_bindings << inst.bindings
+				if g.generic_bindings_have_complete_c_types(inst.bindings) {
+					all_bindings << inst.bindings.clone()
+				}
 			}
 			return all_bindings
 		}
@@ -654,10 +873,12 @@ fn (mut g Gen) get_all_receiver_generic_bindings(node ast.FnDecl) []map[string]t
 	// Also check without module prefix
 	if struct_name != recv_c_name {
 		if instances := g.generic_struct_instances[recv_c_name] {
-			if instances.len > 1 {
+			if instances.len > 0 {
 				mut all_bindings := []map[string]types.Type{cap: instances.len}
 				for inst in instances {
-					all_bindings << inst.bindings
+					if g.generic_bindings_have_complete_c_types(inst.bindings) {
+						all_bindings << inst.bindings.clone()
+					}
 				}
 				return all_bindings
 			}
@@ -690,6 +911,14 @@ fn (mut g Gen) specialized_fn_name(node ast.FnDecl, generic_types map[string]typ
 	return '${base_name}_T_${suffixes.join('_')}'
 }
 
+fn (g &Gen) generic_c_names_for_bindings(generic_types map[string]types.Type) map[string]string {
+	mut out := map[string]string{}
+	for name, typ in generic_types {
+		out[name] = g.types_type_to_c(typ)
+	}
+	return out
+}
+
 fn (g &Gen) generic_key_matches_decl(node ast.FnDecl, key string) bool {
 	return key == node.name || key.starts_with('${node.name}[') || key.contains('.${node.name}[')
 }
@@ -702,44 +931,473 @@ fn (mut g Gen) discover_comptime_generic_specs() {
 	if g.env == unsafe { nil } {
 		return
 	}
-	// For each generic function specialization where T is a struct,
-	// discover field types and register additional specializations
-	// so that comptime $for field in T.fields { decode_value(field) }
-	// can call decode_value_T_<field_type>.
-	for key, spec_list in g.env.generic_types {
-		for spec in spec_list {
-			for param_name, concrete_type in spec {
-				if concrete_type is types.Struct {
-					struct_type := concrete_type as types.Struct
-					if struct_type.fields.len == 0 {
+	for file in g.files {
+		for stmt in file.stmts {
+			match stmt {
+				ast.FnDecl {
+					generic_params := g.generic_fn_param_names(stmt)
+					if generic_params.len == 0 {
 						continue
 					}
-					mut seen_types := map[string]bool{}
-					// Mark existing specs as seen to avoid duplicates
-					for existing_spec in spec_list {
-						if existing_t := existing_spec[param_name] {
-							seen_types[existing_t.name()] = true
-						}
-					}
-					for already in g.late_generic_specs[key] {
-						if already_t := already[param_name] {
-							seen_types[already_t.name()] = true
-						}
-					}
-					for field in struct_type.fields {
-						field_type_name := field.typ.name()
-						if field_type_name in seen_types {
+					for param_name in generic_params {
+						if !fn_uses_comptime_field_loop(stmt, param_name) {
 							continue
 						}
-						seen_types[field_type_name] = true
-						g.late_generic_specs[key] << {
-							param_name: field.typ
-						}
+						g.discover_comptime_generic_specs_for_param(stmt, param_name)
 					}
+				}
+				else {}
+			}
+		}
+	}
+}
+
+fn (mut g Gen) discover_comptime_generic_specs_for_param(node ast.FnDecl, param_name string) {
+	for key, spec_list in g.env.generic_types {
+		if !g.generic_key_matches_decl(node, key) {
+			continue
+		}
+		for spec in spec_list {
+			concrete_type := spec[param_name] or { continue }
+			if concrete_type !is types.Struct {
+				continue
+			}
+			struct_type := concrete_type as types.Struct
+			if struct_type.fields.len == 0 {
+				continue
+			}
+			mut seen_types := map[string]bool{}
+			// Mark existing specs as seen to avoid duplicates.
+			for existing_spec in spec_list {
+				if existing_t := existing_spec[param_name] {
+					seen_types[existing_t.name()] = true
+				}
+			}
+			for already in g.late_generic_specs[key] {
+				if already_t := already[param_name] {
+					seen_types[already_t.name()] = true
+				}
+			}
+			for field in struct_type.fields {
+				field_type_name := field.typ.name()
+				if field_type_name in seen_types {
+					continue
+				}
+				seen_types[field_type_name] = true
+				g.late_generic_specs[key] << {
+					param_name: field.typ
 				}
 			}
 		}
 	}
+}
+
+fn fn_uses_comptime_field_loop(node ast.FnDecl, type_name string) bool {
+	return stmts_use_comptime_field_loop(node.stmts, type_name)
+}
+
+fn stmts_use_comptime_field_loop(stmts []ast.Stmt, type_name string) bool {
+	for stmt in stmts {
+		if stmt_uses_comptime_field_loop(stmt, type_name) {
+			return true
+		}
+	}
+	return false
+}
+
+fn stmt_uses_comptime_field_loop(stmt ast.Stmt, type_name string) bool {
+	match stmt {
+		ast.BlockStmt {
+			return stmts_use_comptime_field_loop(stmt.stmts, type_name)
+		}
+		ast.ComptimeStmt {
+			return stmt_uses_comptime_field_loop(stmt.stmt, type_name)
+		}
+		ast.ExprStmt {
+			return expr_uses_comptime_field_loop(stmt.expr, type_name)
+		}
+		ast.ForStmt {
+			match stmt.init {
+				ast.ForInStmt {
+					if expr_is_comptime_fields_selector(stmt.init.expr, type_name) {
+						return true
+					}
+				}
+				else {}
+			}
+
+			return stmts_use_comptime_field_loop(stmt.stmts, type_name)
+		}
+		ast.ReturnStmt {
+			for expr in stmt.exprs {
+				if expr_uses_comptime_field_loop(expr, type_name) {
+					return true
+				}
+			}
+		}
+		else {}
+	}
+
+	return false
+}
+
+fn expr_uses_comptime_field_loop(expr ast.Expr, type_name string) bool {
+	match expr {
+		ast.ComptimeExpr {
+			return expr_uses_comptime_field_loop(expr.expr, type_name)
+		}
+		ast.IfExpr {
+			if stmts_use_comptime_field_loop(expr.stmts, type_name) {
+				return true
+			}
+			if expr.else_expr !is ast.EmptyExpr {
+				return expr_uses_comptime_field_loop(expr.else_expr, type_name)
+			}
+		}
+		ast.MatchExpr {
+			for branch in expr.branches {
+				if stmts_use_comptime_field_loop(branch.stmts, type_name) {
+					return true
+				}
+			}
+		}
+		else {}
+	}
+
+	return false
+}
+
+fn expr_is_comptime_fields_selector(expr ast.Expr, type_name string) bool {
+	if expr is ast.SelectorExpr {
+		return expr.rhs.name == 'fields' && expr.lhs.name() == type_name
+	}
+	return false
+}
+
+fn (mut g Gen) discover_nested_generic_specs() {
+	for _ in 0 .. 8 {
+		mut added := false
+		for file in g.files {
+			g.set_file_module(file)
+			for stmt in file.stmts {
+				match stmt {
+					ast.FnDecl {
+						if g.generic_fn_param_names(stmt).len == 0 {
+							continue
+						}
+						specs := g.generic_binding_maps_for_decl(stmt)
+						if specs.len == 0 {
+							continue
+						}
+						prev_active := g.active_generic_types.clone()
+						for spec in specs {
+							g.active_generic_types = spec.clone()
+							local_types := caller_generic_local_types(stmt, spec)
+							if g.discover_nested_generic_specs_in_stmts(stmt.stmts, local_types) {
+								added = true
+							}
+						}
+						g.active_generic_types = prev_active.clone()
+					}
+					else {}
+				}
+			}
+		}
+		if !added {
+			return
+		}
+	}
+}
+
+fn (mut g Gen) generic_binding_maps_for_decl(node ast.FnDecl) []map[string]types.Type {
+	generic_params := g.generic_fn_param_names(node)
+	if generic_params.len == 0 || g.env == unsafe { nil } {
+		return []map[string]types.Type{}
+	}
+	mut specs := []map[string]types.Type{}
+	mut seen := map[string]bool{}
+	for key, spec_list in g.env.generic_types {
+		if !g.generic_key_matches_decl(node, key) {
+			continue
+		}
+		for spec in spec_list {
+			if generic_binding_map_complete(spec, generic_params) {
+				spec_key := generic_binding_map_key(spec, generic_params)
+				if spec_key !in seen {
+					seen[spec_key] = true
+					specs << spec.clone()
+				}
+			}
+		}
+	}
+	for key, spec_list in g.late_generic_specs {
+		if !g.generic_key_matches_decl(node, key) {
+			continue
+		}
+		for spec in spec_list {
+			if generic_binding_map_complete(spec, generic_params) {
+				spec_key := generic_binding_map_key(spec, generic_params)
+				if spec_key !in seen {
+					seen[spec_key] = true
+					specs << spec.clone()
+				}
+			}
+		}
+	}
+	return specs
+}
+
+fn generic_binding_map_complete(spec map[string]types.Type, generic_params []string) bool {
+	for param_name in generic_params {
+		concrete := spec[param_name] or { return false }
+		if concrete.name() == param_name || type_contains_generic_placeholder(concrete) {
+			return false
+		}
+	}
+	return true
+}
+
+fn generic_binding_map_key(spec map[string]types.Type, generic_params []string) string {
+	mut parts := []string{cap: generic_params.len}
+	for param_name in generic_params {
+		concrete := spec[param_name] or { continue }
+		parts << '${param_name}=${concrete.name()}'
+	}
+	return parts.join(';')
+}
+
+fn caller_generic_local_types(node ast.FnDecl, bindings map[string]types.Type) map[string]types.Type {
+	mut local_types := map[string]types.Type{}
+	for param in node.typ.params {
+		placeholder := direct_generic_placeholder_name(param.typ)
+		if placeholder == '' {
+			continue
+		}
+		if concrete := bindings[placeholder] {
+			local_types[param.name] = concrete
+		}
+	}
+	if node.is_method {
+		placeholder := direct_generic_placeholder_name(node.receiver.typ)
+		if placeholder != '' {
+			if concrete := bindings[placeholder] {
+				local_types[node.receiver.name] = concrete
+			}
+		}
+	}
+	return local_types
+}
+
+fn (mut g Gen) discover_nested_generic_specs_in_stmts(stmts []ast.Stmt, local_types map[string]types.Type) bool {
+	mut added := false
+	for stmt in stmts {
+		if g.discover_nested_generic_specs_in_stmt(stmt, local_types) {
+			added = true
+		}
+	}
+	return added
+}
+
+fn (mut g Gen) discover_nested_generic_specs_in_stmt(stmt ast.Stmt, local_types map[string]types.Type) bool {
+	match stmt {
+		ast.AssignStmt {
+			mut added := false
+			for expr in stmt.rhs {
+				if g.discover_nested_generic_specs_in_expr(expr, local_types) {
+					added = true
+				}
+			}
+			return added
+		}
+		ast.BlockStmt {
+			return g.discover_nested_generic_specs_in_stmts(stmt.stmts, local_types)
+		}
+		ast.ComptimeStmt {
+			return g.discover_nested_generic_specs_in_stmt(stmt.stmt, local_types)
+		}
+		ast.ExprStmt {
+			return g.discover_nested_generic_specs_in_expr(stmt.expr, local_types)
+		}
+		ast.ForStmt {
+			return g.discover_nested_generic_specs_in_stmts(stmt.stmts, local_types)
+		}
+		ast.ReturnStmt {
+			mut added := false
+			for expr in stmt.exprs {
+				if g.discover_nested_generic_specs_in_expr(expr, local_types) {
+					added = true
+				}
+			}
+			return added
+		}
+		else {}
+	}
+
+	return false
+}
+
+fn (mut g Gen) discover_nested_generic_specs_in_expr(expr ast.Expr, local_types map[string]types.Type) bool {
+	match expr {
+		ast.CallExpr {
+			mut added := g.discover_nested_generic_specs_from_call(expr, local_types)
+			for arg in expr.args {
+				if g.discover_nested_generic_specs_in_expr(arg, local_types) {
+					added = true
+				}
+			}
+			return added
+		}
+		ast.ComptimeExpr {
+			return g.discover_nested_generic_specs_in_expr(expr.expr, local_types)
+		}
+		ast.IfExpr {
+			mut added := g.discover_nested_generic_specs_in_stmts(expr.stmts, local_types)
+			if expr.else_expr !is ast.EmptyExpr {
+				if g.discover_nested_generic_specs_in_expr(expr.else_expr, local_types) {
+					added = true
+				}
+			}
+			return added
+		}
+		ast.InitExpr {
+			mut added := false
+			for field in expr.fields {
+				if g.discover_nested_generic_specs_in_expr(field.value, local_types) {
+					added = true
+				}
+			}
+			return added
+		}
+		ast.MatchExpr {
+			mut added := false
+			for branch in expr.branches {
+				if g.discover_nested_generic_specs_in_stmts(branch.stmts, local_types) {
+					added = true
+				}
+			}
+			return added
+		}
+		ast.ModifierExpr {
+			return g.discover_nested_generic_specs_in_expr(expr.expr, local_types)
+		}
+		ast.OrExpr {
+			return g.discover_nested_generic_specs_in_expr(expr.expr, local_types)
+		}
+		ast.ParenExpr {
+			return g.discover_nested_generic_specs_in_expr(expr.expr, local_types)
+		}
+		else {}
+	}
+
+	return false
+}
+
+fn (mut g Gen) discover_nested_generic_specs_from_call(expr ast.CallExpr, local_types map[string]types.Type) bool {
+	callee := g.generic_fn_decl_for_call(expr) or { return false }
+	generic_params := g.generic_fn_param_names(callee)
+	if generic_params.len == 0 {
+		return false
+	}
+	mut bindings := map[string]types.Type{}
+	call_args := generic_call_args_for_decl(expr, callee)
+	arg_offset := if callee.is_method && call_args.len == callee.typ.params.len + 1 { 1 } else { 0 }
+	for i, param in callee.typ.params {
+		arg_idx := i + arg_offset
+		if arg_idx >= call_args.len || !expr_has_generic_placeholder(param.typ) {
+			continue
+		}
+		concrete := g.nested_generic_arg_type(call_args[arg_idx], local_types) or { continue }
+		infer_generic_type_bindings_from_param(param.typ, concrete, generic_params, mut bindings)
+	}
+	if !generic_binding_map_complete(bindings, generic_params) {
+		return false
+	}
+	added := g.add_late_generic_spec_for_decl(callee, bindings)
+	return added
+}
+
+fn (mut g Gen) generic_fn_decl_for_call(expr ast.CallExpr) ?ast.FnDecl {
+	lhs := expr.lhs
+	if lhs is ast.Ident {
+		return g.find_generic_fn_decl_by_base_name(sanitize_fn_ident(lhs.name))
+	}
+	if lhs is ast.SelectorExpr {
+		if lhs.lhs is ast.Ident && g.is_module_ident(lhs.lhs.name) {
+			mod_name := g.resolve_module_name(lhs.lhs.name)
+			return g.find_generic_fn_decl_by_base_name('${mod_name}__${sanitize_fn_ident(lhs.rhs.name)}')
+		}
+		if lhs.lhs is ast.Ident {
+			receiver_name := sanitize_fn_ident(lhs.lhs.name)
+			method_name := sanitize_fn_ident(lhs.rhs.name)
+			base_name := '${receiver_name}__${method_name}'
+			if g.cur_module != '' && g.cur_module != 'main' && g.cur_module != 'builtin' {
+				if decl := g.find_generic_fn_decl_by_base_name('${g.cur_module}__${base_name}') {
+					return decl
+				}
+			}
+			return g.find_generic_fn_decl_by_base_name(base_name)
+		}
+	}
+	return none
+}
+
+fn generic_call_args_for_decl(expr ast.CallExpr, decl ast.FnDecl) []ast.Expr {
+	mut args := []ast.Expr{cap: expr.args.len + 1}
+	if decl.is_method && expr.lhs is ast.SelectorExpr {
+		args << expr.lhs.lhs
+	}
+	args << expr.args
+	return args
+}
+
+fn (mut g Gen) nested_generic_arg_type(arg ast.Expr, local_types map[string]types.Type) ?types.Type {
+	base_arg := if arg is ast.ModifierExpr {
+		(arg as ast.ModifierExpr).expr
+	} else {
+		arg
+	}
+	if base_arg is ast.Ident {
+		if concrete := local_types[base_arg.name] {
+			return concrete
+		}
+	}
+	pos := base_arg.pos()
+	if pos.id != 0 {
+		if typ := g.env.get_expr_type(pos.id) {
+			resolved := g.resolve_active_generic_type_value(typ)
+			if !type_contains_generic_placeholder(resolved) {
+				return resolved
+			}
+		}
+	}
+	if raw := g.get_raw_type(base_arg) {
+		resolved := g.resolve_active_generic_type_value(raw)
+		if !type_contains_generic_placeholder(resolved) {
+			return resolved
+		}
+	}
+	return none
+}
+
+fn (mut g Gen) add_late_generic_spec_for_decl(node ast.FnDecl, bindings map[string]types.Type) bool {
+	generic_params := g.generic_fn_param_names(node)
+	if !generic_binding_map_complete(bindings, generic_params) {
+		return false
+	}
+	key := node.name
+	spec_key := generic_binding_map_key(bindings, generic_params)
+	for existing in g.env.generic_types[key] {
+		if generic_binding_map_key(existing, generic_params) == spec_key {
+			return false
+		}
+	}
+	for existing in g.late_generic_specs[key] {
+		if generic_binding_map_key(existing, generic_params) == spec_key {
+			return false
+		}
+	}
+	g.late_generic_specs[key] << bindings.clone()
+	return true
 }
 
 // build_generic_spec_index precomputes a reverse index from function names
@@ -786,7 +1444,7 @@ fn generic_param_names(params []ast.Expr) []string {
 	return names
 }
 
-fn (g &Gen) fallback_generic_bindings_for_names(param_names []string) ?map[string]types.Type {
+fn (mut g Gen) fallback_generic_bindings_for_names(param_names []string) ?map[string]types.Type {
 	if param_names.len == 0 || g.env == unsafe { nil } {
 		return none
 	}
@@ -796,7 +1454,8 @@ fn (g &Gen) fallback_generic_bindings_for_names(param_names []string) ?map[strin
 		for _, generic_maps in g.env.generic_types {
 			for generic_types in generic_maps {
 				concrete := generic_types[param_name] or { continue }
-				if concrete.name() == param_name || type_contains_generic_placeholder(concrete) {
+				if concrete.name() == param_name || type_contains_generic_placeholder(concrete)
+					|| g.type_is_uninstantiated_generic_struct(concrete) {
 					continue
 				}
 				bindings[param_name] = concrete
@@ -839,7 +1498,8 @@ fn (mut g Gen) generic_fn_specializations(node ast.FnDecl) []GenericFnSpecializa
 					skip_spec = true
 					break
 				}
-				if concrete.name() == param_name || type_contains_generic_placeholder(concrete) {
+				if concrete.name() == param_name || type_contains_generic_placeholder(concrete)
+					|| g.type_is_uninstantiated_generic_struct(concrete) {
 					skip_spec = true
 					break
 				}
@@ -884,7 +1544,8 @@ fn (mut g Gen) generic_fn_specializations(node ast.FnDecl) []GenericFnSpecializa
 		for _, generic_maps in g.env.generic_types {
 			for generic_types in generic_maps {
 				concrete := generic_types[param_name] or { continue }
-				if concrete.name() == param_name || type_contains_generic_placeholder(concrete) {
+				if concrete.name() == param_name || type_contains_generic_placeholder(concrete)
+					|| g.type_is_uninstantiated_generic_struct(concrete) {
 					continue
 				}
 				fallback_types[concrete.name()] = concrete
@@ -894,7 +1555,8 @@ fn (mut g Gen) generic_fn_specializations(node ast.FnDecl) []GenericFnSpecializa
 		for _, late_maps in g.late_generic_specs {
 			for late_spec in late_maps {
 				concrete := late_spec[param_name] or { continue }
-				if concrete.name() == param_name || type_contains_generic_placeholder(concrete) {
+				if concrete.name() == param_name || type_contains_generic_placeholder(concrete)
+					|| g.type_is_uninstantiated_generic_struct(concrete) {
 					continue
 				}
 				fallback_types[concrete.name()] = concrete
@@ -972,6 +1634,12 @@ fn infer_generic_type_bindings_from_param(param ast.Expr, concrete types.Type, g
 							concrete.value_type, generic_params, mut bindings)
 					}
 				}
+				ast.PointerType {
+					if concrete is types.Pointer {
+						infer_generic_type_bindings_from_param(param.base_type, concrete.base_type,
+							generic_params, mut bindings)
+					}
+				}
 				ast.OptionType {
 					if concrete is types.OptionType {
 						infer_generic_type_bindings_from_param(param.base_type, concrete.base_type,
@@ -1003,6 +1671,11 @@ fn direct_generic_placeholder_name(e ast.Expr) string {
 		}
 		ast.ModifierExpr {
 			return direct_generic_placeholder_name(e.expr)
+		}
+		ast.Type {
+			if e is ast.PointerType {
+				return direct_generic_placeholder_name(e.base_type)
+			}
 		}
 		else {}
 	}
@@ -1065,6 +1738,61 @@ fn (g &Gen) find_specialized_call_name(name string, token string) ?string {
 		}
 	}
 	return none
+}
+
+fn (mut g Gen) generic_call_arg_type_name(arg ast.Expr) string {
+	base_arg := if arg is ast.ModifierExpr {
+		(arg as ast.ModifierExpr).expr
+	} else {
+		arg
+	}
+	mut arg_type_name := g.get_expr_type(base_arg).trim_space()
+	if base_arg is ast.SelectorExpr {
+		lhs_type := g.get_expr_type(base_arg.lhs).trim_space().trim_right('*')
+		if field_type := g.lookup_struct_field_type_by_name(lhs_type, base_arg.rhs.name) {
+			if field_type != '' {
+				arg_type_name = field_type
+			}
+		}
+	}
+	if concrete_c_name := g.active_generic_c_names[arg_type_name] {
+		arg_type_name = concrete_c_name
+	}
+	if (arg_type_name == '' || arg_type_name == 'int'
+		|| is_generic_placeholder_type_name(arg_type_name)) && base_arg is ast.SelectorExpr {
+		arg_type_name = g.selector_field_type(base_arg).trim_space()
+	}
+	if concrete_c_name := g.active_generic_c_names[arg_type_name] {
+		arg_type_name = concrete_c_name
+	}
+	if (arg_type_name == '' || arg_type_name == 'int') && base_arg is ast.Ident {
+		arg_type_name = (g.get_local_var_c_type(base_arg.name) or { '' }).trim_space()
+	}
+	if arg_type_name == '' || arg_type_name == 'int' {
+		if raw := g.get_raw_type(base_arg) {
+			arg_type_name = g.types_type_to_c(raw).trim_space()
+		}
+	}
+	return arg_type_name.trim_right('*')
+}
+
+fn (g &Gen) resolve_active_generic_type_value(typ types.Type) types.Type {
+	match typ {
+		types.NamedType {
+			if concrete := g.active_generic_types[string(typ)] {
+				return concrete
+			}
+		}
+		types.Pointer {
+			return types.Type(types.Pointer{
+				base_type: g.resolve_active_generic_type_value(typ.base_type)
+				lifetime:  typ.lifetime
+			})
+		}
+		else {}
+	}
+
+	return typ
 }
 
 fn (mut g Gen) try_specialize_generic_call_name(name string, call_args []ast.Expr) ?string {
@@ -1202,6 +1930,26 @@ fn (mut g Gen) try_specialize_generic_call_name(name string, call_args []ast.Exp
 			}
 		}
 	}
+	if call_args.len > 1 {
+		for arg in call_args[1..] {
+			arg_type_name := g.generic_call_arg_type_name(arg)
+			if arg_type_name == '' || arg_type_name == 'int' {
+				continue
+			}
+			mut candidate_types := [arg_type_name]
+			if !arg_type_name.contains('__') && g.cur_module != '' && g.cur_module != 'main'
+				&& g.cur_module != 'builtin' {
+				candidate_types << '${g.cur_module}__${arg_type_name}'
+			}
+			for concrete_type_name in candidate_types {
+				if candidate := g.find_specialized_call_name(name,
+					sanitize_generic_token_part(concrete_type_name))
+				{
+					return candidate
+				}
+			}
+		}
+	}
 	if name in ['decode_value', 'json2__decode_value'] && g.cur_fn_ret_type.starts_with('_result_') {
 		result_base := g.cur_fn_ret_type['_result_'.len..]
 		if candidate := g.find_specialized_call_name(g.qualify_local_call_name('decode_value'),
@@ -1259,6 +2007,27 @@ fn (mut g Gen) try_specialize_generic_call_name(name string, call_args []ast.Exp
 			}
 		}
 	}
+	if generic_params.len == 1 {
+		arg_start := if decl.is_method && call_args.len > 0 { 1 } else { 0 }
+		for arg_idx in arg_start .. call_args.len {
+			arg_type_name := g.generic_call_arg_type_name(call_args[arg_idx])
+			if arg_type_name == '' || arg_type_name == 'int' {
+				continue
+			}
+			mut candidate_types := [arg_type_name]
+			if !arg_type_name.contains('__') && g.cur_module != '' && g.cur_module != 'main'
+				&& g.cur_module != 'builtin' {
+				candidate_types << '${g.cur_module}__${arg_type_name}'
+			}
+			for concrete_type_name in candidate_types {
+				if candidate := g.find_specialized_call_name(name,
+					sanitize_generic_token_part(concrete_type_name))
+				{
+					return candidate
+				}
+			}
+		}
+	}
 	mut bindings := map[string]types.Type{}
 	arg_offset := if decl.is_method && call_args.len == decl.typ.params.len + 1 { 1 } else { 0 }
 	for i, param in decl.typ.params {
@@ -1274,16 +2043,48 @@ fn (mut g Gen) try_specialize_generic_call_name(name string, call_args []ast.Exp
 		if !expr_has_valid_data(arg) {
 			continue
 		}
+		mut concrete := types.Type(types.void_)
+		mut has_concrete := false
+		if g.active_generic_types.len > 0 && arg is ast.Ident {
+			if local_type := g.get_local_var_c_type(arg.name) {
+				if typ := g.lookup_type_by_c_name(local_type.trim_right('*')) {
+					concrete = typ
+					has_concrete = true
+				}
+			}
+		}
 		pos := arg.pos()
-		if pos.id == 0 {
+		if !has_concrete && pos.id != 0 {
+			if typ := g.env.get_expr_type(pos.id) {
+				resolved := g.resolve_active_generic_type_value(typ)
+				if !type_contains_generic_placeholder(resolved) {
+					concrete = resolved
+					has_concrete = true
+				}
+			}
+		}
+		if !has_concrete {
+			if raw := g.get_raw_type(arg) {
+				resolved := g.resolve_active_generic_type_value(raw)
+				if !type_contains_generic_placeholder(resolved) {
+					concrete = resolved
+					has_concrete = true
+				}
+			}
+		}
+		if !has_concrete && arg is ast.Ident {
+			if local_type := g.get_local_var_c_type(arg.name) {
+				if typ := g.lookup_type_by_c_name(local_type.trim_right('*')) {
+					concrete = typ
+					has_concrete = true
+				}
+			}
+		}
+		if !has_concrete {
 			continue
 		}
-		concrete := g.env.get_expr_type(pos.id) or {
-			if raw := g.get_raw_type(arg) {
-				raw
-			} else {
-				continue
-			}
+		if param.is_mut && concrete is types.Pointer {
+			concrete = concrete.base_type
 		}
 		infer_generic_type_bindings_from_param(param.typ, concrete, generic_params, mut bindings)
 	}
@@ -1291,7 +2092,8 @@ fn (mut g Gen) try_specialize_generic_call_name(name string, call_args []ast.Exp
 		return none
 	}
 	candidate := g.specialized_fn_name(decl, bindings)
-	if candidate in g.fn_param_is_ptr || candidate in g.fn_return_types {
+	if candidate in g.fn_param_is_ptr || candidate in g.fn_return_types
+		|| g.has_generic_fn_specialization(decl, candidate) {
 		return candidate
 	}
 	// specialized_fn_name uses g.cur_module (caller's module) which may differ
@@ -1304,12 +2106,22 @@ fn (mut g Gen) try_specialize_generic_call_name(name string, call_args []ast.Exp
 		}
 	}
 	if suffixes.len > 0 {
-		alt_candidate := '${name}_${suffixes.join('_')}'
-		if alt_candidate in g.fn_param_is_ptr || alt_candidate in g.fn_return_types {
+		alt_candidate := '${name}_T_${suffixes.join('_')}'
+		if alt_candidate in g.fn_param_is_ptr || alt_candidate in g.fn_return_types
+			|| g.has_generic_fn_specialization(decl, alt_candidate) {
 			return alt_candidate
 		}
 	}
 	return none
+}
+
+fn (mut g Gen) has_generic_fn_specialization(decl ast.FnDecl, name string) bool {
+	for spec in g.generic_fn_specializations(decl) {
+		if spec.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // register_builder_methods ensures strings__Builder methods are known to
@@ -1368,9 +2180,6 @@ fn (mut g Gen) gen_fn_decl(node ast.FnDecl) {
 }
 
 fn (mut g Gen) gen_fn_decl_ptr(node &ast.FnDecl) {
-	if !g.should_emit_fn_decl(g.cur_module, *node) {
-		return
-	}
 	// All other functions are resolved from the host executable.
 	if g.pref != unsafe { nil } && g.pref.is_shared_lib {
 		if !node.attributes.has('live') {
@@ -1386,6 +2195,31 @@ fn (mut g Gen) gen_fn_decl_ptr(node &ast.FnDecl) {
 		return
 	}
 	if node.language == .c && node.stmts.len == 0 {
+		return
+	}
+	if g.generic_fn_param_names(*node).len > 0 {
+		// maxof[T]/minof[T] are compile-time functions fully inlined by the transformer.
+		// Skip emitting stub bodies (which contain invalid C).
+		if node.name in ['maxof', 'minof'] {
+			return
+		}
+		prev_generic_types := g.active_generic_types.clone()
+		prev_generic_c_names := g.active_generic_c_names.clone()
+		specs := g.generic_fn_specializations(*node)
+		if specs.len > 0 {
+			for spec in specs {
+				g.active_generic_types = spec.generic_types.clone()
+				g.active_generic_c_names = g.generic_c_names_for_bindings(spec.generic_types)
+				g.gen_fn_decl_with_name_ptr(node, spec.name)
+			}
+			g.active_generic_types = prev_generic_types.clone()
+			g.active_generic_c_names = prev_generic_c_names.clone()
+			return
+		}
+		g.active_generic_types = prev_generic_types.clone()
+		g.active_generic_c_names = prev_generic_c_names.clone()
+	}
+	if !g.should_emit_fn_decl(g.cur_module, *node) {
 		return
 	}
 	// eventbus module: all generic struct methods use T = string.
@@ -1415,18 +2249,6 @@ fn (mut g Gen) gen_fn_decl_ptr(node &ast.FnDecl) {
 		g.active_generic_types = prev_generic_types.clone()
 	}
 	if g.generic_fn_param_names(*node).len > 0 {
-		// maxof[T]/minof[T] are compile-time functions fully inlined by the transformer.
-		// Skip emitting stub bodies (which contain invalid C).
-		if node.name in ['maxof', 'minof'] {
-			return
-		}
-		prev_generic_types := g.active_generic_types.clone()
-		specs := g.generic_fn_specializations(*node)
-		for spec in specs {
-			g.active_generic_types = spec.generic_types.clone()
-			g.gen_fn_decl_with_name_ptr(node, spec.name)
-		}
-		g.active_generic_types = prev_generic_types.clone()
 		return
 	}
 
@@ -1439,25 +2261,32 @@ fn (mut g Gen) gen_fn_decl_ptr(node &ast.FnDecl) {
 		all_bindings := g.get_all_receiver_generic_bindings(*node)
 		if all_bindings.len > 0 {
 			prev_generic_types := g.active_generic_types.clone()
+			prev_generic_c_names := g.active_generic_c_names.clone()
 			for bi in all_bindings {
 				g.active_generic_types = bi.clone()
+				g.active_generic_c_names = g.generic_c_names_for_bindings(bi)
 				fn_name := g.get_fn_name(*node)
 				if fn_name != '' {
 					g.gen_fn_decl_with_name_ptr(node, fn_name)
 				}
 			}
 			g.active_generic_types = prev_generic_types.clone()
+			g.active_generic_c_names = prev_generic_c_names.clone()
 			return
 		} else if bindings := g.get_receiver_generic_bindings(*node) {
 			prev_generic_types := g.active_generic_types.clone()
+			prev_generic_c_names := g.active_generic_c_names.clone()
 			g.active_generic_types = bindings.clone()
+			g.active_generic_c_names = g.generic_c_names_for_bindings(bindings)
 			fn_name := g.get_fn_name(*node)
 			if fn_name != '' {
 				g.gen_fn_decl_with_name_ptr(node, fn_name)
 			}
 			g.active_generic_types = prev_generic_types.clone()
+			g.active_generic_c_names = prev_generic_c_names.clone()
 			return
 		}
+		return
 	}
 
 	fn_name := g.get_fn_name(*node)
@@ -1469,6 +2298,14 @@ fn (mut g Gen) gen_fn_decl_ptr(node &ast.FnDecl) {
 
 fn (mut g Gen) gen_fn_decl_with_name(node ast.FnDecl, fn_name string) {
 	g.gen_fn_decl_with_name_ptr(&node, fn_name)
+}
+
+fn (mut g Gen) undef_possible_str_macro(fn_name string) {
+	if fn_name.ends_with('__str') || fn_name.ends_with('_str') {
+		g.sb.writeln('#ifdef ${fn_name}')
+		g.sb.writeln('#undef ${fn_name}')
+		g.sb.writeln('#endif')
+	}
 }
 
 // Keep pass 5 on pointer-based FnDecl access; large by-value copies here
@@ -1505,6 +2342,16 @@ fn (mut g Gen) gen_fn_decl_with_name_ptr(node &ast.FnDecl, fn_name string) {
 		g.expr_type_to_c(node.typ.return_type)
 	} else {
 		'void'
+	}
+	if !is_c_main && node.typ.return_type !is ast.EmptyExpr {
+		mut declared_ret_type := g.expr_type_to_c(node.typ.return_type)
+		declared_ret_type = g.specialized_generic_c_name_from_type_expr(node.typ.return_type,
+			declared_ret_type)
+		if declared_ret_type != '' && declared_ret_type != 'void' && (g.cur_fn_ret_type == ''
+			|| g.cur_fn_ret_type == 'int'
+			|| declared_ret_type.starts_with('${g.cur_fn_ret_type}_T_')) {
+			g.cur_fn_ret_type = declared_ret_type
+		}
 	}
 	g.cur_fn_ret_type = normalize_signature_type_name(g.cur_fn_ret_type, 'void')
 	g.cur_fn_c_ret_type = g.c_fn_return_type_from_v(g.cur_fn_ret_type)
@@ -1623,6 +2470,7 @@ fn (mut g Gen) gen_fn_decl_with_name_ptr(node &ast.FnDecl, fn_name string) {
 	is_live_fn := !is_c_main && node.attributes.has('live')
 
 	// Generate function header (with impl_live_ prefix for @[live] functions)
+	g.undef_possible_str_macro(fn_name)
 	if is_live_fn {
 		g.gen_fn_head_live_ptr(node, fn_name)
 	} else {
@@ -1816,6 +2664,10 @@ fn (mut g Gen) gen_fn_head_with_name_ptr(node &ast.FnDecl, fn_name string) {
 		c_ret = 'int'
 	}
 	sig_param_types := g.fn_param_types[fn_name] or { []string{} }
+	g.emit_option_result_forward_typedef(ret)
+	for sig_param_type in sig_param_types {
+		g.emit_option_result_forward_typedef(normalize_signature_type_name(sig_param_type, 'void*'))
+	}
 
 	// main takes argc/argv
 	if fn_name == 'main' {
@@ -1847,9 +2699,7 @@ fn (mut g Gen) gen_fn_head_with_name_ptr(node &ast.FnDecl, fn_name string) {
 		} else {
 			normalize_signature_type_name(g.expr_type_to_c(node.receiver.typ), 'void*')
 		}
-		g.sb.write_string(receiver_type)
-		g.sb.write_string(' ')
-		g.sb.write_string(c_local_name(node.receiver.name))
+		g.sb.write_string(c_decl_for_type_and_name(receiver_type, c_local_name(node.receiver.name)))
 		sig_idx++
 		first = false
 	}
@@ -1871,11 +2721,9 @@ fn (mut g Gen) gen_fn_head_with_name_ptr(node &ast.FnDecl, fn_name string) {
 		} else {
 			normalize_signature_type_name(g.expr_type_to_c(param.typ), 'int')
 		}
-		g.sb.write_string(t)
-		g.sb.write_string(' ')
 		// Rename V variables that clash with C type names (matches expr.v Ident handler)
 		pname := c_local_name(param.name)
-		g.sb.write_string(pname)
+		g.sb.write_string(c_decl_for_type_and_name(t, pname))
 		sig_idx++
 	}
 	g.sb.write_string(')')
@@ -1980,7 +2828,7 @@ fn (mut g Gen) gen_fn_head_live_ptr(node &ast.FnDecl, fn_name string) {
 			normalize_signature_type_name(g.expr_type_to_c(node.receiver.typ), 'void*')
 		}
 		receiver_name := c_local_name(node.receiver.name)
-		params_parts << '${receiver_type} ${receiver_name}'
+		params_parts << c_decl_for_type_and_name(receiver_type, receiver_name)
 		args_parts << receiver_name
 		sig_idx++
 	}
@@ -1999,7 +2847,7 @@ fn (mut g Gen) gen_fn_head_live_ptr(node &ast.FnDecl, fn_name string) {
 			normalize_signature_type_name(g.expr_type_to_c(param.typ), 'int')
 		}
 		param_name := c_local_name(param.name)
-		params_parts << '${t} ${param_name}'
+		params_parts << c_decl_for_type_and_name(t, param_name)
 		args_parts << param_name
 		sig_idx++
 	}
@@ -2472,6 +3320,13 @@ fn (mut g Gen) fn_return_type_to_c(t types.Type) string {
 }
 
 fn (mut g Gen) is_fn_pointer_expr(expr ast.Expr) bool {
+	if expr is ast.SelectorExpr {
+		lhs_type := g.get_raw_type(expr.lhs) or { return false }
+		field_type := selector_struct_field_type_from_type(lhs_type, expr.rhs.name) or {
+			return false
+		}
+		return extract_fn_type(field_type) != none
+	}
 	return g.fn_pointer_return_type(expr) != ''
 }
 
@@ -2502,6 +3357,13 @@ fn extract_fn_type(raw_type types.Type) ?types.FnType {
 // fn_pointer_param_is_ptr extracts parameter pointer-ness from a fn-pointer type.
 // Returns an array of bools (true = param expects pointer, false = by value).
 fn (mut g Gen) fn_pointer_param_is_ptr(expr ast.Expr) []bool {
+	if expr is ast.Ident {
+		if local_type := g.get_local_var_c_type(expr.name) {
+			if local_type.contains('(*)') {
+				return c_fn_pointer_param_is_ptr(local_type)
+			}
+		}
+	}
 	raw_type := g.get_raw_type(expr) or { return []bool{} }
 	fn_type := extract_fn_type(raw_type) or { return []bool{} }
 	param_types := fn_type.get_param_types()
@@ -2511,6 +3373,44 @@ fn (mut g Gen) fn_pointer_param_is_ptr(expr ast.Expr) []bool {
 		result << (c_name.ends_with('*') || pt is types.Pointer)
 	}
 	return result
+}
+
+fn c_fn_pointer_param_is_ptr(c_type string) []bool {
+	marker_index := c_type.index('(*)') or { return []bool{} }
+	after_marker := c_type[marker_index + 3..].trim_space()
+	if !after_marker.starts_with('(') || !after_marker.ends_with(')') {
+		return []bool{}
+	}
+	params := after_marker[1..after_marker.len - 1].trim_space()
+	if params == '' || params == 'void' {
+		return []bool{}
+	}
+	mut result := []bool{}
+	for param in split_c_fn_pointer_params(params) {
+		trimmed := param.trim_space()
+		result << (trimmed.ends_with('*') || trimmed.contains('(*)'))
+	}
+	return result
+}
+
+fn split_c_fn_pointer_params(params string) []string {
+	mut out := []string{}
+	mut start := 0
+	mut depth := 0
+	for i, ch in params {
+		if ch == `(` || ch == `[` {
+			depth++
+		} else if ch == `)` || ch == `]` {
+			if depth > 0 {
+				depth--
+			}
+		} else if ch == `,` && depth == 0 {
+			out << params[start..i]
+			start = i + 1
+		}
+	}
+	out << params[start..]
+	return out
 }
 
 fn (mut g Gen) should_auto_deref(arg ast.Expr) bool {
@@ -2627,6 +3527,47 @@ fn (mut g Gen) gen_call_arg(fn_name string, idx int, arg ast.Expr) {
 			return
 		}
 	}
+	if param_types := g.fn_param_types[fn_name] {
+		if idx < param_types.len {
+			param_type := param_types[idx]
+			param_base := param_type.trim_right('*')
+			if param_type.ends_with('*') && g.is_interface_type(param_base) {
+				mut arg_type := g.get_expr_type(base_arg).trim_space()
+				if (arg_type == '' || arg_type == 'int') && base_arg is ast.Ident {
+					arg_type = (g.get_local_var_c_type(base_arg.name) or { '' }).trim_space()
+				}
+				mut raw_arg_type := ''
+				if raw := g.get_raw_type(base_arg) {
+					raw_arg_type = g.types_type_to_c(raw).trim_space()
+					if arg_type == '' || arg_type == 'int' {
+						arg_type = raw_arg_type
+					}
+				}
+				arg_base := arg_type.trim_right('*')
+				raw_arg_base := raw_arg_type.trim_right('*')
+				if arg_base == param_base {
+					if raw_arg_base != '' && raw_arg_base != 'int' && raw_arg_base != param_base {
+						if g.gen_heap_interface_cast(param_base, base_arg) {
+							return
+						}
+					}
+					if arg_type.ends_with('*') {
+						g.expr(base_arg)
+						return
+					}
+					if g.can_take_address(base_arg) {
+						g.sb.write_string('&')
+						g.expr(base_arg)
+						return
+					}
+				} else if arg_base != '' && arg_base != 'int' {
+					if g.gen_heap_interface_cast(param_base, base_arg) {
+						return
+					}
+				}
+			}
+		}
+	}
 	if fn_name == 'new_map_init_noscan_value' && idx in [7, 8] {
 		// new_map_init_noscan_value expects raw key/value element pointers.
 		// Lowered dynamic arrays arrive as `array` values; pass their `.data`.
@@ -2730,6 +3671,17 @@ fn (mut g Gen) gen_call_arg(fn_name string, idx int, arg ast.Expr) {
 						g.expr(base_arg)
 						return
 					}
+				}
+				if param_types := g.fn_param_types[fn_name] {
+					if idx < param_types.len {
+						param_base := param_types[idx].trim_right('*')
+						if param_base != '' && param_base != 'void' {
+							g.gen_addr_of_expr(base_arg, param_base)
+							return
+						}
+					}
+				}
+				if raw := g.get_raw_type(base_arg) {
 					c_type := g.types_type_to_c(raw)
 					if c_type != '' {
 						g.gen_addr_of_expr(base_arg, c_type)
@@ -3055,6 +4007,7 @@ fn (mut g Gen) resolve_container_method_name(receiver ast.Expr, method_name stri
 }
 
 fn (mut g Gen) resolve_call_name(lhs ast.Expr, arg_count int) string {
+	_ = arg_count
 	mut name := ''
 	if lhs is ast.Ident {
 		name = sanitize_fn_ident(lhs.name)
@@ -3195,9 +4148,11 @@ fn (mut g Gen) get_call_return_type(lhs ast.Expr, call_args []ast.Expr) ?string 
 			}
 		}
 		if allow_fn_ptr_lookup {
-			fn_ptr_ret := g.fn_pointer_return_type(lhs)
-			if fn_ptr_ret != '' {
-				return fn_ptr_ret
+			if g.is_fn_pointer_expr(lhs) {
+				fn_ptr_ret := g.fn_pointer_return_type(lhs)
+				if fn_ptr_ret != '' {
+					return fn_ptr_ret
+				}
 			}
 		}
 	}
@@ -3236,9 +4191,20 @@ fn (g &Gen) resolve_method_on_concrete_type(receiver_type string, method_name st
 		candidates << '${g.cur_module}__${clean_type}__${sanitized}'
 	}
 	for candidate in candidates {
-		if candidate in g.fn_return_types || candidate in g.fn_param_is_ptr {
+		if candidate in g.fn_return_types || candidate in g.fn_param_is_ptr
+			|| candidate in g.declared_fn_names {
 			return candidate
 		}
+	}
+	if generic_idx := clean_type.index('_T_') {
+		generic_base := clean_type[..generic_idx]
+		generic_base_candidate := '${generic_base}__${sanitized}'
+		if generic_base_candidate in g.fn_return_types
+			|| generic_base_candidate in g.fn_param_is_ptr
+			|| generic_base_candidate in g.declared_fn_names {
+			return candidates[0]
+		}
+		return candidates[0]
 	}
 	return none
 }
@@ -3457,6 +4423,65 @@ fn (mut g Gen) gen_array_contains_call(name string, call_args []ast.Expr) bool {
 	return true
 }
 
+fn (mut g Gen) try_gen_concrete_method_call(lhs ast.SelectorExpr, args []ast.Expr) bool {
+	if lhs.lhs is ast.Ident {
+		lhs_ident := lhs.lhs as ast.Ident
+		if lhs_ident.name == 'C' || g.is_type_name(lhs_ident.name)
+			|| g.is_module_ident(lhs_ident.name) {
+			return false
+		}
+	}
+	mut base_type := g.method_receiver_base_type(lhs.lhs)
+	base_type = strip_pointer_type_name(unmangle_c_ptr_type(base_type))
+	if base_type == '' || base_type == 'int' || g.is_interface_type(base_type) {
+		return false
+	}
+	method_name := sanitize_fn_ident(lhs.rhs.name)
+	mut method_c_name := ''
+	mut embedded_owner := ''
+	if concrete_method := g.resolve_method_on_concrete_type(base_type, method_name) {
+		method_c_name = concrete_method
+	} else if embedded := g.resolve_method_on_embedded_receiver(base_type, method_name) {
+		method_c_name = embedded.method_c_name
+		embedded_owner = embedded.owner
+	} else {
+		return false
+	}
+	ptr_params := g.fn_param_is_ptr[method_c_name] or { []bool{} }
+	receiver_as_ptr := ptr_params.len > 0 && ptr_params[0]
+	receiver_type := g.get_expr_type(lhs.lhs)
+	receiver_is_ptr := receiver_type.ends_with('*')
+	g.called_fn_names[method_c_name] = true
+	g.sb.write_string('${method_c_name}(')
+	if embedded_owner != '' {
+		if receiver_as_ptr {
+			g.sb.write_string('&(')
+			g.expr(lhs.lhs)
+			g.sb.write_string(').${embedded_owner}')
+		} else {
+			g.sb.write_string('(')
+			g.expr(lhs.lhs)
+			g.sb.write_string(').${embedded_owner}')
+		}
+	} else if receiver_as_ptr && !receiver_is_ptr {
+		g.sb.write_string('&(')
+		g.expr(lhs.lhs)
+		g.sb.write_string(')')
+	} else if !receiver_as_ptr && receiver_is_ptr {
+		g.sb.write_string('*(')
+		g.expr(lhs.lhs)
+		g.sb.write_string(')')
+	} else {
+		g.expr(lhs.lhs)
+	}
+	for i in 0 .. args.len {
+		g.sb.write_string(', ')
+		g.gen_call_arg(method_c_name, i + 1, args[i])
+	}
+	g.sb.write_string(')')
+	return true
+}
+
 fn (mut g Gen) call_expr(lhs ast.Expr, args []ast.Expr) {
 	for i in 0 .. args.len {
 		_ = g.get_expr_type(args[i])
@@ -3477,6 +4502,11 @@ fn (mut g Gen) call_expr(lhs ast.Expr, args []ast.Expr) {
 				g.sb.write_string('false')
 				return
 			}
+		}
+	}
+	if lhs is ast.SelectorExpr {
+		if g.try_gen_concrete_method_call(lhs, args) {
+			return
 		}
 	}
 	if lhs is ast.SelectorExpr {
@@ -4497,6 +5527,23 @@ fn (mut g Gen) call_expr(lhs ast.Expr, args []ast.Expr) {
 				continue
 			}
 			// For fn-pointer calls, auto-deref mut params when the fn type expects by-value
+			if fnptr_param_is_ptr.len > 0 && i < fnptr_param_is_ptr.len && fnptr_param_is_ptr[i] {
+				arg := call_args[i]
+				base_arg := if arg is ast.ModifierExpr {
+					arg.expr
+				} else {
+					arg
+				}
+				if g.expr_is_pointer(base_arg) || g.expr_produces_pointer(base_arg) {
+					g.expr(base_arg)
+					continue
+				}
+				if g.can_take_address(base_arg) {
+					g.sb.write_string('&')
+					g.expr(base_arg)
+					continue
+				}
+			}
 			if fnptr_param_is_ptr.len > 0 && i < fnptr_param_is_ptr.len && !fnptr_param_is_ptr[i] {
 				arg := call_args[i]
 				mut arg_ident_name := ''
@@ -4511,6 +5558,13 @@ fn (mut g Gen) call_expr(lhs ast.Expr, args []ast.Expr) {
 					g.sb.write_string('(*')
 					g.sb.write_string(arg_ident_name)
 					g.sb.write_string(')')
+					continue
+				}
+			}
+			if c_name == 'new_array_from_c_array' && i == 2 && call_args.len >= 4 {
+				elem_type := g.array_init_elem_type_from_expr(call_args[3])
+				if elem_type != '' && elem_type != 'int' && elem_type != 'array' {
+					g.sb.write_string('sizeof(${elem_type})')
 					continue
 				}
 			}
@@ -4544,9 +5598,7 @@ fn (mut g Gen) ensure_cur_fn_scope() ?&types.Scope {
 	}
 	suffix := '__${g.cur_fn_name}'
 	mut matched_key := ''
-	fn_scope_keys := lock g.env.fn_scopes {
-		g.env.fn_scopes.keys()
-	}
+	fn_scope_keys := g.env.snapshot_fn_scopes().keys()
 	for key in fn_scope_keys {
 		if key.ends_with(suffix) {
 			matched_key = key
@@ -4579,6 +5631,13 @@ fn ensure_ptr_suffix(typ string) string {
 	return sb.str()
 }
 
+fn c_decl_for_type_and_name(c_type string, name string) string {
+	if c_type.contains('(*)') {
+		return c_type.replace('(*)', '(*${name})')
+	}
+	return '${c_type} ${name}'
+}
+
 fn anon_fn_name(counter int) string {
 	mut sb := strings.new_builder(20)
 	sb.write_string('_anon_fn_')
@@ -4594,11 +5653,12 @@ fn fn_literal_c_param_name(idx int) string {
 }
 
 struct FnLiteralCaptureInfo {
-	name         string
-	c_type       string
-	assign_expr  ast.Expr
-	is_mut       bool
-	storage_name string
+	name          string
+	c_type        string
+	assign_expr   ast.Expr
+	is_mut        bool
+	needs_address bool
+	storage_name  string
 }
 
 fn (mut g Gen) fn_literal_capture_infos(anon_name string, captured_vars []ast.Expr) []FnLiteralCaptureInfo {
@@ -4627,12 +5687,14 @@ fn (mut g Gen) fn_literal_capture_infos(anon_name string, captured_vars []ast.Ex
 		if is_mut && !c_type.ends_with('*') {
 			c_type = ensure_ptr_suffix(c_type)
 		}
+		needs_address := is_mut && !(name in g.cur_fn_mut_params && c_type.ends_with('*'))
 		infos << FnLiteralCaptureInfo{
-			name:         name
-			c_type:       c_type
-			assign_expr:  assign_expr
-			is_mut:       is_mut
-			storage_name: '${anon_name}_capture_${i}'
+			name:          name
+			c_type:        c_type
+			assign_expr:   assign_expr
+			is_mut:        is_mut
+			needs_address: needs_address
+			storage_name:  '${anon_name}_capture_${i}'
 		}
 	}
 	return infos
@@ -4672,7 +5734,7 @@ fn (mut g Gen) gen_fn_literal(node ast.FnLiteral) {
 
 	// Generate function definition
 	for capture in capture_infos {
-		g.sb.writeln('static ${capture.c_type} ${capture.storage_name};')
+		g.sb.writeln('static ${c_decl_for_type_and_name(capture.c_type, capture.storage_name)};')
 	}
 	g.sb.write_string('static ')
 	g.sb.write_string(ret_type)
@@ -4695,9 +5757,7 @@ fn (mut g Gen) gen_fn_literal(node ast.FnLiteral) {
 		} else {
 			param_type
 		}
-		g.sb.write_string(param_c_type)
-		g.sb.write_u8(` `)
-		g.sb.write_string(param_name)
+		g.sb.write_string(c_decl_for_type_and_name(param_c_type, param_name))
 		if param.is_mut {
 			g.cur_fn_mut_params[param_source_name] = true
 		}
@@ -4720,7 +5780,7 @@ fn (mut g Gen) gen_fn_literal(node ast.FnLiteral) {
 			g.cur_fn_mut_params[capture.name] = true
 		}
 		g.runtime_local_types[capture.name] = capture.c_type
-		g.sb.writeln('\t${capture.c_type} ${capture.name} = ${capture.storage_name};')
+		g.sb.writeln('\t${c_decl_for_type_and_name(capture.c_type, capture.name)} = ${capture.storage_name};')
 	}
 	g.gen_stmts(node.stmts)
 	g.sb.writeln('}')
@@ -4748,6 +5808,9 @@ fn (mut g Gen) gen_fn_literal(node ast.FnLiteral) {
 	g.sb.write_string('({ ')
 	for capture in capture_infos {
 		g.sb.write_string('${capture.storage_name} = ')
+		if capture.needs_address {
+			g.sb.write_u8(`&`)
+		}
 		g.expr(capture.assign_expr)
 		g.sb.write_string('; ')
 	}
@@ -4945,6 +6008,9 @@ fn expr_has_generic_placeholder(e ast.Expr) bool {
 				ast.MapType {
 					return expr_has_generic_placeholder(e.key_type)
 						|| expr_has_generic_placeholder(e.value_type)
+				}
+				ast.PointerType {
+					return expr_has_generic_placeholder(e.base_type)
 				}
 				ast.OptionType {
 					return expr_has_generic_placeholder(e.base_type)
