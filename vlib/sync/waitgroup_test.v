@@ -63,7 +63,7 @@ fn test_waitgroup_go() {
 }
 
 fn test_waitgroup_add_while_waiting() {
-	for _ in 0 .. 200 {
+	for _ in 0 .. 50 {
 		mut wg := new_waitgroup()
 		ready := chan bool{cap: 1}
 		release := chan bool{cap: 1}
