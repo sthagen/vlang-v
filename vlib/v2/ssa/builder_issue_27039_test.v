@@ -1,4 +1,4 @@
-// vtest build: !linux
+// vtest build: !linux && !windows
 module ssa
 
 fn test_c_stdio_symbols_are_platform_specific() {

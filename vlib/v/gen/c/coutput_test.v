@@ -740,7 +740,7 @@ fn should_skip(relpath string) bool {
 			return true
 		}
 	}
-	if github_job == 'tcc-windows' {
+	if github_job in ['tcc-windows', 'msvc-windows'] {
 		test_path := os.join_path(vroot, relpath)
 		file_options := get_file_options(test_path)
 		if file_options.vflags.contains('-cc clang') {

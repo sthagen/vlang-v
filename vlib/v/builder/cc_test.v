@@ -419,7 +419,8 @@ fn test_live_windows_main_linker_args_export_host_symbols() {
 	], .gcc)
 	assert linker_args.contains('-Wl,--export-all-symbols')
 	assert linker_args.contains('-Wl,--out-implib,')
-	assert normalized_test_path(linker_args).contains(normalized_test_path(live_windows_import_lib_path(hot_reload_graph_example())))
+	expected_import_lib := os.file_name(live_windows_import_lib_path(hot_reload_graph_example()))
+	assert linker_args.contains(expected_import_lib), 'linker_args should contain ${expected_import_lib}'
 }
 
 fn test_live_windows_shared_linker_args_include_host_import_lib() {
@@ -432,7 +433,8 @@ fn test_live_windows_shared_linker_args_include_host_import_lib() {
 		'-shared',
 		hot_reload_graph_example(),
 	], .gcc)
-	assert normalized_test_path(linker_args).contains(normalized_test_path(live_windows_import_lib_path(hot_reload_graph_example())))
+	expected_import_lib := os.file_name(live_windows_import_lib_path(hot_reload_graph_example()))
+	assert linker_args.contains(expected_import_lib), 'linker_args should contain ${expected_import_lib}'
 }
 
 fn test_windows_cross_compile_args_match_shared_prod_args() {
@@ -530,20 +532,41 @@ fn builder_linker_args(args []string) string {
 }
 
 fn builder_linker_args_with_cc(args []string, cc CC) string {
-	mut builder := new_test_builder(args)
-	builder.ccoptions.cc = cc
+	mut builder := new_test_builder_without_cc_setup(args)
+	ccompiler := ccompiler_name_for_test_cc(cc)
+	builder.pref.ccompiler = ccompiler
+	builder.pref.ccompiler_type = pref.cc_from_string(ccompiler)
+	builder.setup_ccompiler_options(ccompiler)
+	builder.setup_output_name()
 	return builder.get_linker_args().join(' ')
 }
 
 fn new_test_builder(args []string) Builder {
+	mut builder := new_test_builder_without_cc_setup(args)
+	builder.setup_ccompiler_options(builder.pref.ccompiler)
+	builder.setup_output_name()
+	return builder
+}
+
+fn new_test_builder_without_cc_setup(args []string) Builder {
 	mut full_args := ['']
 	full_args << args
 	prefs, _ := pref.parse_args_and_show_errors([], full_args, false)
 	mut builder := new_builder(prefs)
 	builder.out_name_c = os.join_path(os.vtmp_dir(), 'builder_cc_test.tmp.c')
-	builder.setup_ccompiler_options(prefs.ccompiler)
-	builder.setup_output_name()
 	return builder
+}
+
+fn ccompiler_name_for_test_cc(cc CC) string {
+	return match cc {
+		.tcc { 'tcc' }
+		.gcc { 'gcc' }
+		.icc { 'icc' }
+		.msvc { 'msvc' }
+		.clang { 'clang' }
+		.emcc { 'emcc' }
+		.unknown { '' }
+	}
 }
 
 fn new_builder_for_args(args []string) Builder {

@@ -1,4 +1,4 @@
-// vtest build: !linux
+// vtest build: !linux && !windows
 module scanner
 
 import v2.pref

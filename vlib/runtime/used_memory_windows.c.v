@@ -1,5 +1,6 @@
 module runtime
 
+#define PSAPI_VERSION 2
 #include <psapi.h>
 
 // Windows 7+ exports K32GetProcessMemoryInfo from kernel32.dll, so avoid

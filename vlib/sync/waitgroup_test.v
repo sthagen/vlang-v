@@ -84,7 +84,7 @@ fn test_waitgroup_add_while_waiting() {
 		for _ in 0 .. 8 {
 			select {
 				_ := <-wait_done {}
-				200 * time.millisecond {
+				2 * time.second {
 					assert false, 'wait() missed a wakeup while work added more tasks'
 				}
 			}

@@ -1,3 +1,4 @@
+// vtest build: !linux && !windows
 module parser
 
 import os

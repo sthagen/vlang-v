@@ -132,6 +132,17 @@ pub fn (r &Row) get_int(col_name string) int {
 
 pub type Params = []string | [][]string
 
+fn sqlite_cstring(s string) &char {
+	cstr := unsafe { malloc_noscan(s.len + 1) }
+	unsafe {
+		if s.len > 0 {
+			vmemcpy(cstr, s.str, s.len)
+		}
+		cstr[s.len] = 0
+	}
+	return &char(cstr)
+}
+
 //
 fn C.sqlite3_open(&char, &&C.sqlite3) i32
 
@@ -179,7 +190,11 @@ fn C.sqlite3_changes(&C.sqlite3) i32
 // connect Opens the connection with a database.
 pub fn connect(path string) !DB {
 	db := &C.sqlite3(unsafe { nil })
-	code := C.sqlite3_open(&char(path.str), &db)
+	path_cstr := sqlite_cstring(path)
+	defer {
+		unsafe { free(path_cstr) }
+	}
+	code := C.sqlite3_open(path_cstr, &db)
 	if code != 0 {
 		return &SQLError{
 			msg:  unsafe { cstring_to_vstring(&char(C.sqlite3_errmsg(db))) }
