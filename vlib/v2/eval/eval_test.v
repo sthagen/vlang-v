@@ -1,4 +1,3 @@
-// vtest build: !linux && !windows
 module eval
 
 import os
