@@ -948,6 +948,52 @@ fn (mut g Gen) resolved_ident_map_value_type(expr ast.Ident) ast.Type {
 	return 0
 }
 
+fn (mut g Gen) resolved_map_key_value_types(map_type ast.Type, fallback_key_type ast.Type, fallback_value_type ast.Type) (ast.Type, ast.Type) {
+	mut key_type := g.unwrap_generic(g.recheck_concrete_type(fallback_key_type))
+	mut value_type := g.unwrap_generic(g.recheck_concrete_type(fallback_value_type))
+	resolved_map_type := g.unwrap_generic(g.recheck_concrete_type(map_type))
+	map_sym := g.table.final_sym(resolved_map_type)
+	if map_sym.kind == .map {
+		map_info := map_sym.map_info()
+		resolved_key := g.unwrap_generic(g.recheck_concrete_type(map_info.key_type))
+		resolved_value := g.unwrap_generic(g.recheck_concrete_type(map_info.value_type))
+		if resolved_key != 0 {
+			key_type = resolved_key
+		}
+		if resolved_value != 0 {
+			value_type = resolved_value
+		}
+		if key_type == ast.usize_type || value_type == ast.usize_type {
+			name_key_type, name_value_type := g.resolved_map_types_from_name(map_sym.name)
+			if key_type == ast.usize_type && name_key_type != 0 {
+				key_type = name_key_type
+			}
+			if value_type == ast.usize_type && name_value_type != 0 {
+				value_type = name_value_type
+			}
+		}
+	}
+	if key_type == 0 {
+		key_type = fallback_key_type
+	}
+	if value_type == 0 {
+		value_type = fallback_value_type
+	}
+	return key_type, value_type
+}
+
+fn (mut g Gen) resolved_map_type_from_expr(expr ast.Expr, default_type ast.Type) ast.Type {
+	mut map_type := g.recheck_concrete_type(default_type)
+	resolved_type := g.recheck_concrete_type(g.resolved_expr_type(expr, default_type))
+	if resolved_type != 0
+		&& (g.cur_concrete_types.len > 0 || map_type == 0 || map_type.has_flag(.generic)
+		|| g.type_has_unresolved_generic_parts(map_type)
+		|| g.unwrap_generic(resolved_type) != g.unwrap_generic(map_type)) {
+		map_type = resolved_type
+	}
+	return map_type
+}
+
 fn (mut g Gen) resolved_array_elem_type_from_name(name string) ast.Type {
 	if !name.starts_with('[]') {
 		return 0
@@ -1714,11 +1760,11 @@ fn (mut g Gen) unwrap(typ ast.Type) Type {
 // generate function variable definition, e.g. `void (*var_name) (int, string)`
 fn (mut g Gen) fn_var_signature(var_type ast.Type, return_type ast.Type, arg_types []ast.Type, var_name string) string {
 	if var_type.has_flag(.option) || var_type.has_flag(.result) {
-		return '${g.styp(var_type)} ${c_name(var_name)}'
+		return '${g.styp(var_type)} ${c_fn_name(var_name)}'
 	}
 	ret_styp := g.styp(return_type)
 	nr_muls := var_type.nr_muls()
-	mut sig := '${ret_styp} (${'*'.repeat(nr_muls + 1)}${c_name(var_name)}) ('
+	mut sig := '${ret_styp} (${'*'.repeat(nr_muls + 1)}${c_fn_name(var_name)}) ('
 	for j, arg_typ in arg_types {
 		arg_sym := g.table.sym(arg_typ)
 		if arg_sym.info is ast.FnType {

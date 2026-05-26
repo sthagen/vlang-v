@@ -1989,6 +1989,26 @@ pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
 			f.writeln('')
 		}
 	}
+	if node.has_update_expr {
+		f.write('...')
+		f.expr(node.update_expr)
+		if node.exprs.len > 0 {
+			f.write(',')
+		}
+		if node.update_expr_comments.len > 0 {
+			f.write(' ')
+			f.comments(node.update_expr_comments,
+				prev_line: node.update_expr_pos.last_line
+				has_nl:    false
+			)
+			last_line_nr = node.update_expr_comments.last().pos.last_line
+		} else {
+			last_line_nr = node.update_expr_pos.last_line
+		}
+		if node.exprs.len > 0 && node.update_expr_comments.len == 0 {
+			f.write(' ')
+		}
+	}
 	for i, c in node.pre_cmnts {
 		if i < node.pre_cmnts.len - 1 {
 			if c.pos.last_line < node.pre_cmnts[i + 1].pos.line_nr {
@@ -2074,7 +2094,17 @@ pub fn (mut f Fmt) array_init(node ast.ArrayInit) {
 			if !is_new_line && i > 0 {
 				f.write(' ')
 			}
+			// When the array stays on a single source line, keep nested
+			// struct inits on a single line too (instead of expanding their
+			// named fields onto multiple lines).
+			keep_struct_inline := !line_break && expr is ast.StructInit
+				&& expr.pos.line_nr == expr.pos.last_line && expr.pre_comments.len == 0
+			old_single_line_fields := f.single_line_fields
+			if keep_struct_inline {
+				f.single_line_fields = true
+			}
 			f.expr(expr)
+			f.single_line_fields = old_single_line_fields
 		}
 		mut last_comment_was_inline := false
 		mut has_comments := node.ecmnts[i].len > 0

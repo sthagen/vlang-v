@@ -266,6 +266,35 @@ fn test_windows_sharedlive_string_interpolation_in_ternary_does_not_emit_inline_
 	assert compilation.output.contains('builtin__str_intp')
 }
 
+fn test_simple_string_interpolation_does_not_emit_str_intp_runtime() {
+	os.chdir(vroot) or {}
+	test_source := os.join_path(os.vtmp_dir(), 'coutput_simple_interpolation_no_str_intp.vv')
+	os.write_file(test_source,
+		"module main\n\nimport time\n\nfn main() {\n\tt := time.now()\n\tprintln('elapsed \${time.since(t)}')\n}\n")!
+	defer {
+		os.rm(test_source) or {}
+	}
+	cmd := '${os.quoted_path(vexe)} -o - ${os.quoted_path(test_source)}'
+	compilation := os.execute(cmd)
+	ensure_compilation_succeeded(compilation, cmd)
+	assert !compilation.output.contains('builtin__str_intp')
+	assert !compilation.output.contains('StrIntpData')
+}
+
+fn test_auto_str_float_array_still_emits_str_intp_runtime() {
+	os.chdir(vroot) or {}
+	test_source := os.join_path(os.vtmp_dir(), 'coutput_float_array_str_intp.vv')
+	os.write_file(test_source, 'module main\n\nfn main() {\n\tprintln([f32(1.2), f32(3.4)])\n}\n')!
+	defer {
+		os.rm(test_source) or {}
+	}
+	cmd := '${os.quoted_path(vexe)} -o - ${os.quoted_path(test_source)}'
+	compilation := os.execute(cmd)
+	ensure_compilation_succeeded(compilation, cmd)
+	assert compilation.output.contains('builtin__str_intp')
+	assert compilation.output.contains('StrIntpData')
+}
+
 fn test_windows_tcc_atomic_postfix_uses_interlocked_helpers() {
 	os.chdir(vroot) or {}
 	cc := windows_tcc_ccompiler_for_coutput_test()
@@ -345,6 +374,23 @@ fn test_no_main_exports_initialize_windows_runtime() {
 	for expected_line in expected_lines {
 		assert does_line_match_one_of_generated_lines(expected_line, generated_c_lines)
 	}
+}
+
+fn test_coverage_output_checks_counter_file_open() {
+	os.chdir(vroot) or {}
+	test_source := os.join_path(os.vtmp_dir(), 'coutput_coverage_file_guard.vv')
+	os.write_file(test_source, 'fn main() {\n\tprintln("coverage")\n}\n')!
+	defer {
+		os.rm(test_source) or {}
+	}
+	coverage_dir := os.join_path(os.vtmp_dir(), 'coutput_coverage')
+	cmd := '${os.quoted_path(vexe)} -o - -coverage ${os.quoted_path(coverage_dir)} ${os.quoted_path(test_source)}'
+	compilation := os.execute(cmd)
+	ensure_compilation_succeeded(compilation, cmd)
+	assert compilation.output.contains('FILE *fp = fopen(cov_filename, "wb+");')
+	assert compilation.output.contains('if (fp == NULL) { return; }')
+	assert compilation.output.contains('nsecs = ts.tv_nsec;')
+	assert !compilation.output.contains('\nsecs = ts.tv_nsec;')
 }
 
 fn test_c_fallback_decl_uses_module_wide_c_includes() {

@@ -337,13 +337,14 @@ pub enum DeferMode {
 
 // Expressions
 pub struct ArrayInitExpr {
-pub:
-	typ   Expr = empty_expr
-	exprs []Expr
-	init  Expr = empty_expr
-	cap   Expr = empty_expr
-	len   Expr = empty_expr
-	pos   token.Pos
+pub mut:
+	typ         Expr = empty_expr
+	exprs       []Expr
+	init        Expr = empty_expr
+	cap         Expr = empty_expr
+	len         Expr = empty_expr
+	update_expr Expr = empty_expr // `a` in `[...a, 3, 4]`
+	pos         token.Pos
 }
 
 pub struct AsCastExpr {
@@ -369,24 +370,27 @@ pub:
 }
 
 pub struct CallExpr {
+pub mut:
+	lhs Expr
 pub:
-	lhs  Expr
 	args []Expr
 	pos  token.Pos
 }
 
 pub struct CallOrCastExpr {
-pub:
+pub mut:
 	lhs  Expr
 	expr Expr
-	pos  token.Pos
+pub:
+	pos token.Pos
 }
 
 pub struct CastExpr {
-pub:
+pub mut:
 	typ  Expr
 	expr Expr
-	pos  token.Pos
+pub:
+	pos token.Pos
 }
 
 pub struct ComptimeExpr {
@@ -401,11 +405,14 @@ pub:
 	typ        Expr = empty_expr // can be empty as used for const (unless we use something else)
 	value      Expr = empty_expr
 	attributes []Attribute
+	is_public  bool
+	is_mut     bool
 }
 
 pub struct FieldInit {
 pub:
-	name  string
+	name string
+pub mut:
 	value Expr
 }
 
@@ -433,13 +440,13 @@ pub:
 }
 
 pub struct Ident {
-pub:
+pub mut:
 	pos  token.Pos
 	name string
 }
 
 pub struct IfExpr {
-pub:
+pub mut:
 	cond      Expr = empty_expr
 	else_expr Expr = empty_expr
 	stmts     []Stmt
@@ -453,7 +460,7 @@ pub:
 }
 
 pub struct InfixExpr {
-pub:
+pub mut:
 	op  token.Token
 	lhs Expr
 	rhs Expr
@@ -461,7 +468,7 @@ pub:
 }
 
 pub struct IndexExpr {
-pub:
+pub mut:
 	lhs      Expr
 	expr     Expr
 	is_gated bool
@@ -469,7 +476,7 @@ pub:
 }
 
 pub struct InitExpr {
-pub:
+pub mut:
 	typ    Expr
 	fields []FieldInit
 	pos    token.Pos
@@ -545,7 +552,7 @@ pub:
 // }
 
 pub struct ModifierExpr {
-pub:
+pub mut:
 	kind token.Token
 	expr Expr
 	pos  token.Pos
@@ -563,7 +570,7 @@ pub:
 }
 
 pub struct Parameter {
-pub:
+pub mut:
 	name   string
 	typ    Expr
 	is_mut bool
@@ -595,7 +602,7 @@ pub:
 }
 
 pub struct PrefixExpr {
-pub:
+pub mut:
 	op   token.Token
 	expr Expr
 	pos  token.Pos
@@ -618,7 +625,7 @@ pub:
 }
 
 pub struct SelectorExpr {
-pub:
+pub mut:
 	lhs Expr
 	rhs Ident
 	pos token.Pos
@@ -849,7 +856,7 @@ pub:
 }
 
 pub struct ExprStmt {
-pub:
+pub mut:
 	expr Expr
 }
 
@@ -879,7 +886,7 @@ pub:
 }
 
 pub struct ForStmt {
-pub:
+pub mut:
 	init  Stmt = empty_stmt // initialization
 	cond  Expr = empty_expr // condition
 	post  Stmt = empty_stmt // post iteration (afterthought)
@@ -888,7 +895,7 @@ pub:
 
 // NOTE: used as the initializer for ForStmt
 pub struct ForInStmt {
-pub:
+pub mut:
 	// key   		 string
 	// value 		 string
 	// value_is_mut bool
@@ -903,6 +910,7 @@ pub struct GlobalDecl {
 pub:
 	attributes []Attribute
 	fields     []FieldDecl
+	is_public  bool
 }
 
 pub struct ImportStmt {
@@ -990,7 +998,8 @@ pub struct FnType {
 pub:
 	generic_params []Expr
 	params         []Parameter
-	return_type    Expr = empty_expr
+pub mut:
+	return_type Expr = empty_expr
 }
 
 pub fn (ft &FnType) str() string {
