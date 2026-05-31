@@ -5608,15 +5608,78 @@ fn (mut b Builder) build_keyword_operator_from_flat(c ast.Cursor) ValueID {
 	})
 }
 
+// build_postfix_from_flat lowers a `.expr_postfix` cursor without rehydrating
+// the inner operand. PostfixExpr flat encoding stores `op` in `aux` and the
+// operand at `edge(0)`. The cursor-native path mirrors `build_postfix`:
+// `!`/`?` unwraps go through `build_expr_from_flat` + `build_unwrapped_postfix`
+// (only the op is consulted by the latter, so the wrapping PostfixExpr's
+// `.expr` field is left empty); ident/selector/index inc-dec paths read the
+// var name directly from `c.name()` or take the address via
+// `build_addr_from_flat`; the fallthrough returns the operand value via
+// `build_expr_from_flat`. No `decode_expr` is needed because every branch
+// either reads cursor-level metadata or delegates to existing cursor helpers.
 fn (mut b Builder) build_postfix_from_flat(c ast.Cursor) ValueID {
 	op := unsafe { token.Token(int(c.aux())) }
-	inner := c.edge(0)
-	expr := inner.flat.decode_expr(inner.id)
-	return b.build_postfix(ast.PostfixExpr{
-		op:   op
-		expr: expr
-		pos:  c.pos()
-	})
+	inner_c := c.edge(0)
+	if op in [.not, .question] {
+		wrapped_val := b.build_expr_from_flat(inner_c)
+		return b.build_unwrapped_postfix(ast.PostfixExpr{
+			op:   op
+			expr: ast.empty_expr
+			pos:  c.pos()
+		}, wrapped_val)
+	}
+	if inner_c.kind() == .expr_ident {
+		name := inner_c.name()
+		if ptr := b.vars[name] {
+			ptr_typ := b.mod.values[ptr].typ
+			elem_typ := b.mod.type_store.types[ptr_typ].elem_type
+			loaded := b.mod.add_instr(.load, b.cur_block, elem_typ, [ptr])
+			is_float := elem_typ > 0 && int(elem_typ) < b.mod.type_store.types.len
+				&& b.mod.type_store.types[elem_typ].kind == .float_t
+			one := if is_float {
+				b.mod.get_or_add_const(elem_typ, '1.0')
+			} else {
+				b.mod.get_or_add_const(elem_typ, '1')
+			}
+			arith_op := if is_float {
+				if op == .inc { OpCode.fadd } else { OpCode.fsub }
+			} else {
+				if op == .inc { OpCode.add } else { OpCode.sub }
+			}
+			result := b.mod.add_instr(arith_op, b.cur_block, elem_typ, [loaded, one])
+			b.mod.add_instr(.store, b.cur_block, 0, [result, ptr])
+			return loaded
+		}
+	}
+	if inner_c.kind() == .expr_selector || inner_c.kind() == .expr_index {
+		ptr := b.build_addr_from_flat(inner_c)
+		if ptr != 0 {
+			ptr_typ := b.mod.values[ptr].typ
+			elem_typ := if ptr_typ < b.mod.type_store.types.len {
+				b.mod.type_store.types[ptr_typ].elem_type
+			} else {
+				b.mod.type_store.get_int(32)
+			}
+			loaded := b.mod.add_instr(.load, b.cur_block, elem_typ, [ptr])
+			is_float := elem_typ > 0 && int(elem_typ) < b.mod.type_store.types.len
+				&& b.mod.type_store.types[elem_typ].kind == .float_t
+			one := if is_float {
+				b.mod.get_or_add_const(elem_typ, '1.0')
+			} else {
+				b.mod.get_or_add_const(elem_typ, '1')
+			}
+			arith_op := if is_float {
+				if op == .inc { OpCode.fadd } else { OpCode.fsub }
+			} else {
+				if op == .inc { OpCode.add } else { OpCode.sub }
+			}
+			result := b.mod.add_instr(arith_op, b.cur_block, elem_typ, [loaded, one])
+			b.mod.add_instr(.store, b.cur_block, 0, [result, ptr])
+			return loaded
+		}
+	}
+	return b.build_expr_from_flat(inner_c)
 }
 
 fn (mut b Builder) build_array_init_from_flat(c ast.Cursor) ValueID {
