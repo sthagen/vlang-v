@@ -5705,42 +5705,77 @@ fn (mut b Builder) build_array_init_from_flat(c ast.Cursor) ValueID {
 }
 
 fn (mut b Builder) build_string_inter_from_flat(c ast.Cursor) ValueID {
-	kind := unsafe { ast.StringLiteralKind(int(c.aux())) }
+	str_type := b.get_string_type()
+	plus_fn := b.get_or_create_fn_ref('builtin__string__+', str_type)
+
 	values_l := c.list_at(0)
-	mut values := []string{cap: values_l.len()}
-	for i in 0 .. values_l.len() {
-		values << values_l.at(i).name()
-	}
 	inters_l := c.list_at(1)
-	mut inters := []ast.StringInter{cap: inters_l.len()}
-	for i in 0 .. inters_l.len() {
-		inter_c := inters_l.at(i)
-		packed := inter_c.extra_int()
-		mut width := (packed >> 16) & 0xFFFF
-		if width & 0x8000 != 0 {
-			width |= ~0xFFFF
+	nvalues := values_l.len()
+	ninters := inters_l.len()
+
+	mut parts := []ValueID{}
+	for i in 0 .. nvalues {
+		mut val := values_l.at(i).name()
+		if i == 0 && val.len > 0 && (val[0] == `'` || val[0] == `"`) {
+			val = val[1..]
 		}
-		mut precision := packed & 0xFFFF
-		if precision & 0x8000 != 0 {
-			precision |= ~0xFFFF
+		if i == nvalues - 1 && val.len > 0 && (val[val.len - 1] == `'` || val[val.len - 1] == `"`) {
+			val = val[..val.len - 1]
 		}
-		expr_c := inter_c.edge(0)
-		format_expr_c := inter_c.edge(1)
-		inters << ast.StringInter{
-			format:       unsafe { ast.StringInterFormat(int(inter_c.aux())) }
-			width:        width
-			precision:    precision
-			expr:         expr_c.flat.decode_expr(expr_c.id)
-			format_expr:  format_expr_c.flat.decode_expr(format_expr_c.id)
-			resolved_fmt: inter_c.name()
+		val = process_v_escapes(val)
+		if val.len > 0 {
+			parts << b.mod.add_value_node(.string_literal, str_type, val, val.len)
+		}
+		if i < ninters {
+			inter_c := inters_l.at(i)
+			format := unsafe { ast.StringInterFormat(int(inter_c.aux())) }
+			resolved_fmt := inter_c.name()
+			expr_c := inter_c.edge(0)
+			needs_snprintf := format != .unformatted && format != .string && resolved_fmt.len > 0
+			if needs_snprintf {
+				i8_t := b.mod.type_store.get_int(8)
+				ptr_type := b.mod.type_store.get_ptr(i8_t)
+				count_64 := b.mod.get_or_add_const(i8_t, '64')
+				buf_ptr := b.mod.add_instr(.alloca, b.cur_block, ptr_type, [count_64])
+				inter_val := b.build_expr_from_flat(expr_c)
+				formatted_val := b.prepare_snprintf_arg(inter_val, resolved_fmt)
+				i32_t := b.mod.type_store.get_int(32)
+				snprintf_ref := b.get_or_create_fn_ref('snprintf', i32_t)
+				size_val := b.mod.get_or_add_const(i32_t, '64')
+				fmt_val := b.mod.add_value_node(.c_string_literal, ptr_type, resolved_fmt, 0)
+				sn_len := b.mod.add_instr(.call, b.cur_block, i32_t, [snprintf_ref, buf_ptr, size_val,
+					fmt_val, formatted_val])
+				tos_ref := b.get_or_create_fn_ref('builtin__tos', str_type)
+				str_val := b.mod.add_instr(.call, b.cur_block, str_type, [tos_ref, buf_ptr, sn_len])
+				parts << str_val
+			} else {
+				mut use_expr_c := expr_c
+				if expr_c.kind() == .expr_selector {
+					rhs_c := expr_c.edge(1)
+					if rhs_c.is_valid() && rhs_c.kind() == .expr_ident && rhs_c.name() == 'str' {
+						use_expr_c = expr_c.edge(0)
+					}
+				}
+				inter_val := b.build_expr_from_flat(use_expr_c)
+				inter_type := b.mod.values[inter_val].typ
+				str_val := b.convert_to_string(inter_val, inter_type)
+				parts << str_val
+			}
 		}
 	}
-	return b.build_string_inter_literal(ast.StringInterLiteral{
-		kind:   kind
-		values: values
-		inters: inters
-		pos:    c.pos()
-	})
+
+	if parts.len == 0 {
+		return b.mod.add_value_node(.string_literal, str_type, '', 0)
+	}
+	if parts.len == 1 {
+		return parts[0]
+	}
+
+	mut result := parts[0]
+	for i := 1; i < parts.len; i++ {
+		result = b.mod.add_instr(.call, b.cur_block, str_type, [plus_fn, result, parts[i]])
+	}
+	return result
 }
 
 fn (mut b Builder) build_or_from_flat(c ast.Cursor) ValueID {
