@@ -5779,14 +5779,26 @@ fn (mut b Builder) build_fn_literal_from_flat(c ast.Cursor) ValueID {
 	})
 }
 
+// build_call_or_cast_from_flat lowers a `.expr_call_or_cast` cursor without
+// rehydrating either edge. CallOrCastExpr flat encoding stores the target
+// type at `edge(0)` and the value at `edge(1)`. The cursor-native rewrite
+// mirrors `build_call_or_cast`: `ast_type_to_ssa_from_flat(lhs_c)` resolves
+// the target SSA type directly from the type-expr cursor (matching the legacy
+// `ast_type_to_ssa(expr.lhs)` outcome), then `build_addr_from_flat(expr_c)`
+// is consulted for sumtype-target wrapping, and finally `build_expr_from_flat(
+// expr_c)` produces the value passed to `build_cast_value_to_type`.
 fn (mut b Builder) build_call_or_cast_from_flat(c ast.Cursor) ValueID {
 	lhs_c := c.edge(0)
 	expr_c := c.edge(1)
-	return b.build_call_or_cast(ast.CallOrCastExpr{
-		lhs:  lhs_c.flat.decode_expr(lhs_c.id)
-		expr: expr_c.flat.decode_expr(expr_c.id)
-		pos:  c.pos()
-	})
+	target_type := b.ast_type_to_ssa_from_flat(lhs_c)
+	addr := b.build_addr_from_flat(expr_c)
+	if addr != 0 {
+		if wrapped := b.wrap_address_for_sumtype_target(addr, target_type) {
+			return wrapped
+		}
+	}
+	val := b.build_expr_from_flat(expr_c)
+	return b.build_cast_value_to_type(val, target_type)
 }
 
 fn (mut b Builder) build_as_cast_from_flat(c ast.Cursor) ValueID {
