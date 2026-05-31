@@ -5752,31 +5752,69 @@ fn (mut b Builder) build_or_from_flat(c ast.Cursor) ValueID {
 
 fn (mut b Builder) build_fn_literal_from_flat(c ast.Cursor) ValueID {
 	typ_c := c.edge(0)
-	typ_expr := typ_c.flat.decode_expr(typ_c.id)
-	mut fn_typ := ast.FnType{}
-	if typ_expr is ast.Type {
-		typ_node := typ_expr as ast.Type
-		if typ_node is ast.FnType {
-			fn_typ = typ_node
-		}
-	}
+	params_list := typ_c.list_at(1)
+	return_type_c := typ_c.edge(2)
 	ncaptured := c.extra_int()
-	mut captured := []ast.Expr{cap: ncaptured}
-	for i in 0 .. ncaptured {
-		ec := c.edge(1 + i)
-		captured << ec.flat.decode_expr(ec.id)
+
+	anon_name := '_anon_fn_${b.anon_fn_counter}'
+	b.anon_fn_counter++
+
+	ret_type := b.ast_type_to_ssa_from_flat(return_type_c)
+
+	func_idx := b.mod.new_function(anon_name, ret_type, []TypeID{})
+	b.fn_index[anon_name] = func_idx
+
+	saved_func := b.cur_func
+	saved_block := b.cur_block
+	mut saved_vars := b.vars.clone()
+	mut saved_mut_ptr_params := b.mut_ptr_params.clone()
+	saved_loop_stack := b.loop_stack.clone()
+
+	b.cur_func = func_idx
+	b.vars = map[string]ValueID{}
+	b.mut_ptr_params = map[string]bool{}
+	b.loop_stack = []LoopInfo{}
+
+	entry := b.mod.add_block(func_idx, 'entry')
+	b.cur_block = entry
+
+	for i in 0 .. params_list.len() {
+		param_c := params_list.at(i)
+		param_name := param_c.name()
+		param_is_mut := param_c.flag(ast.flag_is_mut)
+		param_type := b.ast_type_to_ssa_from_flat(param_c.edge(0))
+		actual_type := if param_is_mut && !(param_type < b.mod.type_store.types.len
+			&& b.mod.type_store.types[param_type].kind == .ptr_t) {
+			b.mod.type_store.get_ptr(param_type)
+		} else {
+			param_type
+		}
+		param_val := b.mod.add_value_node(.argument, actual_type, param_name, 0)
+		b.mod.func_add_param(func_idx, param_val)
+		alloca := b.mod.add_instr(.alloca, entry, b.mod.type_store.get_ptr(actual_type),
+			[]ValueID{})
+		b.mod.add_instr(.store, entry, 0, [param_val, alloca])
+		b.vars[param_name] = alloca
 	}
-	mut stmts := []ast.Stmt{cap: c.edge_count() - 1 - ncaptured}
+
 	for i in (1 + ncaptured) .. c.edge_count() {
-		sc := c.edge(i)
-		stmts << sc.flat.decode_stmt(sc.id)
+		b.build_stmt_from_flat(c.edge(i))
 	}
-	return b.build_fn_literal(ast.FnLiteral{
-		typ:           fn_typ
-		captured_vars: captured
-		stmts:         stmts
-		pos:           c.pos()
-	})
+
+	if !b.block_has_terminator(b.cur_block) {
+		b.mod.add_instr(.ret, b.cur_block, 0, []ValueID{})
+	}
+
+	b.cur_func = saved_func
+	b.cur_block = saved_block
+	b.vars = saved_vars.move()
+	b.mut_ptr_params = saved_mut_ptr_params.move()
+	b.loop_stack = saved_loop_stack
+
+	fn_ptr_type := b.mod.type_store.get_ptr(b.mod.type_store.get_int(8))
+	fn_ref := b.mod.add_value_node(.func_ref, fn_ptr_type, anon_name, 0)
+	b.fn_refs[anon_name] = fn_ref
+	return fn_ref
 }
 
 // build_call_or_cast_from_flat lowers a `.expr_call_or_cast` cursor without
