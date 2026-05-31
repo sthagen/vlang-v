@@ -5596,16 +5596,32 @@ fn (mut b Builder) build_keyword_from_flat(c ast.Cursor) ValueID {
 
 fn (mut b Builder) build_keyword_operator_from_flat(c ast.Cursor) ValueID {
 	op := unsafe { token.Token(int(c.aux())) }
-	mut exprs := []ast.Expr{cap: c.edge_count()}
-	for i in 0 .. c.edge_count() {
-		ec := c.edge(i)
-		exprs << ec.flat.decode_expr(ec.id)
+	match op {
+		.key_sizeof {
+			if c.edge_count() > 0 {
+				size := b.sizeof_value_from_flat(c.edge(0))
+				if size > 0 {
+					return b.mod.get_or_add_const(b.mod.type_store.get_int(32), size.str())
+				}
+			}
+			return b.mod.get_or_add_const(b.mod.type_store.get_int(32), '4')
+		}
+		.key_go {
+			if c.edge_count() > 0 {
+				return b.build_go_or_spawn_from_flat(c.edge(0), .go_call)
+			}
+			return b.mod.get_or_add_const(b.mod.type_store.get_int(64), '0')
+		}
+		.key_spawn {
+			if c.edge_count() > 0 {
+				return b.build_go_or_spawn_from_flat(c.edge(0), .spawn_call)
+			}
+			return b.mod.get_or_add_const(b.mod.type_store.get_int(64), '0')
+		}
+		else {
+			return b.mod.get_or_add_const(b.mod.type_store.get_int(64), '0')
+		}
 	}
-	return b.build_keyword_operator(ast.KeywordOperator{
-		op:    op
-		exprs: exprs
-		pos:   c.pos()
-	})
 }
 
 // build_postfix_from_flat lowers a `.expr_postfix` cursor without rehydrating
@@ -10411,95 +10427,113 @@ fn (mut b Builder) build_go_or_spawn(expr ast.Expr, opcode OpCode) ValueID {
 	return b.build_expr(expr)
 }
 
+// build_go_or_spawn_from_flat mirrors `build_go_or_spawn` without rehydrating
+// the operand. CallExpr flat encoding is `(.expr_call, ..., [edge0=lhs,
+// edge1..n=args])`. For the non-call fallback we delegate to
+// `build_expr_from_flat` directly.
+fn (mut b Builder) build_go_or_spawn_from_flat(c ast.Cursor, opcode OpCode) ValueID {
+	if c.kind() == .expr_call {
+		mut operands := []ValueID{}
+		fn_val := b.build_expr_from_flat(c.edge(0))
+		operands << fn_val
+		for i in 1 .. c.edge_count() {
+			arg_val := b.build_expr_from_flat(c.edge(i))
+			operands << arg_val
+		}
+		return b.mod.add_instr(opcode, b.cur_block, TypeID(0), operands)
+	}
+	return b.build_expr_from_flat(c)
+}
+
+fn (b &Builder) sizeof_ident_name(name string) int {
+	return match name {
+		'int', 'i32', 'u32', 'f32' {
+			4
+		}
+		'i8', 'u8', 'byte', 'bool' {
+			1
+		}
+		'i16', 'u16' {
+			2
+		}
+		'i64', 'u64', 'f64', 'isize', 'usize', 'voidptr', 'byteptr', 'charptr' {
+			8
+		}
+		'rune' {
+			4
+		}
+		else {
+			// Array_* and Map_* are mangled names for []T and map[K]V
+			// which are always the builtin array/map struct types
+			if name.starts_with('Array_fixed_') {
+				return b.fixed_array_size_from_name(name)
+			}
+			if name.starts_with('Array_') {
+				if tid := b.struct_types['array'] {
+					return b.type_byte_size(tid)
+				}
+				return 32
+			}
+			if name.starts_with('Map_') {
+				if tid := b.struct_types['map'] {
+					return b.type_byte_size(tid)
+				}
+				return 120
+			}
+			// Look up struct type (try unqualified, then module-prefixed)
+			if tid := b.struct_types[name] {
+				return b.type_byte_size(tid)
+			}
+			// Try with current module prefix (e.g., Object → types__Object)
+			if b.cur_module != '' && b.cur_module != 'main' {
+				qualified := '${b.cur_module}__${name}'
+				if tid := b.struct_types[qualified] {
+					return b.type_byte_size(tid)
+				}
+			}
+			// Try all registered structs as fallback
+			for sname, tid in b.struct_types {
+				if sname.ends_with('__${name}') {
+					return b.type_byte_size(tid)
+				}
+			}
+			// Resolve type aliases (e.g. ValueID = int → sizeof = 4)
+			if b.env != unsafe { nil } {
+				short_mod := if b.cur_module.contains('_') {
+					b.cur_module.all_after_last('_')
+				} else {
+					b.cur_module
+				}
+				scopes_to_try := [short_mod, b.cur_module, 'builtin', 'main']
+				for scope_name in scopes_to_try {
+					if scope := b.env.get_scope(scope_name) {
+						if obj := scope.lookup(name) {
+							resolved := obj.typ()
+							return b.sizeof_from_checked_type(resolved)
+						}
+					}
+				}
+				if name.contains('__') {
+					stripped := name.all_after_last('__')
+					for scope_name in scopes_to_try {
+						if scope := b.env.get_scope(scope_name) {
+							if obj := scope.lookup(stripped) {
+								resolved := obj.typ()
+								return b.sizeof_from_checked_type(resolved)
+							}
+						}
+					}
+				}
+			}
+			8 // pointer size fallback
+		}
+	}
+}
+
 fn (b &Builder) sizeof_value(expr ast.Expr) int {
 	match expr {
 		ast.Ident {
-			return match expr.name {
-				'int', 'i32', 'u32', 'f32' {
-					4
-				}
-				'i8', 'u8', 'byte', 'bool' {
-					1
-				}
-				'i16', 'u16' {
-					2
-				}
-				'i64', 'u64', 'f64', 'isize', 'usize', 'voidptr', 'byteptr', 'charptr' {
-					8
-				}
-				'rune' {
-					4
-				}
-				else {
-					// Array_* and Map_* are mangled names for []T and map[K]V
-					// which are always the builtin array/map struct types
-					if expr.name.starts_with('Array_fixed_') {
-						return b.fixed_array_size_from_name(expr.name)
-					}
-					if expr.name.starts_with('Array_') {
-						if tid := b.struct_types['array'] {
-							return b.type_byte_size(tid)
-						}
-						return 32
-					}
-					if expr.name.starts_with('Map_') {
-						if tid := b.struct_types['map'] {
-							return b.type_byte_size(tid)
-						}
-						return 120
-					}
-					// Look up struct type (try unqualified, then module-prefixed)
-					if tid := b.struct_types[expr.name] {
-						return b.type_byte_size(tid)
-					}
-					// Try with current module prefix (e.g., Object → types__Object)
-					if b.cur_module != '' && b.cur_module != 'main' {
-						qualified := '${b.cur_module}__${expr.name}'
-						if tid := b.struct_types[qualified] {
-							return b.type_byte_size(tid)
-						}
-					}
-					// Try all registered structs as fallback
-					for sname, tid in b.struct_types {
-						if sname.ends_with('__${expr.name}') {
-							return b.type_byte_size(tid)
-						}
-					}
-					// Resolve type aliases (e.g. ValueID = int → sizeof = 4)
-					if b.env != unsafe { nil } {
-						// Scope keys use short module names (e.g. 'ssa', not 'v2_ssa' or 'v2.ssa')
-						// cur_module uses underscores (e.g. 'v2_ssa'), extract last part
-						short_mod := if b.cur_module.contains('_') {
-							b.cur_module.all_after_last('_')
-						} else {
-							b.cur_module
-						}
-						scopes_to_try := [short_mod, b.cur_module, 'builtin', 'main']
-						lookup_name := expr.name
-						for scope_name in scopes_to_try {
-							if scope := b.env.get_scope(scope_name) {
-								if obj := scope.lookup(lookup_name) {
-									resolved := obj.typ()
-									return b.sizeof_from_checked_type(resolved)
-								}
-							}
-						}
-						// Try stripping module prefix from name (e.g. ssa__ValueID → ValueID)
-						if lookup_name.contains('__') {
-							stripped := lookup_name.all_after_last('__')
-							for scope_name in scopes_to_try {
-								if scope := b.env.get_scope(scope_name) {
-									if obj := scope.lookup(stripped) {
-										resolved := obj.typ()
-										return b.sizeof_from_checked_type(resolved)
-									}
-								}
-							}
-						}
-					}
-					8 // pointer size fallback
-				}
-			}
+			return b.sizeof_ident_name(expr.name)
 		}
 		ast.Type {
 			match expr {
@@ -10549,6 +10583,73 @@ fn (b &Builder) sizeof_value(expr ast.Expr) int {
 						if obj := scope.lookup(rhs_name) {
 							resolved := obj.typ()
 							return b.sizeof_from_checked_type(resolved)
+						}
+					}
+				}
+			}
+			return 8
+		}
+		else {
+			return 8
+		}
+	}
+}
+
+// sizeof_value_from_flat mirrors `sizeof_value` but consumes a cursor instead
+// of a rehydrated `ast.Expr`. Same dispatch shape: idents (incl. mangled
+// Array_/Map_ names) flow through `sizeof_ident_name`; `.typ_array` /
+// `.typ_array_fixed` / `.typ_map` cover type-position operands; `.expr_selector`
+// covers `mod.Type` form. Anything else falls through to 8.
+fn (b &Builder) sizeof_value_from_flat(c ast.Cursor) int {
+	match c.kind() {
+		.expr_ident {
+			return b.sizeof_ident_name(c.name())
+		}
+		.typ_array {
+			if tid := b.struct_types['array'] {
+				return b.type_byte_size(tid)
+			}
+			return 48
+		}
+		.typ_array_fixed {
+			len_c := c.edge(0)
+			elem_c := c.edge(1)
+			elem_size := b.sizeof_value_from_flat(elem_c)
+			arr_len := if len_c.kind() == .expr_basic_literal {
+				int(parse_const_int_literal(len_c.name()))
+			} else if len_c.kind() == .expr_ident {
+				b.resolve_const_int(len_c.name())
+			} else {
+				0
+			}
+			if elem_size > 0 && arr_len > 0 {
+				return elem_size * arr_len
+			}
+			return 8
+		}
+		.typ_map {
+			if tid := b.struct_types['map'] {
+				return b.type_byte_size(tid)
+			}
+			return 120
+		}
+		.expr_selector {
+			lhs_c := c.edge(0)
+			rhs_c := c.edge(1)
+			if lhs_c.kind() == .expr_ident && rhs_c.kind() == .expr_ident {
+				lhs_name := lhs_c.name()
+				rhs_name := rhs_c.name()
+				if lhs_name.len > 0 && rhs_name.len > 0 {
+					qualified := '${lhs_name}__${rhs_name}'
+					if tid := b.struct_types[qualified] {
+						return b.type_byte_size(tid)
+					}
+					if b.env != unsafe { nil } {
+						if scope := b.env.get_scope(lhs_name) {
+							if obj := scope.lookup(rhs_name) {
+								resolved := obj.typ()
+								return b.sizeof_from_checked_type(resolved)
+							}
 						}
 					}
 				}
