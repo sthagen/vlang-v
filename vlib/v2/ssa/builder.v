@@ -5393,22 +5393,196 @@ fn (mut b Builder) build_string_literal_from_flat(c ast.Cursor) ValueID {
 	})
 }
 
-// build_prefix_from_flat (s190) reads `op` from `c.aux()` (u16 → token.Token)
-// and decodes the operand from edge 0 via `decode_expr` (the inner expr
-// must be a fully-rehydrated `ast.Expr` because build_prefix pattern-matches
-// on it via `is ast.CastExpr` / `is ast.CallOrCastExpr` / `is ast.PrefixExpr`
-// / `is ast.InitExpr`). Saves only the outer `Expr(PrefixExpr{...})`
-// sum-type box; the inner expr decode is still required by build_prefix's
-// type-check pattern matches.
+// build_prefix_from_flat (s207 cursor-native rewrite) reads `op` from
+// `c.aux()` and dispatches per inner-expr `kind()` directly:
+// - amp + .expr_init still rehydrates the InitExpr (no cursor-native
+//   `collect_init_expr_values_from_flat` yet — left for a follow-up)
+// - amp + .expr_cast / .expr_call_or_cast / .expr_prefix(amp,...) take the
+//   pointer-type-cast bitcast paths cursor-natively (read the inner type
+//   from `edge(0)` of the cast/CoCe, the value from `edge(1)`, then call
+//   `ast_type_to_ssa_from_flat` + `build_expr_from_flat`)
+// - minus + .expr_basic_literal float-literal negation uses `inner_c.name()`
+//   to detect the float form and emit a negated constant directly
+// - default amp path calls `build_addr_from_flat(inner_c)` (already cursor-
+//   native), with `build_expr_from_flat(inner_c)` as the no-address fallback
+// - non-amp ops build the operand via `build_expr_from_flat` then apply the
+//   per-op arithmetic verbatim from legacy `build_prefix`.
 fn (mut b Builder) build_prefix_from_flat(c ast.Cursor) ValueID {
 	op := unsafe { token.Token(int(c.aux())) }
 	inner_c := c.edge(0)
-	inner_expr := inner_c.flat.decode_expr(inner_c.id)
-	return b.build_prefix(ast.PrefixExpr{
-		op:   op
-		expr: inner_expr
-		pos:  c.pos()
-	})
+	inner_kind := inner_c.kind()
+
+	// &InitExpr → heap-allocated struct init. Rehydrates only this branch
+	// because cursor-native collect_init_expr_values is not yet ported.
+	if op == .amp && inner_kind == .expr_init {
+		inner_expr := inner_c.flat.decode_expr(inner_c.id)
+		if inner_expr is ast.InitExpr {
+			return b.build_init_expr_ptr(inner_expr)
+		}
+	}
+
+	// &CastExpr / &CallOrCastExpr → pointer-type cast (bitcast).
+	if op == .amp && inner_kind == .expr_cast {
+		typ_c := inner_c.edge(0)
+		val_c := inner_c.edge(1)
+		inner_val := b.build_expr_from_flat(val_c)
+		inner_type := b.mod.values[inner_val].typ
+		if inner_type != 0 && int(inner_type) < b.mod.type_store.types.len {
+			inner_t := b.mod.type_store.types[inner_type]
+			if inner_t.kind == .ptr_t || inner_t.kind == .int_t {
+				target_elem := b.ast_type_to_ssa_from_flat(typ_c)
+				ptr_type := b.mod.type_store.get_ptr(target_elem)
+				return b.mod.add_instr(.bitcast, b.cur_block, ptr_type, [inner_val])
+			}
+		}
+	}
+	if op == .amp && inner_kind == .expr_call_or_cast {
+		lhs_c := inner_c.edge(0)
+		expr_c := inner_c.edge(1)
+		inner_val := b.build_expr_from_flat(expr_c)
+		inner_type := b.mod.values[inner_val].typ
+		if inner_type != 0 && int(inner_type) < b.mod.type_store.types.len {
+			inner_t := b.mod.type_store.types[inner_type]
+			if inner_t.kind == .ptr_t || inner_t.kind == .int_t {
+				target_elem := b.ast_type_to_ssa_from_flat(lhs_c)
+				ptr_type := b.mod.type_store.get_ptr(target_elem)
+				return b.mod.add_instr(.bitcast, b.cur_block, ptr_type, [inner_val])
+			}
+		}
+	}
+
+	// &&T(expr) → **T pointer-type cast (nested PrefixExpr(.amp,...)).
+	if op == .amp && inner_kind == .expr_prefix {
+		inner_op := unsafe { token.Token(int(inner_c.aux())) }
+		if inner_op == .amp {
+			inner2_c := inner_c.edge(0)
+			inner2_kind := inner2_c.kind()
+			if inner2_kind == .expr_call_or_cast {
+				lhs_c := inner2_c.edge(0)
+				expr_c := inner2_c.edge(1)
+				inner_val := b.build_expr_from_flat(expr_c)
+				inner_type := b.mod.values[inner_val].typ
+				if inner_type != 0 && int(inner_type) < b.mod.type_store.types.len {
+					inner_t := b.mod.type_store.types[inner_type]
+					if inner_t.kind == .ptr_t || inner_t.kind == .int_t {
+						target_elem := b.ast_type_to_ssa_from_flat(lhs_c)
+						ptr_type := b.mod.type_store.get_ptr(target_elem)
+						ptr_ptr_type := b.mod.type_store.get_ptr(ptr_type)
+						return b.mod.add_instr(.bitcast, b.cur_block, ptr_ptr_type, [
+							inner_val,
+						])
+					}
+				}
+			} else if inner2_kind == .expr_cast {
+				typ_c := inner2_c.edge(0)
+				val_c := inner2_c.edge(1)
+				inner_val := b.build_expr_from_flat(val_c)
+				inner_type := b.mod.values[inner_val].typ
+				if inner_type != 0 && int(inner_type) < b.mod.type_store.types.len {
+					inner_t := b.mod.type_store.types[inner_type]
+					if inner_t.kind == .ptr_t || inner_t.kind == .int_t {
+						target_elem := b.ast_type_to_ssa_from_flat(typ_c)
+						ptr_type := b.mod.type_store.get_ptr(target_elem)
+						ptr_ptr_type := b.mod.type_store.get_ptr(ptr_type)
+						return b.mod.add_instr(.bitcast, b.cur_block, ptr_ptr_type, [
+							inner_val,
+						])
+					}
+				}
+			}
+		}
+	}
+
+	// -float_literal → negated float constant (handles -0.0 sign-bit correctly).
+	if op == .minus && inner_kind == .expr_basic_literal {
+		val := inner_c.name()
+		is_float_lit := val.contains('.')
+			|| (!val.starts_with('0x') && !val.starts_with('0X')
+			&& (val.contains('e') || val.contains('E')))
+		if is_float_lit {
+			neg_str := '-' + val
+			float_type := b.mod.type_store.get_float(64)
+			return b.mod.get_or_add_const(float_type, neg_str)
+		}
+	}
+
+	if op == .amp {
+		addr := b.build_addr_from_flat(inner_c)
+		if addr != 0 {
+			if b.in_sumtype_data {
+				if heap_ptr := b.heap_copy_from_address(addr) {
+					return heap_ptr
+				}
+			}
+			return addr
+		}
+		val := b.build_expr_from_flat(inner_c)
+		if b.mod.values[val].kind == .func_ref {
+			return val
+		}
+		if b.in_sumtype_data {
+			if heap_ptr := b.heap_copy_value(val) {
+				return heap_ptr
+			}
+		}
+		val_type := b.mod.values[val].typ
+		if val_type != 0 {
+			ptr_type := b.mod.type_store.get_ptr(val_type)
+			typ_info := b.mod.type_store.types[val_type]
+			if typ_info.kind == .struct_t {
+				heap_ptr := b.mod.add_instr(.heap_alloc, b.cur_block, ptr_type, []ValueID{})
+				b.mod.add_instr(.store, b.cur_block, 0, [val, heap_ptr])
+				return heap_ptr
+			}
+			alloca := b.mod.add_instr(.alloca, b.cur_block, ptr_type, []ValueID{})
+			b.mod.add_instr(.store, b.cur_block, 0, [val, alloca])
+			return alloca
+		}
+		return val
+	}
+
+	val := b.build_expr_from_flat(inner_c)
+
+	match op {
+		.minus {
+			val_type := b.mod.values[val].typ
+			is_float := val_type > 0 && int(val_type) < b.mod.type_store.types.len
+				&& b.mod.type_store.types[val_type].kind == .float_t
+			if is_float {
+				i64_type := b.mod.type_store.get_int(64)
+				sign_mask := b.mod.get_or_add_const(i64_type, '0x8000000000000000')
+				int_val := b.mod.add_instr(.bitcast, b.cur_block, i64_type, [val])
+				xored := b.mod.add_instr(.xor, b.cur_block, i64_type, [int_val, sign_mask])
+				return b.mod.add_instr(.bitcast, b.cur_block, val_type, [xored])
+			}
+			zero := b.mod.get_or_add_const(val_type, '0')
+			return b.mod.add_instr(.sub, b.cur_block, val_type, [zero, val])
+		}
+		.not {
+			zero := b.mod.get_or_add_const(b.mod.values[val].typ, '0')
+			return b.mod.add_instr(.eq, b.cur_block, b.mod.type_store.get_int(1), [
+				val,
+				zero,
+			])
+		}
+		.bit_not {
+			neg_one := b.mod.get_or_add_const(b.mod.values[val].typ, '-1')
+			return b.mod.add_instr(.xor, b.cur_block, b.mod.values[val].typ, [val, neg_one])
+		}
+		.mul {
+			val_type := b.mod.values[val].typ
+			if val_type != 0 && int(val_type) < b.mod.type_store.types.len {
+				typ := b.mod.type_store.types[val_type]
+				if typ.kind == .ptr_t && typ.elem_type != 0 {
+					return b.mod.add_instr(.load, b.cur_block, typ.elem_type, [val])
+				}
+			}
+			return val
+		}
+		else {
+			return val
+		}
+	}
 }
 
 // build_selector_from_flat (s191) reads `lhs` from edge 0 and `rhs` (Ident)
