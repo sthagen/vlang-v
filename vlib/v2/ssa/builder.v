@@ -5700,24 +5700,148 @@ fn (mut b Builder) build_postfix_from_flat(c ast.Cursor) ValueID {
 
 fn (mut b Builder) build_array_init_from_flat(c ast.Cursor) ValueID {
 	typ_c := c.edge(0)
-	init_c := c.edge(1)
-	cap_c := c.edge(2)
 	len_c := c.edge(3)
-	update_expr_c := c.edge(4)
-	mut exprs := []ast.Expr{cap: c.edge_count() - 5}
-	for i in 5 .. c.edge_count() {
-		ec := c.edge(i)
-		exprs << ec.flat.decode_expr(ec.id)
+	nedges := c.edge_count()
+
+	if nedges > 5 {
+		mut elem_vals := []ValueID{cap: nedges - 5}
+		for i in 5 .. nedges {
+			elem_vals << b.build_expr_from_flat(c.edge(i))
+		}
+		mut elem_type := b.mod.type_store.get_int(32)
+		mut has_declared_type := false
+		match typ_c.kind() {
+			.typ_array {
+				declared_elem := b.ast_type_to_ssa_from_flat(typ_c.edge(0))
+				if declared_elem > 0 {
+					elem_type = declared_elem
+					has_declared_type = true
+				}
+			}
+			.typ_array_fixed {
+				declared_elem := b.ast_type_to_ssa_from_flat(typ_c.edge(1))
+				if declared_elem > 0 {
+					elem_type = declared_elem
+					has_declared_type = true
+				}
+			}
+			else {}
+		}
+
+		if !has_declared_type {
+			if checked_type := b.get_checked_expr_type_from_flat(c) {
+				checked_base := b.unwrap_alias_type(checked_type)
+				match checked_base {
+					types.Array {
+						checked_elem := b.type_to_ssa(checked_base.elem_type)
+						if checked_elem > 0 {
+							elem_type = checked_elem
+							has_declared_type = true
+						}
+					}
+					types.ArrayFixed {
+						checked_elem := b.type_to_ssa(checked_base.elem_type)
+						if checked_elem > 0 {
+							elem_type = checked_elem
+							has_declared_type = true
+						}
+					}
+					else {}
+				}
+			}
+		}
+		if !has_declared_type && elem_vals.len > 0 {
+			elem_type = b.mod.values[elem_vals[0]].typ
+		}
+		{
+			elem_kind := b.mod.type_store.types[elem_type].kind
+			elem_width := b.mod.type_store.types[elem_type].width
+			for i, val in elem_vals {
+				val_type := b.mod.values[val].typ
+				if val_type == elem_type {
+					continue
+				}
+				if wrapped := b.wrap_value_for_sumtype_target(val, elem_type) {
+					elem_vals[i] = wrapped
+					continue
+				}
+				val_kind := b.mod.type_store.types[val_type].kind
+				val_width := b.mod.type_store.types[val_type].width
+				if val_kind == .int_t && elem_kind == .float_t {
+					elem_vals[i] = b.mod.add_instr(.sitofp, b.cur_block, elem_type, [
+						val,
+					])
+				} else if val_kind == .float_t && elem_kind == .float_t && val_width > elem_width {
+					elem_vals[i] = b.mod.add_instr(.trunc, b.cur_block, elem_type, [
+						val,
+					])
+				} else if val_kind == .float_t && elem_kind == .float_t && val_width < elem_width {
+					elem_vals[i] = b.mod.add_instr(.zext, b.cur_block, elem_type, [
+						val,
+					])
+				} else if val_kind == .int_t && elem_kind == .int_t && val_width > 0
+					&& val_width < elem_width {
+					elem_vals[i] = b.mod.add_instr(.zext, b.cur_block, elem_type, [
+						val,
+					])
+				}
+			}
+		}
+		arr_fixed_type := b.mod.type_store.get_array(elem_type, elem_vals.len)
+		ptr_type := b.mod.type_store.get_ptr(arr_fixed_type)
+		alloca := b.mod.add_instr(.alloca, b.cur_block, ptr_type, []ValueID{})
+		elem_ptr_type := b.mod.type_store.get_ptr(elem_type)
+		i32_t := b.mod.type_store.get_int(32)
+		for i, val in elem_vals {
+			idx := b.mod.get_or_add_const(i32_t, i.str())
+			gep := b.mod.add_instr(.get_element_ptr, b.cur_block, elem_ptr_type, [
+				alloca,
+				idx,
+			])
+			b.mod.add_instr(.store, b.cur_block, 0, [val, gep])
+		}
+		mut is_fixed := false
+		if len_c.kind() == .expr_postfix {
+			len_op := unsafe { token.Token(int(len_c.aux())) }
+			if len_op == .not {
+				is_fixed = true
+			}
+		}
+		if !is_fixed && typ_c.kind() == .typ_array_fixed {
+			is_fixed = true
+		}
+		if is_fixed {
+			return b.mod.add_instr(.load, b.cur_block, arr_fixed_type, [alloca])
+		}
+		return alloca
 	}
-	return b.build_array_init_expr(ast.ArrayInitExpr{
-		typ:         typ_c.flat.decode_expr(typ_c.id)
-		init:        init_c.flat.decode_expr(init_c.id)
-		cap:         cap_c.flat.decode_expr(cap_c.id)
-		len:         len_c.flat.decode_expr(len_c.id)
-		update_expr: update_expr_c.flat.decode_expr(update_expr_c.id)
-		exprs:       exprs
-		pos:         c.pos()
-	})
+
+	if typ_c.kind() == .typ_array_fixed {
+		elem_type := b.ast_type_to_ssa_from_flat(typ_c.edge(1))
+		arr_len := b.const_int_from_flat(typ_c.edge(0))
+		if arr_len > 0 {
+			arr_fixed_type := b.mod.type_store.get_array(elem_type, arr_len)
+			ptr_type := b.mod.type_store.get_ptr(arr_fixed_type)
+			alloca := b.mod.add_instr(.alloca, b.cur_block, ptr_type, []ValueID{})
+			if arr_len <= 16 {
+				zero := b.mod.get_or_add_const(elem_type, '0')
+				elem_ptr_type := b.mod.type_store.get_ptr(elem_type)
+				i32_t := b.mod.type_store.get_int(32)
+				for i in 0 .. arr_len {
+					idx := b.mod.get_or_add_const(i32_t, i.str())
+					gep := b.mod.add_instr(.get_element_ptr, b.cur_block, elem_ptr_type, [
+						alloca,
+						idx,
+					])
+					b.mod.add_instr(.store, b.cur_block, 0, [zero, gep])
+				}
+			}
+			return alloca
+		}
+	}
+
+	arr_type := b.get_array_type()
+	return b.mod.get_or_add_const(arr_type, '0')
 }
 
 fn (mut b Builder) build_string_inter_from_flat(c ast.Cursor) ValueID {
