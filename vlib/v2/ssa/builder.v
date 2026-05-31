@@ -5804,11 +5804,23 @@ fn (mut b Builder) build_call_or_cast_from_flat(c ast.Cursor) ValueID {
 fn (mut b Builder) build_as_cast_from_flat(c ast.Cursor) ValueID {
 	expr_c := c.edge(0)
 	typ_c := c.edge(1)
-	return b.build_as_cast(ast.AsCastExpr{
-		expr: expr_c.flat.decode_expr(expr_c.id)
-		typ:  typ_c.flat.decode_expr(typ_c.id)
-		pos:  c.pos()
-	})
+	val := b.build_expr_from_flat(expr_c)
+	target_type := b.ast_type_to_ssa_from_flat(typ_c)
+	if target_type == 0 || b.mod.values[val].typ == target_type {
+		return val
+	}
+	if b.ssa_type_is_sumtype(b.mod.values[val].typ) {
+		return b.build_sumtype_as_cast(val, target_type)
+	}
+	src_checked_type := b.get_checked_expr_type_from_flat(expr_c) or { return val }
+	match b.unwrap_alias_type(src_checked_type) {
+		types.SumType {
+			return b.build_sumtype_as_cast(val, target_type)
+		}
+		else {
+			return val
+		}
+	}
 }
 
 fn (mut b Builder) build_tuple_from_flat(c ast.Cursor) ValueID {
